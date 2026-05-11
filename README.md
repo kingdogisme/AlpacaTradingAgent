@@ -8,7 +8,7 @@
 
 <div align="center">
 
-🚀 [Enhanced Features](#enhanced-features) | ⚡ [Installation & Setup](#installation-and-setup) | 📦 [Package Usage](#alpacatradingagent-package) | 🌐 [Web Interface](#web-ui-usage) | 📖 [Complete Guide](#complete-guide) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
+🚀 [Enhanced Features](#enhanced-features) | 🧪 [Evaluation Foundation](#evaluation-foundation) | ⚡ [Installation & Setup](#installation-and-setup) | 📦 [Package Usage](#alpacatradingagent-package) | 🌐 [Web Interface](#web-ui-usage) | 📖 [Complete Guide](#complete-guide) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
 
 </div>
 
@@ -50,6 +50,14 @@ AlpacaTradingAgent introduces powerful new capabilities specifically designed fo
 - **Checkpoint Resume**: Optional per-symbol SQLite checkpoints allow failed LangGraph runs to resume while successful runs clean up automatically
 - **Safe Paths**: Report, cache, checkpoint, and log paths use safe ticker components, including crypto symbols like `BTC/USD -> BTC_USD`
 
+### 🧪 **Evaluation-To-Learning Foundation**
+- **Episode Ledger**: Every run can be indexed in local SQLite with structured episode, decision, reward, trace, experiment, critic, and memory-reference records
+- **Deterministic Reward Store**: Fixed-horizon delayed rewards compare raw return and benchmark-adjusted alpha without using an LLM judge as the score source
+- **Normalized Trace Spans**: Audit JSON is converted into joinable spans for prompts, LLM calls, tools, agent outputs, node events, and final decisions
+- **Experiment Registry**: Config hash, prompt version, model provider, selected analysts, memory policy, critic version, reward version, and leakage risk are tracked for comparable evaluations
+- **Critic and Memory Candidates**: Initial critic diagnostics produce failure tags and memory candidates, but do not auto-modify prompts or inject new memory into production decisions
+- **Offline Export**: JSONL export prepares the data shape needed for later supervised learning, contextual bandits, or offline RL experiments
+
 ### ⚡ **Automated Trading & Scheduling**
 - **Market Hours Trading**: Automatic execution during market hours
 - **Scheduled Analysis**: Configurable recurring analysis every N hours
@@ -82,6 +90,65 @@ AlpacaTradingAgent is a multi-agent trading framework that mirrors the dynamics 
 > AlpacaTradingAgent framework is designed for research and educational purposes. Trading performance may vary based on many factors, including the chosen backbone language models, model temperature, trading periods, the quality of data, and other non-deterministic factors. [It is not intended as financial, investment, or trading advice.](https://tauric.ai/disclaimer/)
 
 Our enhanced framework decomposes complex trading tasks into specialized roles while providing real-time market connectivity and execution capabilities.
+
+## Evaluation Foundation
+
+The project now includes a local evaluation subsystem under `tradingagents/eval/`.
+It moves the system beyond a pure LLM workflow executor by making each decision
+traceable, replayable, scoreable, and exportable. This is still **not** an
+auto-learning or RL trading system: prompts are not rewritten automatically,
+memory is not auto-promoted into production prompts, and model weights are not
+trained.
+
+By default, the ledger uses:
+
+```text
+~/.tradingagents/eval/agent_eval.sqlite
+```
+
+The main evaluation records are:
+
+- `episodes`: run metadata, symbol, date, config, selected analysts, status, final signal, and audit path
+- `decisions`: deterministic parsing of final and intermediate decision text into actions, confidence, horizon, thesis, invalidation, and risk fields
+- `rewards`: delayed fixed-horizon reward status and reward components
+- `trace_spans`: normalized references to audit events without duplicating full prompt or tool payloads
+- `experiments`: config hash, prompt/model versions, selected analysts, memory policy, critic version, reward version, and leakage risk
+- `critic_records`: diagnostic failure tags and improvement candidates tied to resolved rewards
+- `memory_items`, `memory_links`, `memory_retrievals`, `memory_promotions`: governed memory observation scaffolding for future Memory V2 work
+
+Useful commands:
+
+```bash
+# Collect historical low-leakage episodes. Live web/news tools are disabled by default.
+python -m tradingagents.eval collect \
+  --symbols AAPL,MSFT \
+  --dates 2026-01-02,2026-01-03 \
+  --config config.json
+
+# Resolve rewards for episodes whose holding period has matured.
+python -m tradingagents.eval score --as-of 2026-05-10
+
+# Normalize audit JSON into trace spans.
+python -m tradingagents.eval normalize-traces --since 2026-01-01
+
+# Create deterministic critic diagnostics for resolved episodes.
+python -m tradingagents.eval critique --due-only
+
+# Compare results by experiment, horizon, and symbol.
+python -m tradingagents.eval report \
+  --since 2026-01-01 \
+  --group-by experiment,horizon,symbol
+
+# Export joinable offline data for later modeling.
+python -m tradingagents.eval export \
+  --format jsonl \
+  --since 2026-01-01 \
+  --output eval_export.jsonl
+```
+
+See [docs/evolution-roadmap.md](docs/evolution-roadmap.md) for the full roadmap
+from evaluation foundation to Memory V2, critic pipelines, strategy libraries,
+and later offline policy/RL layers.
 
 ### Enhanced Analyst Team (5 Agents)
 - **Market Analyst**: Evaluates overall market conditions, sector trends, and market sentiment indicators
@@ -171,6 +238,7 @@ Set `LLM_PROVIDER` in `.env`, the CLI, or the WebUI. Supported providers include
 - `TRADINGAGENTS_RESULTS_DIR` for report output
 - `TRADINGAGENTS_CACHE_DIR` for cache and checkpoint files
 - `TRADINGAGENTS_MEMORY_LOG_PATH` for persistent decision memory
+- `TRADINGAGENTS_EPISODE_LEDGER_PATH` for the evaluation SQLite ledger
 
 3. **Restart the application** after setting up your API keys.
 
@@ -338,6 +406,10 @@ config["online_tools"] = True  # Use real-time data
 config["allow_shorts"] = False  # Investment mode: BUY/HOLD/SELL
 config["checkpoint_enabled"] = False  # Enable to resume failed graph runs
 config["memory_log_path"] = "~/.tradingagents/memory/trading_memory.md"
+config["episode_ledger_enabled"] = True
+config["episode_ledger_path"] = "~/.tradingagents/eval/agent_eval.sqlite"
+config["trading_horizon"] = "swing"  # swing, position, or trend
+config["trend_execution_enabled"] = False  # position/trend are research-only unless explicitly enabled
 config["news_global_openai_enabled"] = False  # Macro handles broad global context by default
 
 # Parallel execution settings (to avoid API overload)
