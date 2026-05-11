@@ -10,6 +10,17 @@ DEFAULT_CONFIG = {
         os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md"),
     ),
     "memory_log_max_entries": None,
+    "episode_ledger_enabled": True,
+    "episode_ledger_path": os.getenv(
+        "TRADINGAGENTS_EPISODE_LEDGER_PATH",
+        os.path.join(_TRADINGAGENTS_HOME, "eval", "agent_eval.sqlite"),
+    ),
+    "eval_reward_version": "v1_directional_alpha",
+    "eval_transaction_cost_bps": 10,
+    "eval_neutral_band_bps": {"swing": 100, "position": 300, "trend": 500},
+    "prompt_version": "default",
+    "memory_policy": "legacy",
+    "critic_version": "v1_diagnostic_tags",
     "checkpoint_enabled": False,
     # "data_dir": "/Users/yluo/Documents/Code/ScAI/FR1-data",
     "data_dir": "data/ScAI/FR1-data",
@@ -51,6 +62,25 @@ DEFAULT_CONFIG = {
     "max_recur_limit": 200,
     # Trading settings
     "allow_shorts": False,  # False = Investment mode (BUY/HOLD/SELL), True = Trading mode (LONG/NEUTRAL/SHORT)
+    "trading_horizon": "swing",  # swing = 2-10 days, position = 1-3 months, trend = 3-6 months
+    "trend_execution_enabled": False,  # Trend horizons are research-only unless explicitly enabled
+    "horizon_profiles": {
+        "swing": {
+            "label": "Swing",
+            "holding_period": "2-10 trading days",
+            "primary_timeframes": "1h/4h/1d",
+        },
+        "position": {
+            "label": "Position",
+            "holding_period": "1-3 months",
+            "primary_timeframes": "1d/1w",
+        },
+        "trend": {
+            "label": "Trend",
+            "holding_period": "3-6 months",
+            "primary_timeframes": "1w/1mo",
+        },
+    },
     # Execution settings
     "parallel_analysts": True,  # True = Run analysts in parallel for faster execution, False = Sequential execution
     "parallel_risk_first_round": True,  # Run Risky/Safe/Neutral in parallel only for round 1, then revert to linear flow

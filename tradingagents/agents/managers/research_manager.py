@@ -8,6 +8,8 @@ from ..schemas import ResearchPlan, render_research_plan
 from ..utils.agent_trading_modes import (
     ensure_final_transaction_proposal,
     extract_recommendation,
+    get_agent_horizon_context,
+    get_horizon_context,
     get_trading_mode_context,
 )
 from ..utils.memory import TradingMemoryLog
@@ -31,6 +33,8 @@ def create_research_manager(llm, memory, config=None):
         history = state["investment_debate_state"].get("history", "")
         investment_debate_state = state["investment_debate_state"]
         trading_context = get_trading_mode_context(config)
+        horizon_context = get_horizon_context(config)
+        horizon_agent_context = get_agent_horizon_context("trader", horizon_context)
         actions = trading_context["actions"]
         trading_mode = trading_context["mode"]
         final_format = trading_context["final_format"]
@@ -55,11 +59,23 @@ def create_research_manager(llm, memory, config=None):
         past_memory_str = ""
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
-        decision_memory_str = decision_log.get_past_context(ticker)
+        decision_memory_str = decision_log.get_past_context(
+            ticker,
+            horizon=horizon_context["horizon"],
+        )
 
         prompt = render_prompt(
             "managers/research_manager",
             actions=actions,
+            horizon_agent_context=horizon_agent_context,
+            horizon_label=horizon_context["label"],
+            holding_period=horizon_context["holding_period"],
+            primary_timeframes=horizon_context["primary_timeframes"],
+            research_only_note=(
+                "Trend-horizon execution is research-only unless explicitly enabled."
+                if horizon_context["research_only"]
+                else "Execution may follow the normal order setting when enabled."
+            ),
             claim_matrix=claim_matrix,
             all_reports_text=all_reports_text,
             debate_digest=debate_digest,

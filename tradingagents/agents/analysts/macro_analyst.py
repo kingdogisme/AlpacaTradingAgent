@@ -2,6 +2,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 import time
 import json
 from langchain_core.messages import AIMessage, ToolMessage
+from tradingagents.agents.utils.agent_trading_modes import (
+    get_agent_horizon_context,
+    get_horizon_context,
+)
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -21,6 +25,8 @@ def create_macro_analyst(llm, toolkit):
         try:
             current_date = state["trade_date"]
             ticker = state.get("company_of_interest", "MARKET")
+            horizon_context = get_horizon_context(toolkit.config)
+            horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
             fred_available = toolkit.has_fred()
             openai_available = toolkit.has_openai_web_search()
             
@@ -57,6 +63,10 @@ def create_macro_analyst(llm, toolkit):
 
             system_message = render_prompt(
                 "analysts/macro_system",
+                horizon_agent_context=horizon_agent_context,
+                horizon_label=horizon_context["label"],
+                holding_period=horizon_context["holding_period"],
+                primary_timeframes=horizon_context["primary_timeframes"],
                 source_guidance=source_guidance,
             )
             asset_context = (

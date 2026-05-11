@@ -3,6 +3,10 @@ from langchain_core.messages import AIMessage, ToolMessage
 import time
 import json
 import re
+from tradingagents.agents.utils.agent_trading_modes import (
+    get_agent_horizon_context,
+    get_horizon_context,
+)
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -61,13 +65,18 @@ def create_market_analyst(llm, toolkit):
         company_name = state["company_of_interest"]
         is_crypto = "/" in ticker or "USD" in ticker.upper() or "USDT" in ticker.upper()
         alpaca_available = is_crypto or toolkit.has_alpaca_credentials()
+        horizon_context = get_horizon_context(toolkit.config)
+        horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
+        is_trend_horizon = horizon_context["horizon"] in ("position", "trend")
 
         if toolkit.config["online_tools"] and alpaca_available:
-            tools = [
-                toolkit.get_technical_brief,
-                toolkit.get_alpaca_data_report,
-                toolkit.get_stockstats_indicators_report_online,
-            ]
+            tools = [toolkit.get_trend_brief if is_trend_horizon else toolkit.get_technical_brief]
+            tools.extend(
+                [
+                    toolkit.get_alpaca_data_report,
+                    toolkit.get_stockstats_indicators_report_online,
+                ]
+            )
         elif toolkit.config["online_tools"] and not alpaca_available:
             # Keep running with offline stockstats fallback when Alpaca credentials are unavailable.
             tools = [
@@ -79,6 +88,7 @@ def create_market_analyst(llm, toolkit):
                 tools.insert(0, toolkit.get_alpaca_data_report)
 
         technical_brief_available = toolkit.config["online_tools"] and alpaca_available
+        brief_tool_name = "get_trend_brief" if is_trend_horizon else "get_technical_brief"
         indicator_tool_name = (
             "get_stockstats_indicators_report_online"
             if technical_brief_available
@@ -87,7 +97,7 @@ def create_market_analyst(llm, toolkit):
         evidence_sources = []
         if technical_brief_available:
             evidence_sources.append(
-                "   - `get_technical_brief` for compact synthesized confirmation"
+                f"   - `{brief_tool_name}` for compact synthesized confirmation"
             )
         if alpaca_available:
             evidence_sources.append("   - `get_alpaca_data_report` for OHLCV context")
@@ -99,7 +109,18 @@ def create_market_analyst(llm, toolkit):
             + "\n"
         )
         if technical_brief_available:
-            workflow_step_two = """
+            if is_trend_horizon:
+                workflow_step_two = f"""
+2. **Call `get_trend_brief`** with the ticker, current date, and horizon='{horizon_context["horizon"]}'.
+   You will receive a JSON object focused on {horizon_context["holding_period"]} trend evidence:
+   - daily/weekly or weekly/monthly trend structure
+   - moving-average slopes and alignment
+   - 3M/6M/12M returns and drawdown from 52-week high
+   - relative strength vs benchmark
+   - trend invalidation level and review cadence
+"""
+            else:
+                workflow_step_two = """
 2. **Call `get_technical_brief`** with the ticker and current date.
    You will receive a JSON object with the following pre-analyzed sections for each timeframe:
    - `trend` – direction, strength (ADX), EMA slope, HH/HL, SMA 200 & distance
@@ -114,11 +135,19 @@ def create_market_analyst(llm, toolkit):
 """
         else:
             workflow_step_two = (
-                "\n2. **`get_technical_brief` is unavailable in this run.** "
+                f"\n2. **`{brief_tool_name}` is unavailable in this run.** "
                 "Build the cross-timeframe view from the available price and indicator tools instead.\n"
             )
 
-        iteration_guidance = (
+        if is_trend_horizon:
+            iteration_guidance = (
+                "\n3. **Actively gather horizon-appropriate evidence before concluding**:\n"
+                f"   - Focus on {horizon_context['primary_timeframes']} and {horizon_context['holding_period']} durability.\n"
+                "   - Prefer 200D/40W trend, 3M/6M/12M returns, relative strength, drawdown, and invalidation evidence over Stoch RSI/VWAP timing.\n"
+                "   - Use short-term indicators only as secondary timing context, not as the core thesis.\n"
+            )
+        else:
+            iteration_guidance = (
             "\n3. **Actively iterate tool calls before concluding**:\n"
             "   - Run at least 3 indicator-history calls across different indicators and at least 2 timeframes when the tool supports it.\n"
             "   - Example flow: momentum (`rsi_14`/`macd`) -> trend (`close_8_ema`, `close_21_ema`, `close_50_sma`) -> volatility/risk (`atr_14`, Bollinger).\n"
@@ -127,7 +156,7 @@ def create_market_analyst(llm, toolkit):
                 if alpaca_available
                 else "   - Do not request unavailable Alpaca data; rely on indicator history and explicitly state that limitation.\n"
             )
-        )
+            )
 
         system_intro = load_prompt(
             "analysts/market_intro_with_brief"
@@ -143,6 +172,10 @@ def create_market_analyst(llm, toolkit):
         system_message = render_prompt(
             "analysts/market_system",
             system_intro=system_intro,
+            horizon_agent_context=horizon_agent_context,
+            horizon_label=horizon_context["label"],
+            holding_period=horizon_context["holding_period"],
+            primary_timeframes=horizon_context["primary_timeframes"],
             workflow_intro=workflow_intro,
             workflow_step_two=workflow_step_two,
             iteration_guidance=iteration_guidance,

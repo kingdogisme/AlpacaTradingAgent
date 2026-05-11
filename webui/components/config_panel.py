@@ -11,6 +11,7 @@ from tradingagents.openai_model_registry import (
     get_llm_provider_options,
     get_model_options_for_provider,
 )
+from webui.i18n import t
 
 
 ANALYSTS = [
@@ -222,7 +223,7 @@ def _llm_param_controls(role, default_model):
     )
 
 
-def _model_panel(role, title, icon, default_model):
+def _model_panel(role, title, icon, default_model, lang="en"):
     prefix = f"{role}-llm"
     return html.Div(
         [
@@ -267,7 +268,7 @@ def _model_panel(role, title, icon, default_model):
                         [
                             dbc.AccordionItem(
                                 _llm_param_controls(role, default_model),
-                                title="Advanced parameters",
+                                title=t(lang, "config.advanced_parameters"),
                                 item_id=f"{role}-params",
                             )
                         ],
@@ -283,9 +284,9 @@ def _model_panel(role, title, icon, default_model):
     )
 
 
-def _run_button():
+def _run_button(lang="en"):
     return dbc.Button(
-        [html.I(className="fa-solid fa-play me-2"), "Start Analysis"],
+        [html.I(className="fa-solid fa-play me-2"), t(lang, "config.start_analysis")],
         id="control-btn",
         color="primary",
         size="lg",
@@ -293,11 +294,11 @@ def _run_button():
     )
 
 
-def _core_setup():
+def _core_setup(lang="en"):
     return html.Div(
         [
             _field(
-                "Symbols",
+                t(lang, "config.symbols"),
                 html.Div(
                     [
                         html.Div(
@@ -310,7 +311,7 @@ def _core_setup():
                                             type="text",
                                             value="",
                                             debounce=False,
-                                            placeholder="Type a symbol...",
+                                            placeholder=t(lang, "config.symbols.placeholder"),
                                             className="symbol-query-input",
                                         ),
                                     ],
@@ -338,13 +339,13 @@ def _core_setup():
             html.Div(
                 [
                     _field(
-                        "Research depth",
+                        t(lang, "config.research_depth"),
                         dbc.RadioItems(
                             id="research-depth",
                             options=[
-                                {"label": "Shallow", "value": "Shallow"},
-                                {"label": "Medium", "value": "Medium"},
-                                {"label": "Deep", "value": "Deep"},
+                                {"label": t(lang, "config.depth.shallow"), "value": "Shallow"},
+                                {"label": t(lang, "config.depth.medium"), "value": "Medium"},
+                                {"label": t(lang, "config.depth.deep"), "value": "Deep"},
                             ],
                             value="Shallow",
                             inline=True,
@@ -358,10 +359,31 @@ def _core_setup():
             ),
             html.Div(
                 [
+                    _field(
+                        t(lang, "config.trading_horizon"),
+                        dbc.RadioItems(
+                            id="trading-horizon",
+                            options=[
+                                {"label": t(lang, "config.horizon.swing"), "value": "swing"},
+                                {"label": t(lang, "config.horizon.position"), "value": "position"},
+                                {"label": t(lang, "config.horizon.trend"), "value": "trend"},
+                            ],
+                            value="swing",
+                            inline=True,
+                            className="segmented-radio",
+                        ),
+                        "timeline",
+                    ),
+                    html.Div(id="trading-horizon-info", className="config-status-slot"),
+                ],
+                className="config-two-column",
+            ),
+            html.Div(
+                [
                     html.Div(
                         dbc.Switch(
                             id="allow-shorts",
-                            label="Allow shorts",
+                            label=t(lang, "config.allow_shorts"),
                             value=False,
                             className="config-switch",
                         ),
@@ -376,7 +398,7 @@ def _core_setup():
     )
 
 
-def _schedule_and_trading():
+def _schedule_and_trading(lang="en"):
     return html.Div(
         [
             html.Div(
@@ -384,14 +406,14 @@ def _schedule_and_trading():
                     html.Div(
                         dbc.Switch(
                             id="loop-enabled",
-                            label="Loop mode",
+                            label=t(lang, "config.loop_mode"),
                             value=False,
                             className="config-switch",
                         ),
                         className="config-toggle-tile",
                     ),
                     _field(
-                        "Loop interval",
+                        t(lang, "config.loop_interval"),
                         dbc.Input(
                             id="loop-interval",
                             type="number",
@@ -411,14 +433,14 @@ def _schedule_and_trading():
                     html.Div(
                         dbc.Switch(
                             id="market-hour-enabled",
-                            label="Run at market hour",
+                            label=t(lang, "config.market_hour"),
                             value=False,
                             className="config-switch",
                         ),
                         className="config-toggle-tile",
                     ),
                     _field(
-                        "Trading hours",
+                        t(lang, "config.trading_hours"),
                         dbc.Input(
                             id="market-hours-input",
                             type="text",
@@ -438,14 +460,14 @@ def _schedule_and_trading():
                     html.Div(
                         dbc.Switch(
                             id="trade-after-analyze",
-                            label="Place order after analysis",
+                            label=t(lang, "config.trade_after"),
                             value=False,
                             className="config-switch",
                         ),
                         className="config-toggle-tile",
                     ),
                     _field(
-                        "Order amount",
+                        t(lang, "config.order_amount"),
                         dbc.InputGroup(
                             [
                                 dbc.InputGroupText("$"),
@@ -466,19 +488,37 @@ def _schedule_and_trading():
                 ],
                 className="config-two-column",
             ),
+            html.Div(
+                [
+                    html.Div(
+                        dbc.Switch(
+                            id="trend-execution-enabled",
+                            label=t(lang, "config.trend_execution"),
+                            value=False,
+                            className="config-switch",
+                        ),
+                        className="config-toggle-tile",
+                    ),
+                    html.Div(
+                        "Research-only unless trend execution is explicitly enabled.",
+                        className="config-muted-note",
+                    ),
+                ],
+                className="config-two-column",
+            ),
             html.Div(id="trade-after-analyze-info", className="config-status-slot"),
         ],
         className="config-section-body",
     )
 
 
-def _model_setup():
+def _model_setup(lang="en"):
     return html.Div(
         [
             html.Div(
                 [
                     _field(
-                        "LLM provider",
+                        t(lang, "config.provider"),
                         dbc.Select(
                             id="llm-provider",
                             options=get_llm_provider_options(),
@@ -489,11 +529,11 @@ def _model_setup():
                     ),
                     html.Div(
                         _field(
-                            "Endpoint override",
+                            t(lang, "config.endpoint_override"),
                             dbc.Input(
                                 id="backend-url",
                                 type="text",
-                                placeholder="Optional OpenAI-compatible endpoint",
+                                placeholder=t(lang, "config.endpoint_placeholder"),
                                 value="",
                                 className="config-input",
                             ),
@@ -509,13 +549,13 @@ def _model_setup():
                 [
                     html.Div(
                         _field(
-                            "Gemini thinking",
+                            t(lang, "config.gemini_thinking"),
                             dbc.Select(
                                 id="google-thinking-level",
                                 options=[
-                                    {"label": "Provider default", "value": ""},
-                                    {"label": "High thinking", "value": "high"},
-                                    {"label": "Minimal / disabled", "value": "minimal"},
+                                    {"label": t(lang, "config.provider_default"), "value": ""},
+                                    {"label": t(lang, "config.high_thinking"), "value": "high"},
+                                    {"label": t(lang, "config.minimal_disabled"), "value": "minimal"},
                                 ],
                                 value="",
                                 className="config-select",
@@ -527,14 +567,14 @@ def _model_setup():
                     ),
                     html.Div(
                         _field(
-                            "Claude effort",
+                            t(lang, "config.claude_effort"),
                             dbc.Select(
                                 id="anthropic-effort",
                                 options=[
-                                    {"label": "Provider default", "value": ""},
-                                    {"label": "High", "value": "high"},
-                                    {"label": "Medium", "value": "medium"},
-                                    {"label": "Low", "value": "low"},
+                                    {"label": t(lang, "config.provider_default"), "value": ""},
+                                    {"label": t(lang, "config.high"), "value": "high"},
+                                    {"label": t(lang, "config.medium"), "value": "medium"},
+                                    {"label": t(lang, "config.low"), "value": "low"},
                                 ],
                                 value="",
                                 className="config-select",
@@ -550,7 +590,7 @@ def _model_setup():
             html.Div(
                 [
                     _field(
-                        "Output language",
+                        t(lang, "config.output_language"),
                         dbc.Input(
                             id="output-language",
                             type="text",
@@ -562,7 +602,7 @@ def _model_setup():
                     html.Div(
                         dbc.Switch(
                             id="checkpoint-enabled",
-                            label="Enable checkpoint resume",
+                            label=t(lang, "config.checkpoint"),
                             value=False,
                             className="config-switch",
                         ),
@@ -573,8 +613,8 @@ def _model_setup():
             ),
             html.Div(
                 [
-                    _model_panel("quick", "Quick thinker", "bolt", "gpt-5.4-nano"),
-                    _model_panel("deep", "Deep thinker", "brain", "gpt-5.4-mini"),
+                    _model_panel("quick", t(lang, "config.quick_thinker"), "bolt", "gpt-5.4-nano", lang=lang),
+                    _model_panel("deep", t(lang, "config.deep_thinker"), "brain", "gpt-5.4-mini", lang=lang),
                 ],
                 className="model-grid",
             ),
@@ -583,7 +623,7 @@ def _model_setup():
     )
 
 
-def create_config_panel():
+def create_config_panel(lang="en"):
     """Create the configuration panel for the web UI."""
     return dbc.Card(
         dbc.CardBody(
@@ -592,14 +632,14 @@ def create_config_panel():
                     [
                         html.Div(
                             [
-                                html.H4("Analysis Configuration", className="config-title"),
-                                html.Div("Auditable multi-agent research", className="config-subtitle"),
+                                html.H4(t(lang, "config.title"), className="config-title"),
+                                html.Div(t(lang, "config.subtitle"), className="config-subtitle"),
                             ]
                         ),
                         html.Div(
                             [
                                 html.I(className="fa-solid fa-wand-magic-sparkles me-2"),
-                                "Live config",
+                                t(lang, "config.badge"),
                             ],
                             className="config-badge",
                         ),
@@ -609,18 +649,18 @@ def create_config_panel():
                 dbc.Accordion(
                     [
                         dbc.AccordionItem(
-                            _core_setup(),
-                            title=_accordion_title("fa-sliders", "Setup", "Symbols, analysts, depth"),
+                            _core_setup(lang=lang),
+                            title=_accordion_title("fa-sliders", t(lang, "config.setup.title"), t(lang, "config.setup.subtitle")),
                             item_id="setup",
                         ),
                         dbc.AccordionItem(
-                            _schedule_and_trading(),
-                            title=_accordion_title("fa-calendar-check", "Execution", "Schedule and order controls"),
+                            _schedule_and_trading(lang=lang),
+                            title=_accordion_title("fa-calendar-check", t(lang, "config.execution.title"), t(lang, "config.execution.subtitle")),
                             item_id="automation",
                         ),
                         dbc.AccordionItem(
-                            _model_setup(),
-                            title=_accordion_title("fa-microchip", "LLM Models", "Provider, model choice, checkpoints"),
+                            _model_setup(lang=lang),
+                            title=_accordion_title("fa-microchip", t(lang, "config.models.title"), t(lang, "config.models.subtitle")),
                             item_id="models",
                         ),
                     ],
@@ -630,7 +670,7 @@ def create_config_panel():
                 ),
                 html.Div(
                     [
-                        html.Div(id="control-button-container", children=[_run_button()]),
+                        html.Div(id="control-button-container", children=[_run_button(lang=lang)]),
                         html.Div(id="result-text", className="result-status mt-3"),
                     ],
                     className="config-action-bar",

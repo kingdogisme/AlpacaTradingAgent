@@ -15,6 +15,7 @@ from webui.components.reports_panel import create_reports_panel
 from webui.components.alpaca_account import render_alpaca_account_section
 from webui.components.api_config_modal import create_api_config_modal
 from webui.config.constants import COLORS, REFRESH_INTERVALS
+from webui.i18n import t
 
 
 def create_intervals():
@@ -57,17 +58,17 @@ def create_stores():
     ]
 
 
-def create_footer():
+def create_footer(lang="en"):
     """Create the footer section"""
     return dbc.Row(
         [
             dbc.Col(
-                dbc.Button("Refresh Status", id="refresh-btn", color="secondary", className="mb-2"),
+                dbc.Button(t(lang, "footer.refresh"), id="refresh-btn", color="secondary", className="mb-2"),
                 width="auto",
                 className="d-flex justify-content-center"
             ),
             dbc.Col(
-                html.Div("Status updates automatically every 0.5 seconds", className="text-info small"),
+                html.Div(t(lang, "footer.auto_refresh"), className="text-info small"),
                 width="auto",
                 className="d-flex align-items-center"
             ),
@@ -76,39 +77,55 @@ def create_footer():
     )
 
 
-def create_main_layout():
-    """Create the main application layout"""
-    
-    # Create UI components
-    header = create_header()
-    config_card = create_config_panel()
-    status_card = create_status_panel()
-    chart_card = create_chart_panel()
-    decision_card = create_decision_panel()
+def create_main_content(lang="en"):
+    """Create the main visible content for the application layout."""
+
+    header = create_header(lang=lang)
+    config_card = create_config_panel(lang=lang)
+    status_card = create_status_panel(lang=lang)
+    chart_card = create_chart_panel(lang=lang)
+    decision_card = create_decision_panel(lang=lang)
     reports_card = create_reports_panel()
-    
-    # Create Alpaca account card
+
     alpaca_account_card = dbc.Card(
         dbc.CardBody([
-            render_alpaca_account_section()
+            render_alpaca_account_section(lang=lang)
         ]),
         className="mb-4"
     )
-    
-    # Create API config modal
-    api_config_modal = create_api_config_modal()
-    
-    # Assemble the layout
+
+    return [
+        header,
+        alpaca_account_card,
+        dbc.Row([
+            dbc.Col(config_card, md=6),
+            dbc.Col([
+                chart_card,
+                html.Div(className="mb-3"),
+                status_card,
+                html.Div(className="mb-3"),
+                decision_card,
+            ], md=6)
+        ]),
+        reports_card,
+        html.Div(className="mt-4"),
+        create_footer(lang=lang),
+    ]
+
+
+def create_main_layout(lang="zh"):
+    """Create the main application layout"""
+
+    api_config_modal = html.Div(
+        create_api_config_modal(lang=lang),
+        id="api-config-modal-container"
+    )
+
     layout = dbc.Container(
         [
-            # Intervals and stores
             *create_intervals(),
             *create_stores(),
-            
-            # API Configuration Modal
             api_config_modal,
-            
-            # Client-side script to handle iframe messages for prompt modal
             html.Script("""
                 window.addEventListener('message', function(event) {
                     if (event.data && event.data.type === 'showPrompt') {
@@ -162,22 +179,7 @@ def create_main_layout():
                 });
             """),
             
-            # Main content
-            header,
-            alpaca_account_card,
-            dbc.Row([
-                dbc.Col(config_card, md=6),
-                dbc.Col([
-                    chart_card,
-                    html.Div(className="mb-3"),  # Add some spacing
-                    status_card,
-                    html.Div(className="mb-3"),  # Add some spacing
-                    decision_card,
-                ], md=6)
-            ]),
-            reports_card,
-            html.Div(className="mt-4"),
-            create_footer(),
+            html.Div(create_main_content(lang=lang), id="ui-content"),
         ],
         fluid=True,
         className="p-4",

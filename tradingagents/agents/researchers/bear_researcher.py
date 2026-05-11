@@ -5,6 +5,7 @@ from ..utils.report_context import (
     get_agent_context_bundle,
     build_debate_digest,
 )
+from ..utils.agent_trading_modes import get_agent_horizon_context, get_horizon_context
 from tradingagents.prompts import render_prompt
 
 # Import prompt capture utility
@@ -16,13 +17,15 @@ except ImportError:
         pass
 
 
-def create_bear_researcher(llm, memory):
+def create_bear_researcher(llm, memory, config=None):
     def bear_node(state) -> dict:
         investment_debate_state = state["investment_debate_state"]
         history = investment_debate_state.get("history", "")
         bear_history = investment_debate_state.get("bear_history", "")
 
         current_response = investment_debate_state.get("current_response", "")
+        horizon_context = get_horizon_context(config)
+        horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
         context_bundle = get_agent_context_bundle(
             state,
             agent_role="researchers/bear_researcher",
@@ -43,6 +46,7 @@ def create_bear_researcher(llm, memory):
 
         prompt = render_prompt(
             "researchers/bear_researcher",
+            horizon_agent_context=horizon_agent_context,
             claim_matrix=claim_matrix,
             all_reports_text=all_reports_text,
             debate_digest=debate_digest,

@@ -158,3 +158,53 @@ class TechnicalBrief(BaseModel):
     raw_prices: dict = Field(
         description="Snapshot: last_close, prev_close, daily_change_pct"
     )
+
+
+class RelativeStrengthState(BaseModel):
+    benchmark: str
+    return_3m: float = Field(description="Asset return over roughly 3 months (%)")
+    return_6m: float = Field(description="Asset return over roughly 6 months (%)")
+    return_12m: float = Field(description="Asset return over roughly 12 months (%)")
+    benchmark_return_3m: float = Field(description="Benchmark return over roughly 3 months (%)")
+    benchmark_return_6m: float = Field(description="Benchmark return over roughly 6 months (%)")
+    benchmark_return_12m: float = Field(description="Benchmark return over roughly 12 months (%)")
+    relative_3m: float = Field(description="Asset minus benchmark return over roughly 3 months")
+    relative_6m: float = Field(description="Asset minus benchmark return over roughly 6 months")
+    relative_12m: float = Field(description="Asset minus benchmark return over roughly 12 months")
+    rating: Literal["outperforming", "neutral", "underperforming"]
+
+
+class TrendInvalidation(BaseModel):
+    level: float
+    basis: str
+    drawdown_from_52w_high: float
+
+
+class RegimeAlignment(BaseModel):
+    direction: Direction
+    confidence: Literal["high", "medium", "low"]
+    notes: str
+
+
+class TrendTimeframeBrief(BaseModel):
+    timeframe: str
+    close: float
+    trend_direction: Direction
+    trend_strength: Strength
+    ma_values: dict
+    ma_slopes: dict
+    price_vs_long_ma_pct: float
+    higher_highs: bool
+    higher_lows: bool
+
+
+class TrendBrief(BaseModel):
+    symbol: str
+    horizon: Literal["position", "trend"]
+    generated_at: str = Field(description="ISO-8601 timestamp of generation")
+    holding_period: str
+    timeframes: List[TrendTimeframeBrief]
+    relative_strength: RelativeStrengthState
+    invalidation: TrendInvalidation
+    regime_alignment: RegimeAlignment
+    raw_prices: dict

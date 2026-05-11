@@ -168,17 +168,25 @@ class TradingMemoryLog:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._max_entries = cfg.get("memory_log_max_entries")
 
-    def store_decision(self, ticker: str, trade_date: str, final_trade_decision: str, trading_mode: str = "investment") -> None:
+    def store_decision(
+        self,
+        ticker: str,
+        trade_date: str,
+        final_trade_decision: str,
+        trading_mode: str = "investment",
+        horizon: str = "swing",
+    ) -> None:
         if not self._log_path:
             return
+        horizon = self._normalize_horizon(horizon)
         if self._log_path.exists():
             raw = self._log_path.read_text(encoding="utf-8")
             for line in raw.splitlines():
-                if line.startswith(f"[{trade_date} | {ticker} |") and line.endswith("| pending]"):
+                if line.startswith(f"[{trade_date} | {ticker} | {horizon} |") and line.endswith("| pending]"):
                     return
         action = extract_recommendation(final_trade_decision, trading_mode) or "UNKNOWN"
         rating = self._extract_advisory_rating(final_trade_decision)
-        tag = f"[{trade_date} | {ticker} | {action} | {rating or 'n/a'} | pending]"
+        tag = f"[{trade_date} | {ticker} | {horizon} | {action} | {rating or 'n/a'} | pending]"
         with open(self._log_path, "a", encoding="utf-8") as f:
             f.write(f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}")
 
@@ -199,20 +207,40 @@ class TradingMemoryLog:
             return entries
         return [e for e in entries if e.get("ticker") == ticker]
 
-    def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
+    def get_past_context(
+        self,
+        ticker: str,
+        n_same: int = 5,
+        n_cross: int = 3,
+        horizon: str = "swing",
+    ) -> str:
         entries = [e for e in self.load_entries() if not e.get("pending")]
-        same, cross = [], []
+        horizon = self._normalize_horizon(horizon)
+        same_horizon, same_other_horizon, cross = [], [], []
         for entry in reversed(entries):
-            if entry["ticker"] == ticker and len(same) < n_same:
-                same.append(entry)
+            if (
+                entry["ticker"] == ticker
+                and entry.get("horizon") == horizon
+                and len(same_horizon) < n_same
+            ):
+                same_horizon.append(entry)
+            elif entry["ticker"] == ticker and len(same_other_horizon) < max(1, n_same // 2):
+                same_other_horizon.append(entry)
             elif entry["ticker"] != ticker and len(cross) < n_cross:
                 cross.append(entry)
-            if len(same) >= n_same and len(cross) >= n_cross:
+            if (
+                len(same_horizon) >= n_same
+                and len(same_other_horizon) >= max(1, n_same // 2)
+                and len(cross) >= n_cross
+            ):
                 break
         parts = []
-        if same:
-            parts.append(f"Past analyses of {ticker} (most recent first):")
-            parts.extend(self._format_full(e) for e in same)
+        if same_horizon:
+            parts.append(f"Past {horizon} analyses of {ticker} (most recent first):")
+            parts.extend(self._format_full(e) for e in same_horizon)
+        if same_other_horizon:
+            parts.append(f"Other-horizon analyses of {ticker}:")
+            parts.extend(self._format_reflection_only(e) for e in same_other_horizon)
         if cross:
             parts.append("Recent cross-ticker lessons:")
             parts.extend(self._format_reflection_only(e) for e in cross)
@@ -226,6 +254,7 @@ class TradingMemoryLog:
         alpha_return: float | None,
         holding_days: int,
         reflection: str,
+        horizon: str | None = None,
     ) -> None:
         self.batch_update_with_outcomes([
             {
@@ -235,6 +264,7 @@ class TradingMemoryLog:
                 "alpha_return": alpha_return,
                 "holding_days": holding_days,
                 "reflection": reflection,
+                "horizon": horizon,
             }
         ])
 
@@ -243,7 +273,12 @@ class TradingMemoryLog:
             return
         text = self._log_path.read_text(encoding="utf-8")
         blocks = text.split(self._SEPARATOR)
-        update_map = {(u["trade_date"], u["ticker"]): u for u in updates}
+        normalized_updates = []
+        for update in updates:
+            normalized = dict(update)
+            if "horizon" in normalized and normalized["horizon"] is not None:
+                normalized["horizon"] = self._normalize_horizon(normalized["horizon"])
+            normalized_updates.append(normalized)
         new_blocks = []
         for block in blocks:
             stripped = block.strip()
@@ -253,19 +288,25 @@ class TradingMemoryLog:
             lines = stripped.splitlines()
             tag_line = lines[0].strip()
             matched = False
-            for (trade_date, ticker), upd in list(update_map.items()):
-                if tag_line.startswith(f"[{trade_date} | {ticker} |") and tag_line.endswith("| pending]"):
-                    fields = [f.strip() for f in tag_line[1:-1].split("|")]
+            if tag_line.endswith("| pending]"):
+                fields = [f.strip() for f in tag_line[1:-1].split("|")]
+                parsed_tag = self._parse_tag_fields(fields)
+                for index, upd in enumerate(normalized_updates):
+                    if upd["trade_date"] != parsed_tag["date"] or upd["ticker"] != parsed_tag["ticker"]:
+                        continue
+                    update_horizon = upd.get("horizon")
+                    if update_horizon is not None and update_horizon != parsed_tag["horizon"]:
+                        continue
                     raw_pct = f"{upd['raw_return']:+.1%}"
                     alpha_value = upd.get("alpha_return")
                     alpha_pct = f"{alpha_value:+.1%}" if alpha_value is not None else "n/a"
                     new_tag = (
-                        f"[{trade_date} | {ticker} | {fields[2]} | {fields[3]} "
-                        f"| {raw_pct} | {alpha_pct} | {upd['holding_days']}d]"
+                        f"[{parsed_tag['date']} | {parsed_tag['ticker']} | {parsed_tag['horizon']} | "
+                        f"{parsed_tag['action']} | {parsed_tag['rating']} | {raw_pct} | {alpha_pct} | {upd['holding_days']}d]"
                     )
                     rest = "\n".join(lines[1:]).lstrip()
                     new_blocks.append(f"{new_tag}\n\n{rest}\n\nREFLECTION:\n{upd['reflection']}")
-                    del update_map[(trade_date, ticker)]
+                    del normalized_updates[index]
                     matched = True
                     break
             if not matched:
@@ -295,25 +336,19 @@ class TradingMemoryLog:
         fields = [f.strip() for f in lines[0][1:-1].split("|")]
         if len(fields) < 5:
             return None
+        parsed_tag = self._parse_tag_fields(fields)
         body = "\n".join(lines[1:]).strip()
         decision = self._DECISION_RE.search(body)
         reflection = self._REFLECTION_RE.search(body)
         return {
-            "date": fields[0],
-            "ticker": fields[1],
-            "action": fields[2],
-            "rating": fields[3],
-            "pending": fields[4] == "pending",
-            "raw": fields[4] if len(fields) > 5 else None,
-            "alpha": fields[5] if len(fields) > 6 else None,
-            "holding": fields[6] if len(fields) > 6 else None,
+            **parsed_tag,
             "decision": decision.group(1).strip() if decision else "",
             "reflection": reflection.group(1).strip() if reflection else "",
         }
 
     def _format_full(self, entry: dict) -> str:
         tag = (
-            f"[{entry['date']} | {entry['ticker']} | {entry['action']} | {entry['rating']} "
+            f"[{entry['date']} | {entry['ticker']} | {entry.get('horizon', 'swing')} | {entry['action']} | {entry['rating']} "
             f"| {entry.get('raw') or 'n/a'} | {entry.get('alpha') or 'n/a'} | {entry.get('holding') or 'n/a'}]"
         )
         parts = [tag, f"DECISION:\n{entry['decision']}"]
@@ -322,8 +357,43 @@ class TradingMemoryLog:
         return "\n\n".join(parts)
 
     def _format_reflection_only(self, entry: dict) -> str:
-        tag = f"[{entry['date']} | {entry['ticker']} | {entry['action']} | {entry.get('raw') or 'n/a'}]"
+        tag = f"[{entry['date']} | {entry['ticker']} | {entry.get('horizon', 'swing')} | {entry['action']} | {entry.get('raw') or 'n/a'}]"
         return f"{tag}\n{entry.get('reflection') or entry.get('decision', '')[:300]}"
+
+    @staticmethod
+    def _normalize_horizon(horizon: str | None) -> str:
+        value = str(horizon or "swing").strip().lower()
+        return value if value in {"swing", "position", "trend"} else "swing"
+
+    def _parse_tag_fields(self, fields: list[str]) -> dict:
+        # New format: [date | ticker | horizon | action | rating | pending]
+        if len(fields) >= 6 and fields[2] in {"swing", "position", "trend"}:
+            pending = fields[5] == "pending"
+            return {
+                "date": fields[0],
+                "ticker": fields[1],
+                "horizon": fields[2],
+                "action": fields[3],
+                "rating": fields[4],
+                "pending": pending,
+                "raw": None if pending else fields[5],
+                "alpha": None if pending or len(fields) <= 6 else fields[6],
+                "holding": fields[7] if len(fields) > 7 else None,
+            }
+
+        # Backward-compatible legacy format: [date | ticker | action | rating | pending]
+        pending = fields[4] == "pending"
+        return {
+            "date": fields[0],
+            "ticker": fields[1],
+            "horizon": "swing",
+            "action": fields[2],
+            "rating": fields[3],
+            "pending": pending,
+            "raw": None if pending else fields[4],
+            "alpha": None if pending or len(fields) <= 5 else fields[5],
+            "holding": fields[6] if len(fields) > 6 else None,
+        }
 
     @staticmethod
     def _extract_advisory_rating(text: str) -> str | None:

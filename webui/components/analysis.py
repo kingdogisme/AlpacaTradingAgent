@@ -7,10 +7,60 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.checkpointer import clear_checkpoint
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.run_logger import get_run_audit_logger
+from tradingagents.eval import EpisodeLedger
 from tradingagents.dataflows.alpaca_utils import AlpacaUtils
 from tradingagents.agents.utils.agent_trading_modes import extract_recommendation
 from webui.utils.state import app_state
 from webui.utils.charts import create_chart
+
+
+def _safe_ledger(config):
+    if not config.get("episode_ledger_enabled", True):
+        return None
+    try:
+        return EpisodeLedger(config.get("episode_ledger_path"))
+    except Exception as exc:
+        print(f"[EVAL] Episode ledger unavailable: {exc}")
+        return None
+
+
+def _ledger_start(ledger, run_id, ticker, trade_date, config, selected_analysts, metadata):
+    if not ledger or not run_id:
+        return
+    try:
+        episode_metadata = {
+            "data_leakage_risk": "high" if config.get("online_tools", True) else "low",
+            **metadata,
+            **(config.get("episode_ledger_metadata") or {}),
+        }
+        ledger.start_episode(
+            run_id=run_id,
+            symbol=ticker,
+            trade_date=str(trade_date),
+            config=config,
+            selected_analysts=selected_analysts,
+            metadata=episode_metadata,
+        )
+    except Exception as exc:
+        print(f"[EVAL] Failed to start episode ledger entry: {exc}")
+
+
+def _ledger_complete(ledger, run_id, final_state, final_signal, audit_path):
+    if not ledger or not run_id:
+        return
+    try:
+        ledger.complete_episode(run_id, final_state, final_signal, audit_path)
+    except Exception as exc:
+        print(f"[EVAL] Failed to complete episode ledger entry: {exc}")
+
+
+def _ledger_fail(ledger, run_id, error_message):
+    if not ledger or not run_id:
+        return
+    try:
+        ledger.fail_episode(run_id, error_message)
+    except Exception as exc:
+        print(f"[EVAL] Failed to mark episode failure: {exc}")
 
 
 def execute_trade_after_analysis(ticker, allow_shorts, trade_amount):
@@ -123,6 +173,8 @@ def run_analysis(
     output_language="English",
     checkpoint_enabled=False,
     provider_settings=None,
+    trading_horizon="swing",
+    trend_execution_enabled=False,
     progress=None,
 ):
     """Run the trading analysis using current/real-time data
@@ -133,8 +185,11 @@ def run_analysis(
     """
     run_logger = get_run_audit_logger()
     run_started = False
+    run_id = None
+    ledger = None
     final_state = None
     current_date = None
+    current_state = None
 
     try:
         # Always use current date for real-time analysis
@@ -175,13 +230,19 @@ def run_analysis(
         config["backend_url"] = backend_url or None
         config["output_language"] = output_language or "English"
         config["checkpoint_enabled"] = bool(checkpoint_enabled)
+        horizon = str(trading_horizon or "swing").strip().lower()
+        config["trading_horizon"] = horizon if horizon in {"swing", "position", "trend"} else "swing"
+        config["trend_execution_enabled"] = bool(trend_execution_enabled)
         for key, value in (provider_settings or {}).items():
             if value not in (None, ""):
                 config[key] = value
+        current_state["trading_horizon"] = config["trading_horizon"]
+        current_state["trend_execution_enabled"] = config["trend_execution_enabled"]
 
         # Initialize TradingAgentsGraph
         print(f"Initializing TradingAgentsGraph with analysts: {selected_analysts}")
         graph = TradingAgentsGraph(selected_analysts, config=config, debug=True)
+        ledger = _safe_ledger(config)
         graph._resolve_memory_log_outcomes(ticker, current_date)
         init_agent_state = graph.propagator.create_initial_state(ticker, current_date)
         run_logger.start_run(
@@ -189,6 +250,16 @@ def run_analysis(
             trade_date=current_date,
             config=config,
             metadata={"debug": True, "source": "webui_stream"},
+        )
+        run_id = run_logger.get_active_run_id(symbol=ticker)
+        _ledger_start(
+            ledger,
+            run_id,
+            ticker,
+            current_date,
+            config,
+            selected_analysts,
+            {"debug": True, "source": "webui_stream"},
         )
         run_started = True
         run_logger.log_state_snapshot(
@@ -255,17 +326,20 @@ def run_analysis(
             },
             symbol=ticker,
         )
+        audit_path = run_logger.get_run_file_path(run_id=run_id, symbol=ticker)
         run_logger.finish_run(
             symbol=ticker,
             status="completed",
             final_state=final_state,
             final_signal=decision,
         )
+        _ledger_complete(ledger, run_id, final_state, decision, audit_path)
         graph.memory_log.store_decision(
             ticker=ticker,
             trade_date=current_date,
             final_trade_decision=final_state["final_trade_decision"],
             trading_mode=final_state.get("trading_mode", config.get("trading_mode", "investment")),
+            horizon=final_state.get("trading_horizon", config.get("trading_horizon", "swing")),
         )
         if config.get("checkpoint_enabled", False):
             clear_checkpoint(config["data_cache_dir"], ticker, current_date)
@@ -283,6 +357,9 @@ def run_analysis(
             "ticker": ticker,
             "date": current_date,
             "decision": decision,
+            "trading_horizon": config["trading_horizon"],
+            "trend_research_only": config["trading_horizon"] in {"position", "trend"}
+            and not config.get("trend_execution_enabled", False),
             "full_state": final_state,
         }
 
@@ -298,8 +375,24 @@ def run_analysis(
         print(f"[TRADE]   - trade_enabled: {trade_enabled}")
         print(f"[TRADE]   - trade_amount: {trade_amount}")
         print(f"[TRADE]   - allow_shorts: {allow_shorts}")
+        print(f"[TRADE]   - trading_horizon: {config['trading_horizon']}")
+        print(f"[TRADE]   - trend_execution_enabled: {config['trend_execution_enabled']}")
 
-        if trade_enabled:
+        trend_execution_blocked = (
+            config["trading_horizon"] in {"position", "trend"}
+            and not config.get("trend_execution_enabled", False)
+        )
+
+        if trade_enabled and trend_execution_blocked:
+            print(
+                f"[TRADE] {config['trading_horizon']} horizon is research-only; "
+                "skipping Alpaca execution because trend execution is not explicitly enabled"
+            )
+            current_state["trading_results"] = {
+                "status": "research_only",
+                "message": "Trend-horizon execution is disabled; analysis only.",
+            }
+        elif trade_enabled:
             print(f"[TRADE] Trading enabled for {ticker}, executing trade with ${trade_amount}")
             execute_trade_after_analysis(ticker, allow_shorts, trade_amount)
         else:
@@ -313,6 +406,7 @@ def run_analysis(
         import traceback
         traceback.print_exc()
         if run_started:
+            _ledger_fail(ledger, run_id, str(e))
             run_logger.finish_run(
                 symbol=ticker,
                 status="failed",
@@ -325,7 +419,8 @@ def run_analysis(
     finally:
         # Mark analysis as no longer running
         print(f"Real-time analysis for {ticker} completed")
-        current_state["analysis_running"] = False
+        if current_state:
+            current_state["analysis_running"] = False
 
     return "Real-time analysis complete"
 
@@ -348,6 +443,8 @@ def start_analysis(
     output_language="English",
     checkpoint_enabled=False,
     provider_settings=None,
+    trading_horizon="swing",
+    trend_execution_enabled=False,
     progress=None,
 ):
     """Start real-time analysis function for the UI"""
@@ -406,10 +503,23 @@ def start_analysis(
         output_language=output_language,
         checkpoint_enabled=checkpoint_enabled,
         provider_settings=provider_settings,
+        trading_horizon=trading_horizon,
+        trend_execution_enabled=trend_execution_enabled,
         progress=progress,
     )
 
     # Update the status message with more details
     trading_mode = "Trading Mode (LONG/NEUTRAL/SHORT)" if allow_shorts else "Investment Mode (BUY/HOLD/SELL)"
+    horizon_label = {
+        "swing": "Swing",
+        "position": "Position",
+        "trend": "Trend",
+    }.get(str(trading_horizon or "swing").lower(), "Swing")
+    research_only_text = (
+        " (research-only unless trend execution is explicitly enabled)"
+        if str(trading_horizon or "swing").lower() in {"position", "trend"}
+        and not trend_execution_enabled
+        else ""
+    )
     trade_text = f" with ${getattr(app_state, 'trade_amount', 1000)} optional order execution" if getattr(app_state, 'trade_enabled', False) else ""
-    return f"Real-time analysis started for {ticker} with {len(selected_analysts)} analysts in {trading_mode}{trade_text} using parallel execution and current market data. Status table will update automatically."
+    return f"Real-time analysis started for {ticker} with {len(selected_analysts)} analysts in {trading_mode}, {horizon_label} horizon{research_only_text}{trade_text} using parallel execution and current market data. Status table will update automatically."

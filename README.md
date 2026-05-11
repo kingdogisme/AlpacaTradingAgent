@@ -175,6 +175,7 @@ Set `LLM_PROVIDER` in `.env`, the CLI, or the WebUI. Supported providers include
 3. **Restart the application** after setting up your API keys.
 
 > **Note**: Without valid Alpaca API keys, the application will fall back to demo mode without trading capabilities.
+> Trend-horizon Alpaca execution gating is enforced in the WebUI; the CLI remains analysis-only even when trend execution semantics are enabled for prompts and logging.
 
 ### CLI Usage
 
@@ -187,18 +188,27 @@ The CLI now supports multiple symbols and crypto assets:
 - Single stock: `NVDA`
 - Single crypto: `BTC/USD`
 - Multiple mixed assets: `NVDA, ETH/USD, AAPL, BTC/USD`
-- Provider/model selection, custom model IDs, checkpoint resume, and provider-specific settings are available from the CLI prompts.
+- Provider/model selection, custom model IDs, checkpoint resume, trading horizon selection, and provider-specific settings are available from the CLI prompts.
+- For `position` and `trend` horizons, the CLI can mark runs as execution-enabled for prompt/log semantics, but it still does not place Alpaca orders.
 
 ### Web UI Usage
 
 Launch the enhanced Dash-based web interface:
 
 ```bash
-python run_webui_dash.py
+python run_webui_dash.py --port 7860
+```
+
+If you open the app through a preview/proxy URL, start it with the same base
+path so Dash serves its assets and callback endpoints under that prefix:
+
+```bash
+python run_webui_dash.py --port 7860 --base-path /proxy/7860/
 ```
 
 Common options:
 - `--port PORT`: Specify a custom port (default: 7860)
+- `--base-path PATH`: Serve Dash under a URL prefix for preview/proxy access, for example `/proxy/7860/`
 - `--share`: Create a public link to share with others
 - `--server-name`: Specify the server name/IP to bind to (default: 127.0.0.1)
 - `--debug`: Run in debug mode with more logging

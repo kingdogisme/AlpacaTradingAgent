@@ -5,7 +5,10 @@ from cli.models import AnalystType
 from tradingagents.openai_model_registry import (
     get_llm_provider_options,
     get_model_options_for_provider,
+    get_model_options_with_status,
 )
+
+console = console.Console()
 
 ANALYST_ORDER = [
     ("Market Analyst", AnalystType.MARKET),
@@ -127,6 +130,40 @@ def select_research_depth() -> int:
     return choice
 
 
+def select_trading_horizon() -> str:
+    """Select the trading horizon. Swing remains the default behavior."""
+    options = [
+        ("Swing - 2-10 trading days (current default)", "swing"),
+        ("Position - 1-3 months trend holding", "position"),
+        ("Trend - 3-6 months quarterly trend research", "trend"),
+    ]
+    choice = questionary.select(
+        "Select Your [Trading Horizon]:",
+        choices=[questionary.Choice(display, value=value) for display, value in options],
+        default="swing",
+        instruction="\n- Use arrow keys to navigate\n- Press Enter to select",
+        style=questionary.Style(
+            [
+                ("selected", "fg:yellow noinherit"),
+                ("highlighted", "fg:yellow noinherit"),
+                ("pointer", "fg:yellow noinherit"),
+            ]
+        ),
+    ).ask()
+
+    return choice or "swing"
+
+
+def select_trend_execution_enabled() -> bool:
+    return bool(
+        questionary.confirm(
+            "Enable trend-horizon execution semantics? This affects prompts and logs only; CLI still does not place orders.",
+            default=False,
+            style=questionary.Style([("question", "fg:yellow")]),
+        ).ask()
+    )
+
+
 def select_llm_provider() -> str:
     provider_options = [
         (option["label"], option["value"])
@@ -219,12 +256,25 @@ def _prompt_custom_model_id(provider: str, mode: str) -> str:
     return model.strip()
 
 
+def _print_model_discovery_status(provider: str, role: str) -> List[Dict[str, str]]:
+    result = get_model_options_with_status(provider, role)
+    source = result["source"]
+    message = result["message"]
+    if source == "dynamic":
+        console.print(f"[green]Model discovery:[/green] {message}")
+    elif source == "fallback":
+        console.print(f"[yellow]Model discovery fallback:[/yellow] {message}")
+    else:
+        console.print(f"[cyan]Model catalog:[/cyan] {message}")
+    return result["options"]
+
+
 def select_shallow_thinking_agent(provider: str = "openai") -> str:
     """Select shallow thinking llm engine using an interactive selection."""
 
     SHALLOW_AGENT_OPTIONS = [
         (option["label"], option["value"])
-        for option in get_model_options_for_provider(provider, "quick")
+        for option in _print_model_discovery_status(provider, "quick")
     ]
 
     choice = questionary.select(
@@ -260,7 +310,7 @@ def select_deep_thinking_agent(provider: str = "openai") -> str:
 
     DEEP_AGENT_OPTIONS = [
         (option["label"], option["value"])
-        for option in get_model_options_for_provider(provider, "deep")
+        for option in _print_model_discovery_status(provider, "deep")
     ]
 
     choice = questionary.select(

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.agents.utils.memory import TradingMemoryLog
 
 
 class FakeLLM:
@@ -62,6 +63,7 @@ def _final_state(ticker, trade_date):
         },
         "investment_plan": "investment plan",
         "final_trade_decision": "risk decision\nFINAL TRANSACTION PROPOSAL: **BUY**",
+        "trading_horizon": "swing",
     }
 
 
@@ -81,6 +83,7 @@ class MockedTradingGraphTests(unittest.TestCase):
                             "data_cache_dir": str(tmp_path / f"cache-{safe_ticker}"),
                             "results_dir": str(tmp_path / "results"),
                             "memory_log_path": str(tmp_path / f"memory-{safe_ticker}.md"),
+                            "episode_ledger_path": str(tmp_path / f"eval-{safe_ticker}.sqlite"),
                             "checkpoint_enabled": True,
                         }
                     )
@@ -104,6 +107,19 @@ class MockedTradingGraphTests(unittest.TestCase):
                         (tmp_path / "results" / safe_ticker / "TradingAgentsStrategy_logs" / "full_states_log.json").exists()
                     )
                     self.assertIn(ticker, Path(config["memory_log_path"]).read_text(encoding="utf-8"))
+                    episode_rows = graph.episode_ledger.list_episodes({"symbol": ticker})
+                    self.assertEqual(len(episode_rows), 1)
+                    self.assertEqual(episode_rows[0].status, "completed")
+                    self.assertEqual(episode_rows[0].final_signal, "BUY")
+                    ledger_episode = graph.episode_ledger.load_episode(episode_rows[0].run_id)
+                    self.assertEqual(ledger_episode["decisions"][-1]["action"], "BUY")
+                    self.assertTrue(ledger_episode["audit_path"])
+                    self.assertTrue(ledger_episode["experiment"]["config_hash"])
+                    graph.episode_ledger.normalize_trace(episode_rows[0].run_id)
+                    self.assertGreaterEqual(
+                        len(graph.episode_ledger.list_trace_spans(episode_rows[0].run_id)),
+                        1,
+                    )
                     self.assertGreaterEqual(len(workflow.compile_calls), 2)
 
     def test_provider_specific_runtime_options_reach_llm_factory(self):
@@ -146,6 +162,52 @@ class MockedTradingGraphTests(unittest.TestCase):
 
                 self.assertEqual(len(calls), 2)
                 self.assertTrue(all(call.get(expected_key) == expected_value for call in calls))
+
+    def test_pending_entries_resolve_using_their_own_horizons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = DEFAULT_CONFIG.copy()
+            config.update(
+                {
+                    "llm_provider": "local_openai",
+                    "backend_url": "http://localhost:11434/v1",
+                    "quick_think_llm": "gpt-4.1",
+                    "deep_think_llm": "gpt-4.1",
+                    "data_cache_dir": str(Path(tmp) / "cache"),
+                    "results_dir": str(Path(tmp) / "results"),
+                    "memory_log_path": str(Path(tmp) / "memory.md"),
+                    "trading_horizon": "swing",
+                }
+            )
+            workflow = FakeWorkflow(_final_state("AAPL", "2026-07-15"))
+
+            with patch("tradingagents.graph.trading_graph.create_llm_client", return_value=FakeClient()), patch(
+                "tradingagents.graph.trading_graph.GraphSetup.setup_graph",
+                return_value=workflow,
+            ):
+                graph = TradingAgentsGraph(
+                    selected_analysts=["market"],
+                    config=config,
+                    debug=False,
+                )
+
+            log = TradingMemoryLog(config)
+            for horizon in ("swing", "position", "trend"):
+                log.store_decision("AAPL", "2026-01-02", "Decision.\nFINAL TRANSACTION PROPOSAL: **BUY**", horizon=horizon)
+
+            fetch_calls = []
+
+            def fake_fetch_return(_ticker, _start_date, holding_days):
+                fetch_calls.append(holding_days)
+                return 0.05
+
+            with patch.object(graph, "_fetch_return", side_effect=fake_fetch_return), patch.object(
+                graph.reflector,
+                "reflect_on_final_decision",
+                return_value="Resolved.",
+            ):
+                graph._resolve_memory_log_outcomes("AAPL", "2026-07-15")
+
+            self.assertEqual(fetch_calls[::2], [5, 63, 126])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-Based on the following swing trading analysis for {company_name}, provide your final trading decision.
+Based on the following horizon-aware trading analysis for {company_name}, provide your final trading decision.
 
 Analysis:
 {analysis_content}

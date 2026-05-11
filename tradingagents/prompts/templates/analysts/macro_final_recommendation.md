@@ -1,4 +1,4 @@
-Based on the following macro analysis for {current_date}, provide your final swing trading recommendation considering macroeconomic conditions and sector implications.
+Based on the following macro analysis for {current_date}, provide your final horizon-aware recommendation considering macroeconomic conditions, regime alignment, and sector implications.
 
 Analysis:
 {analysis_content}

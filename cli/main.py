@@ -22,10 +22,60 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.checkpointer import clear_checkpoint
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.run_logger import get_run_audit_logger
+from tradingagents.eval import EpisodeLedger
 from cli.models import AnalystType
 from cli.utils import *
 
 console = Console()
+
+
+def _safe_ledger(config):
+    if not config.get("episode_ledger_enabled", True):
+        return None
+    try:
+        return EpisodeLedger(config.get("episode_ledger_path"))
+    except Exception as exc:
+        console.print(f"[yellow][EVAL] Episode ledger unavailable: {exc}[/yellow]")
+        return None
+
+
+def _ledger_start(ledger, run_id, ticker, trade_date, config, analysts, metadata):
+    if not ledger or not run_id:
+        return
+    try:
+        episode_metadata = {
+            "data_leakage_risk": "high" if config.get("online_tools", True) else "low",
+            **metadata,
+            **(config.get("episode_ledger_metadata") or {}),
+        }
+        ledger.start_episode(
+            run_id=run_id,
+            symbol=ticker,
+            trade_date=str(trade_date),
+            config=config,
+            selected_analysts=analysts,
+            metadata=episode_metadata,
+        )
+    except Exception as exc:
+        console.print(f"[yellow][EVAL] Failed to start episode ledger entry: {exc}[/yellow]")
+
+
+def _ledger_complete(ledger, run_id, final_state, final_signal, audit_path):
+    if not ledger or not run_id:
+        return
+    try:
+        ledger.complete_episode(run_id, final_state, final_signal, audit_path)
+    except Exception as exc:
+        console.print(f"[yellow][EVAL] Failed to complete episode ledger entry: {exc}[/yellow]")
+
+
+def _ledger_fail(ledger, run_id, error_message):
+    if not ledger or not run_id:
+        return
+    try:
+        ledger.fail_episode(run_id, error_message)
+    except Exception as exc:
+        console.print(f"[yellow][EVAL] Failed to mark episode failure: {exc}[/yellow]")
 
 app = typer.Typer(
     name="TradingAgents",
@@ -456,10 +506,28 @@ def get_user_selections():
     )
     selected_research_depth = select_research_depth()
 
-    # Step 5: Thinking agents
+    # Step 5: Trading horizon
     console.print(
         create_question_box(
-            "Step 5: Thinking Agents", "Select your thinking agents for analysis"
+            "Step 5: Trading Horizon", "Select holding period and analysis focus", "Swing"
+        )
+    )
+    selected_trading_horizon = select_trading_horizon()
+    selected_trend_execution_enabled = False
+    if selected_trading_horizon in {"position", "trend"}:
+        console.print(
+            create_question_box(
+                "Step 5a: Trend Execution",
+                "Select whether non-swing runs should use execution-enabled semantics in prompts and logging. CLI remains analysis-only.",
+                "Disabled",
+            )
+        )
+        selected_trend_execution_enabled = select_trend_execution_enabled()
+
+    # Step 6: Thinking agents
+    console.print(
+        create_question_box(
+            "Step 6: Thinking Agents", "Select your thinking agents for analysis"
         )
     )
     selected_llm_provider = select_llm_provider()
@@ -485,6 +553,8 @@ def get_user_selections():
         "analysis_date": current_date,  # Always use current date
         "analysts": selected_analysts,
         "research_depth": selected_research_depth,
+        "trading_horizon": selected_trading_horizon,
+        "trend_execution_enabled": selected_trend_execution_enabled,
         "llm_provider": selected_llm_provider,
         "backend_url": backend_url,
         "checkpoint_enabled": checkpoint_enabled,
@@ -723,6 +793,8 @@ def run_analysis():
     config["backend_url"] = selections["backend_url"] or None
     config["checkpoint_enabled"] = selections["checkpoint_enabled"]
     config["output_language"] = selections["output_language"]
+    config["trading_horizon"] = selections.get("trading_horizon", "swing")
+    config["trend_execution_enabled"] = bool(selections.get("trend_execution_enabled", False))
     if selections.get("google_thinking_level"):
         config["google_thinking_level"] = selections["google_thinking_level"]
     if selections.get("anthropic_effort"):
@@ -735,6 +807,8 @@ def run_analysis():
     )
     run_logger = get_run_audit_logger()
     run_started = False
+    ledger = _safe_ledger(config)
+    run_id = None
 
     # Now start the display layout
     layout = create_layout()
@@ -751,6 +825,17 @@ def run_analysis():
         message_buffer.add_message(
             "System",
             f"Selected analysts: {', '.join(analyst.value for analyst in selections['analysts'])}",
+        )
+        message_buffer.add_message(
+            "System",
+            (
+                f"Selected horizon: {selections['trading_horizon']}"
+                + (
+                    " (trend execution semantics enabled; CLI remains analysis-only)"
+                    if selections.get("trend_execution_enabled")
+                    else " (research-only semantics)"
+                )
+            ),
         )
         update_display(layout)
 
@@ -789,6 +874,16 @@ def run_analysis():
             trade_date=str(selections["analysis_date"]),
             config=config,
             metadata={"debug": True, "source": "cli_stream"},
+        )
+        run_id = run_logger.get_active_run_id(symbol=selections["ticker"])
+        _ledger_start(
+            ledger,
+            run_id,
+            selections["ticker"],
+            selections["analysis_date"],
+            config,
+            [analyst.value for analyst in selections["analysts"]],
+            {"debug": True, "source": "cli_stream"},
         )
         run_started = True
         run_logger.log_state_snapshot(
@@ -1050,17 +1145,20 @@ def run_analysis():
             graph.curr_state = final_state
             graph.ticker = selections["ticker"]
             graph._log_state(selections["analysis_date"], final_state)
+            audit_path = run_logger.get_run_file_path(run_id=run_id, symbol=selections["ticker"])
             run_logger.finish_run(
                 symbol=selections["ticker"],
                 status="completed",
                 final_state=final_state,
                 final_signal=decision,
             )
+            _ledger_complete(ledger, run_id, final_state, decision, audit_path)
             graph.memory_log.store_decision(
                 ticker=selections["ticker"],
                 trade_date=selections["analysis_date"],
                 final_trade_decision=final_state["final_trade_decision"],
                 trading_mode=final_state.get("trading_mode", config.get("trading_mode", "investment")),
+                horizon=final_state.get("trading_horizon", config.get("trading_horizon", "swing")),
             )
             if config.get("checkpoint_enabled", False):
                 clear_checkpoint(
@@ -1071,6 +1169,7 @@ def run_analysis():
             run_started = False
         except Exception as e:
             if run_started:
+                _ledger_fail(ledger, run_id, str(e))
                 run_logger.finish_run(
                     symbol=selections["ticker"],
                     status="failed",

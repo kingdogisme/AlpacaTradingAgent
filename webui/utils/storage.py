@@ -6,6 +6,7 @@ from typing import Dict, Any
 
 # Default settings structure
 DEFAULT_SETTINGS = {
+    "ui_language": "zh",
     "ticker_input": "NVDA, AMD, TSLA",
     "analyst_market": True,
     "analyst_social": True,
@@ -14,11 +15,13 @@ DEFAULT_SETTINGS = {
     "analyst_macro": True,
     "research_depth": "Shallow",
     "allow_shorts": False,
+    "trading_horizon": "swing",
     "loop_enabled": False,
     "loop_interval": 60,
     "market_hour_enabled": False,
     "market_hours_input": "",
     "trade_after_analyze": False,
+    "trend_execution_enabled": False,
     "trade_dollar_amount": 4500,
     "llm_provider": "openai",
     "backend_url": "",

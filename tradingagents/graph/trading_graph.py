@@ -20,6 +20,7 @@ from tradingagents.agents.utils.agent_states import (
 )
 from tradingagents.openai_model_registry import normalize_model_params, describe_model_params
 from tradingagents.run_logger import get_run_audit_logger
+from tradingagents.eval import EpisodeLedger
 from tradingagents.dataflows.config import (
     get_llm_api_key,
     get_openai_base_url,
@@ -172,6 +173,13 @@ class TradingAgentsGraph:
         self.curr_state = None
         self.ticker = None
         self.log_states_dict = {}  # date to full state dict
+        self.selected_analysts = list(selected_analysts)
+        self.episode_ledger = None
+        if self.config.get("episode_ledger_enabled", True):
+            try:
+                self.episode_ledger = EpisodeLedger(self.config.get("episode_ledger_path"))
+            except Exception as exc:
+                print(f"[EVAL] Warning: Episode ledger unavailable: {exc}")
 
         # Set up the graph
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
@@ -254,7 +262,12 @@ class TradingAgentsGraph:
         return (end_price / start_price) - 1.0
 
     def _resolve_memory_log_outcomes(self, ticker: str, trade_date: str) -> None:
-        holding_days = int(self.config.get("memory_outcome_holding_days", 5))
+        default_holding_days_by_horizon = {
+            "swing": 5,
+            "position": 63,
+            "trend": 126,
+        }
+        configured_holding_days = self.config.get("memory_outcome_holding_days")
         try:
             current_date = datetime.strptime(str(trade_date), "%Y-%m-%d").date()
         except ValueError:
@@ -271,6 +284,12 @@ class TradingAgentsGraph:
             if entry_date >= current_date:
                 continue
 
+            entry_horizon = str(entry.get("horizon", "swing") or "swing").strip().lower()
+            holding_days = int(
+                configured_holding_days
+                if configured_holding_days is not None
+                else default_holding_days_by_horizon.get(entry_horizon, 5)
+            )
             raw_return = self._fetch_return(ticker, entry_date, holding_days)
             if raw_return is None:
                 continue
@@ -299,6 +318,7 @@ class TradingAgentsGraph:
                 alpha_return=alpha_return,
                 holding_days=holding_days,
                 reflection=reflection,
+                horizon=entry_horizon,
             )
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
@@ -315,6 +335,8 @@ class TradingAgentsGraph:
             "market": ToolNode(
                 [
                     # online tools
+                    self.toolkit.get_technical_brief,
+                    self.toolkit.get_trend_brief,
                     self.toolkit.get_alpaca_data,
                     self.toolkit.get_stockstats_indicators_report_online,
                     # offline tools
@@ -375,6 +397,13 @@ class TradingAgentsGraph:
             config=self.config,
             metadata={"debug": self.debug},
         )
+        run_id = run_logger.get_active_run_id(symbol=company_name)
+        self._ledger_start_episode(
+            run_id,
+            company_name,
+            str(trade_date),
+            metadata={"debug": self.debug, "source": "graph"},
+        )
         run_logger.log_state_snapshot(
             stage="initial_state",
             snapshot=init_agent_state,
@@ -397,6 +426,7 @@ class TradingAgentsGraph:
                 # Standard mode without tracing
                 final_state = graph.invoke(init_agent_state, **args)
         except Exception as e:
+            self._ledger_fail_episode(run_logger.get_active_run_id(symbol=company_name), str(e))
             run_logger.finish_run(
                 symbol=company_name,
                 status="failed",
@@ -439,12 +469,14 @@ class TradingAgentsGraph:
             except Exception:
                 pass
 
+            audit_path = get_run_audit_logger().get_run_file_path(run_id=run_id, symbol=company_name)
             run_logger.finish_run(
                 symbol=company_name,
                 status="completed",
                 final_state=final_state,
                 final_signal=final_signal,
             )
+            self._ledger_complete_episode(run_id, final_state, final_signal, audit_path)
             self.memory_log.store_decision(
                 ticker=company_name,
                 trade_date=str(trade_date),
@@ -453,11 +485,16 @@ class TradingAgentsGraph:
                     "trading_mode",
                     self.config.get("trading_mode", "investment"),
                 ),
+                horizon=final_state.get(
+                    "trading_horizon",
+                    self.config.get("trading_horizon", "swing"),
+                ),
             )
             if self.config.get("checkpoint_enabled", False):
                 clear_checkpoint(self.config["data_cache_dir"], company_name, str(trade_date))
             return final_state, final_signal
         except Exception as e:
+            self._ledger_fail_episode(run_id, str(e))
             run_logger.finish_run(
                 symbol=company_name,
                 status="failed",
@@ -466,11 +503,68 @@ class TradingAgentsGraph:
             )
             raise
 
+    def _ledger_start_episode(
+        self,
+        run_id: str | None,
+        symbol: str,
+        trade_date: str,
+        metadata: dict | None = None,
+    ) -> None:
+        if not run_id or self.episode_ledger is None:
+            return
+        try:
+            episode_metadata = {
+                "data_leakage_risk": "high" if self.config.get("online_tools", True) else "low",
+                **(metadata or {}),
+                **(self.config.get("episode_ledger_metadata") or {}),
+            }
+            self.episode_ledger.start_episode(
+                run_id=run_id,
+                symbol=symbol,
+                trade_date=trade_date,
+                config=self.config,
+                selected_analysts=self.selected_analysts,
+                metadata=episode_metadata,
+            )
+        except Exception as exc:
+            print(f"[EVAL] Warning: failed to start episode ledger entry: {exc}")
+
+    def _ledger_complete_episode(
+        self,
+        run_id: str | None,
+        final_state: dict,
+        final_signal: str,
+        audit_path: str | None = None,
+    ) -> None:
+        if not run_id or self.episode_ledger is None:
+            return
+        try:
+            self.episode_ledger.complete_episode(
+                run_id=run_id,
+                final_state=final_state,
+                final_signal=final_signal,
+                audit_path=audit_path,
+            )
+        except Exception as exc:
+            print(f"[EVAL] Warning: failed to complete episode ledger entry: {exc}")
+
+    def _ledger_fail_episode(self, run_id: str | None, error_message: str) -> None:
+        if not run_id or self.episode_ledger is None:
+            return
+        try:
+            self.episode_ledger.fail_episode(run_id, error_message)
+        except Exception as exc:
+            print(f"[EVAL] Warning: failed to mark episode failure: {exc}")
+
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""
         self.log_states_dict[str(trade_date)] = {
             "company_of_interest": final_state["company_of_interest"],
             "trade_date": final_state["trade_date"],
+            "trading_horizon": final_state.get(
+                "trading_horizon",
+                self.config.get("trading_horizon", "swing"),
+            ),
             "market_report": final_state["market_report"],
             "sentiment_report": final_state["sentiment_report"],
             "news_report": final_state["news_report"],

@@ -1,0 +1,1238 @@
+from __future__ import annotations
+
+from dataclasses import asdict
+import hashlib
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import sqlite3
+from typing import Any, Iterable
+
+from tradingagents.default_config import DEFAULT_CONFIG
+
+from .decision_parser import parse_decision_text
+from .models import (
+    CriticRecordV1,
+    DecisionRecordV1,
+    EpisodeRecord,
+    ExperimentRecordV1,
+    MemoryItemRecordV1,
+    MemoryPromotionRecordV1,
+    MemoryRetrievalRecordV1,
+    RewardRecordV1,
+    TraceSpanV1,
+)
+
+
+TRACE_EVENT_TYPES = {
+    "prompt",
+    "llm_call",
+    "tool_call",
+    "agent_output",
+    "node_execution",
+    "node_error",
+}
+
+MEMORY_ITEM_TYPES = {
+    "episodic",
+    "semantic_candidate",
+    "procedural_candidate",
+    "asset_profile_candidate",
+}
+
+
+def default_ledger_path() -> Path:
+    return Path(DEFAULT_CONFIG["episode_ledger_path"]).expanduser()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _json_dump(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, sort_keys=True, ensure_ascii=False)
+
+
+def _json_load(value: str | None, fallback: Any) -> Any:
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except Exception:
+        return fallback
+
+
+def stable_config_hash(config: dict[str, Any]) -> str:
+    normalized = {
+        key: value
+        for key, value in (config or {}).items()
+        if key
+        not in {
+            "api_key",
+            "openai_api_key",
+            "alpaca_api_key",
+            "alpaca_secret_key",
+            "finnhub_api_key",
+            "coindesk_api_key",
+        }
+        and not str(key).lower().endswith(("api_key", "secret_key", "token"))
+    }
+    payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_span_token(value: Any) -> str:
+    text = str(value or "unknown").strip().lower()
+    return "".join(char if char.isalnum() else "_" for char in text).strip("_") or "unknown"
+
+
+def _event_agent_name(event_type: str, payload: dict[str, Any]) -> str | None:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if payload.get("agent_name"):
+        return str(payload["agent_name"])
+    if payload.get("agent_type"):
+        return str(payload["agent_type"])
+    if metadata.get("agent_name"):
+        return str(metadata["agent_name"])
+    report_type = payload.get("report_type") or payload.get("output_type")
+    if report_type:
+        return str(report_type)
+    return None
+
+
+def _event_node_name(payload: dict[str, Any]) -> str | None:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return payload.get("node_name") or metadata.get("node_name")
+
+
+def _event_metadata(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in (
+        "report_type",
+        "output_type",
+        "model",
+        "purpose",
+        "effort",
+        "verbosity",
+        "latency_seconds",
+        "input_chars",
+        "output_chars",
+        "execution_time_seconds",
+        "elapsed_seconds",
+        "retry_count",
+        "quality_details",
+        "error_details",
+        "error_message",
+    ):
+        if key in payload:
+            metadata[key] = payload.get(key)
+    if isinstance(payload.get("metadata"), dict):
+        metadata["event_metadata"] = payload["metadata"]
+    if event_type == "tool_call" and "inputs" in payload:
+        metadata["input_keys"] = sorted((payload.get("inputs") or {}).keys())
+    return metadata
+
+
+def _flatten_json_lists(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    result: list[Any] = []
+    for item in value:
+        if isinstance(item, list):
+            result.extend(item)
+        else:
+            result.append(item)
+    return result
+
+
+class EpisodeLedger:
+    """SQLite-backed episode, decision, and reward index."""
+
+    def __init__(self, path: str | Path | None = None):
+        self.path = Path(path).expanduser() if path else default_ledger_path()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_schema(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS episodes (
+                    run_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    selected_analysts_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    final_signal TEXT,
+                    audit_path TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_episodes_symbol_date ON episodes(symbol, trade_date);
+                CREATE INDEX IF NOT EXISTS idx_episodes_status ON episodes(status);
+
+                CREATE TABLE IF NOT EXISTS decisions (
+                    run_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    action TEXT,
+                    confidence TEXT,
+                    advisory_rating TEXT,
+                    trading_mode TEXT,
+                    horizon TEXT,
+                    thesis TEXT,
+                    invalidation TEXT,
+                    risk_budget TEXT,
+                    position_plan TEXT,
+                    raw_text TEXT NOT NULL,
+                    parser_status TEXT NOT NULL,
+                    parser_warnings_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, stage, agent_name),
+                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_decisions_action ON decisions(action);
+
+                CREATE TABLE IF NOT EXISTS rewards (
+                    run_id TEXT NOT NULL,
+                    reward_version TEXT NOT NULL,
+                    reward_status TEXT NOT NULL DEFAULT 'resolved',
+                    holding_days INTEGER NOT NULL,
+                    raw_return REAL,
+                    benchmark_return REAL,
+                    alpha_return REAL,
+                    oracle_label TEXT,
+                    classification_reward REAL,
+                    pnl_reward REAL,
+                    reward_scalar REAL,
+                    components_json TEXT NOT NULL,
+                    resolved_at TEXT NOT NULL,
+                    data_source TEXT NOT NULL,
+                    PRIMARY KEY(run_id, reward_version),
+                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_rewards_status ON rewards(reward_status);
+
+                CREATE TABLE IF NOT EXISTS trace_spans (
+                    run_id TEXT NOT NULL,
+                    span_id TEXT NOT NULL,
+                    parent_span_id TEXT,
+                    span_type TEXT NOT NULL,
+                    agent_name TEXT,
+                    node_name TEXT,
+                    tool_name TEXT,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    status TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    artifact_ref TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, span_id),
+                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_trace_spans_run_type ON trace_spans(run_id, span_type);
+
+                CREATE TABLE IF NOT EXISTS experiments (
+                    run_id TEXT PRIMARY KEY,
+                    experiment_id TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL,
+                    model_provider TEXT NOT NULL,
+                    quick_model TEXT NOT NULL,
+                    deep_model TEXT NOT NULL,
+                    selected_analysts_json TEXT NOT NULL,
+                    memory_policy TEXT NOT NULL,
+                    critic_version TEXT,
+                    reward_version TEXT,
+                    leakage_risk TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_experiments_hash ON experiments(config_hash);
+                CREATE INDEX IF NOT EXISTS idx_experiments_experiment_id ON experiments(experiment_id);
+
+                CREATE TABLE IF NOT EXISTS memory_items (
+                    memory_item_id TEXT PRIMARY KEY,
+                    memory_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_items_type_status ON memory_items(memory_type, status);
+
+                CREATE TABLE IF NOT EXISTS memory_links (
+                    memory_item_id TEXT NOT NULL,
+                    linked_type TEXT NOT NULL,
+                    linked_id TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(memory_item_id, linked_type, linked_id, relation),
+                    FOREIGN KEY(memory_item_id) REFERENCES memory_items(memory_item_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS memory_retrievals (
+                    run_id TEXT NOT NULL,
+                    memory_item_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    score REAL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, memory_item_id, stage),
+                    FOREIGN KEY(run_id) REFERENCES episodes(run_id),
+                    FOREIGN KEY(memory_item_id) REFERENCES memory_items(memory_item_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_retrievals_run ON memory_retrievals(run_id);
+
+                CREATE TABLE IF NOT EXISTS memory_promotions (
+                    memory_item_id TEXT NOT NULL,
+                    from_status TEXT NOT NULL,
+                    to_status TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    promoted_by TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(memory_item_id, to_status, created_at),
+                    FOREIGN KEY(memory_item_id) REFERENCES memory_items(memory_item_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS critic_records (
+                    run_id TEXT NOT NULL,
+                    critic_version TEXT NOT NULL,
+                    failure_tags_json TEXT NOT NULL,
+                    evidence_spans_json TEXT NOT NULL,
+                    reward_snapshot_json TEXT NOT NULL,
+                    reflection_text TEXT NOT NULL,
+                    improvement_candidates_json TEXT NOT NULL,
+                    parser_status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, critic_version),
+                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
+                );
+                """
+            )
+            reward_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(rewards)").fetchall()
+            }
+            if "reward_status" not in reward_columns:
+                conn.execute(
+                    "ALTER TABLE rewards ADD COLUMN reward_status TEXT NOT NULL DEFAULT 'resolved'"
+                )
+
+    def start_episode(
+        self,
+        run_id: str,
+        symbol: str,
+        trade_date: str,
+        config: dict[str, Any],
+        selected_analysts: Iterable[str],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO episodes (
+                    run_id, symbol, trade_date, status, config_json,
+                    selected_analysts_json, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    symbol=excluded.symbol,
+                    trade_date=excluded.trade_date,
+                    status='running',
+                    config_json=excluded.config_json,
+                    selected_analysts_json=excluded.selected_analysts_json,
+                    metadata_json=excluded.metadata_json,
+                    error_message=NULL,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    run_id,
+                    symbol,
+                    str(trade_date),
+                    _json_dump(config),
+                    _json_dump(list(selected_analysts)),
+                    _json_dump(metadata or {}),
+                    now,
+                    now,
+                ),
+            )
+        self.upsert_experiment(run_id, config, selected_analysts=list(selected_analysts), metadata=metadata or {})
+
+    def complete_episode(
+        self,
+        run_id: str,
+        final_state: dict[str, Any],
+        final_signal: str,
+        audit_path: str | None,
+    ) -> None:
+        trading_mode = final_state.get("trading_mode") or (
+            "trading" if final_signal in {"LONG", "NEUTRAL", "SHORT"} else "investment"
+        )
+        horizon = final_state.get("trading_horizon")
+        decisions = self._decisions_from_state(
+            run_id,
+            final_state,
+            final_signal,
+            trading_mode=trading_mode,
+            horizon=horizon,
+        )
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE episodes
+                SET status='completed',
+                    final_signal=?,
+                    audit_path=?,
+                    error_message=NULL,
+                    updated_at=?
+                WHERE run_id=?
+                """,
+                (final_signal, audit_path, now, run_id),
+            )
+            for decision in decisions:
+                self._upsert_decision(conn, decision)
+        self.normalize_trace(run_id)
+
+    def fail_episode(self, run_id: str, error_message: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE episodes
+                SET status='failed', error_message=?, updated_at=?
+                WHERE run_id=?
+                """,
+                (error_message, _utc_now_iso(), run_id),
+            )
+
+    def upsert_reward_status(
+        self,
+        run_id: str,
+        reward_version: str,
+        reward_status: str,
+        *,
+        holding_days: int = 0,
+        components: dict[str, Any] | None = None,
+        data_source: str = "RewardResolver",
+        resolved_at: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO rewards (
+                    run_id, reward_version, reward_status, holding_days, raw_return,
+                    benchmark_return, alpha_return, oracle_label, classification_reward,
+                    pnl_reward, reward_scalar, components_json, resolved_at, data_source
+                )
+                VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
+                ON CONFLICT(run_id, reward_version) DO UPDATE SET
+                    reward_status=excluded.reward_status,
+                    holding_days=excluded.holding_days,
+                    raw_return=NULL,
+                    benchmark_return=NULL,
+                    alpha_return=NULL,
+                    oracle_label=NULL,
+                    classification_reward=NULL,
+                    pnl_reward=NULL,
+                    reward_scalar=NULL,
+                    components_json=excluded.components_json,
+                    resolved_at=excluded.resolved_at,
+                    data_source=excluded.data_source
+                """,
+                (
+                    run_id,
+                    reward_version,
+                    reward_status,
+                    holding_days,
+                    _json_dump(components or {}),
+                    resolved_at or _utc_now_iso(),
+                    data_source,
+                ),
+            )
+
+    def list_episodes(self, filters: dict[str, Any] | None = None) -> list[EpisodeRecord]:
+        filters = filters or {}
+        clauses: list[str] = []
+        params: list[Any] = []
+        for key in ("status", "symbol"):
+            if filters.get(key):
+                clauses.append(f"e.{key} = ?")
+                params.append(filters[key])
+        if filters.get("since"):
+            clauses.append("e.trade_date >= ?")
+            params.append(filters["since"])
+        if filters.get("until"):
+            clauses.append("e.trade_date <= ?")
+            params.append(filters["until"])
+        if filters.get("reward_status"):
+            clauses.append("r.reward_status = ?")
+            params.append(filters["reward_status"])
+        query = """
+            SELECT e.*
+            FROM episodes e
+            LEFT JOIN rewards r ON r.run_id=e.run_id
+        """
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY e.trade_date DESC, e.created_at DESC"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._episode_from_row(row) for row in rows]
+
+    def load_episode(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            episode = conn.execute("SELECT * FROM episodes WHERE run_id=?", (run_id,)).fetchone()
+            if episode is None:
+                return None
+            decisions = conn.execute(
+                "SELECT * FROM decisions WHERE run_id=? ORDER BY created_at, stage",
+                (run_id,),
+            ).fetchall()
+            rewards = conn.execute(
+                "SELECT * FROM rewards WHERE run_id=? ORDER BY resolved_at",
+                (run_id,),
+            ).fetchall()
+            traces = conn.execute(
+                "SELECT * FROM trace_spans WHERE run_id=? ORDER BY started_at, span_id",
+                (run_id,),
+            ).fetchall()
+            critics = conn.execute(
+                "SELECT * FROM critic_records WHERE run_id=? ORDER BY created_at",
+                (run_id,),
+            ).fetchall()
+            experiment = conn.execute(
+                "SELECT * FROM experiments WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        return {
+            **asdict(self._episode_from_row(episode)),
+            "decisions": [self._decision_from_row(row) for row in decisions],
+            "rewards": [self._reward_from_row(row) for row in rewards],
+            "trace_spans": [self._trace_span_from_row(row) for row in traces],
+            "critic_records": [self._critic_from_row(row) for row in critics],
+            "experiment": self._experiment_from_row(experiment) if experiment else None,
+        }
+
+    def load_trajectory(self, run_id: str) -> list[dict[str, Any]]:
+        episode = self.load_episode(run_id)
+        if not episode or not episode.get("audit_path"):
+            return []
+        path = Path(str(episode["audit_path"]))
+        if not path.exists():
+            return []
+        try:
+            audit = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+
+        trajectory: list[dict[str, Any]] = []
+        for event in audit.get("events", []):
+            event_type = event.get("type")
+            if event_type not in TRACE_EVENT_TYPES:
+                continue
+            trajectory.append(
+                {
+                    "timestamp": event.get("timestamp"),
+                    "type": event_type,
+                    "payload": event.get("payload", {}),
+                }
+            )
+        return trajectory
+
+    def get_pending_reward_episodes(self, as_of: str | None = None) -> list[dict[str, Any]]:
+        _ = as_of
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT e.*, d.action, d.trading_mode, d.horizon
+                FROM episodes e
+                LEFT JOIN decisions d
+                    ON d.run_id=e.run_id AND d.stage='final'
+                LEFT JOIN rewards r
+                    ON r.run_id=e.run_id
+                WHERE e.status='completed' AND r.run_id IS NULL
+                ORDER BY e.trade_date ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_reward(self, reward: RewardRecordV1) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO rewards (
+                    run_id, reward_version, reward_status, holding_days, raw_return, benchmark_return,
+                    alpha_return, oracle_label, classification_reward, pnl_reward,
+                    reward_scalar, components_json, resolved_at, data_source
+                )
+                VALUES (?, ?, 'resolved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, reward_version) DO UPDATE SET
+                    reward_status='resolved',
+                    holding_days=excluded.holding_days,
+                    raw_return=excluded.raw_return,
+                    benchmark_return=excluded.benchmark_return,
+                    alpha_return=excluded.alpha_return,
+                    oracle_label=excluded.oracle_label,
+                    classification_reward=excluded.classification_reward,
+                    pnl_reward=excluded.pnl_reward,
+                    reward_scalar=excluded.reward_scalar,
+                    components_json=excluded.components_json,
+                    resolved_at=excluded.resolved_at,
+                    data_source=excluded.data_source
+                """,
+                (
+                    reward.run_id,
+                    reward.reward_version,
+                    reward.holding_days,
+                    reward.raw_return,
+                    reward.benchmark_return,
+                    reward.alpha_return,
+                    reward.oracle_label,
+                    reward.classification_reward,
+                    reward.pnl_reward,
+                    reward.reward_scalar,
+                    _json_dump(reward.components_json),
+                    reward.resolved_at,
+                    reward.data_source,
+                ),
+            )
+
+    def report_rows(
+        self,
+        *,
+        since: str | None = None,
+        include_high_leakage: bool = False,
+    ) -> list[dict[str, Any]]:
+        clauses = ["e.status='completed'"]
+        params: list[Any] = []
+        if since:
+            clauses.append("e.trade_date >= ?")
+            params.append(since)
+        if not include_high_leakage:
+            clauses.append("json_extract(e.metadata_json, '$.data_leakage_risk') IS NOT 'high'")
+        query = f"""
+            SELECT
+                e.run_id, e.symbol, e.trade_date, e.status, e.config_json,
+                e.metadata_json, e.final_signal, e.error_message,
+                d.action, d.trading_mode, d.horizon, d.confidence,
+                r.reward_version, r.reward_status, r.raw_return, r.benchmark_return, r.alpha_return,
+                r.oracle_label, r.classification_reward, r.pnl_reward, r.reward_scalar
+                , x.experiment_id, x.config_hash, x.prompt_version, x.model_provider,
+                x.quick_model, x.deep_model, x.memory_policy, x.critic_version,
+                x.leakage_risk
+                , COALESCE(ts.trace_span_count, 0) AS trace_span_count
+                , COALESCE(cr.critic_count, 0) AS critic_count
+                , cr.failure_tags_json AS critic_failure_tags_json
+                , COALESCE(mi.memory_candidate_count, 0) AS memory_candidate_count
+            FROM episodes e
+            LEFT JOIN decisions d ON d.run_id=e.run_id AND d.stage='final'
+            LEFT JOIN rewards r ON r.run_id=e.run_id
+            LEFT JOIN experiments x ON x.run_id=e.run_id
+            LEFT JOIN (
+                SELECT run_id, COUNT(*) AS trace_span_count
+                FROM trace_spans
+                GROUP BY run_id
+            ) ts ON ts.run_id=e.run_id
+            LEFT JOIN (
+                SELECT run_id, COUNT(*) AS critic_count,
+                       '[' || GROUP_CONCAT(failure_tags_json) || ']' AS failure_tags_json
+                FROM critic_records
+                GROUP BY run_id
+            ) cr ON cr.run_id=e.run_id
+            LEFT JOIN (
+                SELECT json_extract(evidence_json, '$.run_id') AS run_id,
+                       COUNT(*) AS memory_candidate_count
+                FROM memory_items
+                WHERE status='candidate'
+                GROUP BY json_extract(evidence_json, '$.run_id')
+            ) mi ON mi.run_id=e.run_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY e.trade_date ASC, e.symbol ASC
+        """
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["config"] = _json_load(item.pop("config_json", None), {})
+            item["metadata"] = _json_load(item.pop("metadata_json", None), {})
+            item["critic_failure_tags"] = _flatten_json_lists(
+                _json_load(item.pop("critic_failure_tags_json", None), [])
+            )
+            result.append(item)
+        return result
+
+    def normalize_trace(self, run_id: str) -> list[TraceSpanV1]:
+        episode = self.load_episode(run_id)
+        if not episode or not episode.get("audit_path"):
+            return []
+        path = Path(str(episode["audit_path"]))
+        if not path.exists():
+            return []
+        try:
+            audit = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+
+        spans: list[TraceSpanV1] = []
+        event_counts: dict[str, int] = {}
+        latest_node_span_id: str | None = None
+        artifact_ref = str(path)
+
+        for event in audit.get("events", []):
+            event_type = event.get("type")
+            if event_type not in TRACE_EVENT_TYPES:
+                continue
+            payload = event.get("payload", {}) or {}
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            timestamp = event.get("timestamp")
+            node_name = _event_node_name(payload)
+            agent_name = _event_agent_name(event_type, payload)
+            tool_name = payload.get("tool_name") if event_type == "tool_call" else None
+            span_type = "node_event" if event_type == "node_execution" else event_type
+            span_id = f"{_safe_span_token(span_type)}-{event_counts[event_type]:04d}"
+            parent_span_id = latest_node_span_id if event_type not in {"node_execution", "node_error"} else None
+            status = str(payload.get("status") or ("error" if event_type == "node_error" else "success"))
+            started_at = timestamp
+            ended_at = timestamp
+            duration = payload.get("execution_time_seconds", payload.get("elapsed_seconds"))
+            metadata = _event_metadata(event_type, payload)
+            if duration is not None:
+                metadata["duration_seconds"] = duration
+            span = TraceSpanV1(
+                run_id=run_id,
+                span_id=span_id,
+                parent_span_id=parent_span_id,
+                span_type=span_type,
+                agent_name=agent_name,
+                node_name=str(node_name) if node_name else None,
+                tool_name=str(tool_name) if tool_name else None,
+                started_at=started_at,
+                ended_at=ended_at,
+                status=status,
+                metadata_json=metadata,
+                artifact_ref=artifact_ref,
+            )
+            spans.append(span)
+            if event_type == "node_execution":
+                latest_node_span_id = span_id
+
+        final_state = (audit.get("snapshots") or {}).get("final_state") or {}
+        final_decision = final_state.get("final_trade_decision")
+        if final_decision:
+            event_counts["final_decision"] = event_counts.get("final_decision", 0) + 1
+            final_signal = (audit.get("summary") or {}).get("final_signal")
+            spans.append(
+                TraceSpanV1(
+                    run_id=run_id,
+                    span_id="final_decision-0001",
+                    parent_span_id=latest_node_span_id,
+                    span_type="final_decision",
+                    agent_name="Risk Manager",
+                    node_name=None,
+                    tool_name=None,
+                    started_at=audit.get("ended_at"),
+                    ended_at=audit.get("ended_at"),
+                    status=audit.get("status") or "completed",
+                    metadata_json={
+                        "final_signal": final_signal,
+                        "decision_chars": len(str(final_decision)),
+                    },
+                    artifact_ref=artifact_ref,
+                )
+            )
+
+        with self._connect() as conn:
+            for span in spans:
+                self._upsert_trace_span(conn, span)
+        return spans
+
+    def list_trace_spans(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM trace_spans
+                WHERE run_id=?
+                ORDER BY started_at, span_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [self._trace_span_from_row(row) for row in rows]
+
+    def upsert_experiment(
+        self,
+        run_id: str,
+        config: dict[str, Any],
+        *,
+        selected_analysts: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ExperimentRecordV1:
+        metadata = metadata or {}
+        selected_analysts = selected_analysts or list(config.get("selected_analysts") or [])
+        config_hash = stable_config_hash(config)
+        leakage_risk = (
+            metadata.get("data_leakage_risk")
+            or (config.get("episode_ledger_metadata") or {}).get("data_leakage_risk")
+            or ("high" if config.get("online_tools", True) else "low")
+        )
+        record = ExperimentRecordV1(
+            run_id=run_id,
+            experiment_id=f"cfg-{config_hash}",
+            config_hash=config_hash,
+            prompt_version=str(config.get("prompt_version") or "default"),
+            model_provider=str(config.get("llm_provider") or "openai"),
+            quick_model=str(config.get("quick_think_llm") or "unknown"),
+            deep_model=str(config.get("deep_think_llm") or "unknown"),
+            selected_analysts=list(selected_analysts),
+            memory_policy=str(config.get("memory_policy") or "legacy"),
+            critic_version=config.get("critic_version"),
+            reward_version=str(config.get("eval_reward_version") or "v1_directional_alpha"),
+            leakage_risk=str(leakage_risk),
+            metadata_json=metadata,
+        )
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO experiments (
+                    run_id, experiment_id, config_hash, prompt_version, model_provider,
+                    quick_model, deep_model, selected_analysts_json, memory_policy,
+                    critic_version, reward_version, leakage_risk, metadata_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    experiment_id=excluded.experiment_id,
+                    config_hash=excluded.config_hash,
+                    prompt_version=excluded.prompt_version,
+                    model_provider=excluded.model_provider,
+                    quick_model=excluded.quick_model,
+                    deep_model=excluded.deep_model,
+                    selected_analysts_json=excluded.selected_analysts_json,
+                    memory_policy=excluded.memory_policy,
+                    critic_version=excluded.critic_version,
+                    reward_version=excluded.reward_version,
+                    leakage_risk=excluded.leakage_risk,
+                    metadata_json=excluded.metadata_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    record.run_id,
+                    record.experiment_id,
+                    record.config_hash,
+                    record.prompt_version,
+                    record.model_provider,
+                    record.quick_model,
+                    record.deep_model,
+                    _json_dump(record.selected_analysts),
+                    record.memory_policy,
+                    record.critic_version,
+                    record.reward_version,
+                    record.leakage_risk,
+                    _json_dump(record.metadata_json),
+                    now,
+                    now,
+                ),
+            )
+        return record
+
+    def add_memory_item(self, record: MemoryItemRecordV1) -> None:
+        if record.memory_type not in MEMORY_ITEM_TYPES:
+            raise ValueError(f"Unsupported memory_type: {record.memory_type}")
+        now = record.created_at or _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO memory_items (
+                    memory_item_id, memory_type, content, source, status,
+                    evidence_json, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(memory_item_id) DO UPDATE SET
+                    memory_type=excluded.memory_type,
+                    content=excluded.content,
+                    source=excluded.source,
+                    status=excluded.status,
+                    evidence_json=excluded.evidence_json,
+                    metadata_json=excluded.metadata_json
+                """,
+                (
+                    record.memory_item_id,
+                    record.memory_type,
+                    record.content,
+                    record.source,
+                    record.status,
+                    _json_dump(record.evidence_json),
+                    _json_dump(record.metadata_json),
+                    now,
+                ),
+            )
+            self._add_memory_links_from_evidence(conn, record.memory_item_id, record.evidence_json)
+
+    def record_memory_retrieval(
+        self,
+        run_id: str,
+        memory_item_id: str,
+        stage: str,
+        rank: int,
+        score: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        record = MemoryRetrievalRecordV1(
+            run_id=run_id,
+            memory_item_id=memory_item_id,
+            stage=stage,
+            rank=rank,
+            score=score,
+            metadata_json=metadata or {},
+            created_at=_utc_now_iso(),
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO memory_retrievals (
+                    run_id, memory_item_id, stage, rank, score, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, memory_item_id, stage) DO UPDATE SET
+                    rank=excluded.rank,
+                    score=excluded.score,
+                    metadata_json=excluded.metadata_json
+                """,
+                (
+                    record.run_id,
+                    record.memory_item_id,
+                    record.stage,
+                    record.rank,
+                    record.score,
+                    _json_dump(record.metadata_json),
+                    record.created_at,
+                ),
+            )
+
+    def add_memory_promotion(self, record: MemoryPromotionRecordV1) -> None:
+        now = record.created_at or _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO memory_promotions (
+                    memory_item_id, from_status, to_status, reason, promoted_by,
+                    evidence_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.memory_item_id,
+                    record.from_status,
+                    record.to_status,
+                    record.reason,
+                    record.promoted_by,
+                    _json_dump(record.evidence_json),
+                    now,
+                ),
+            )
+            conn.execute(
+                "UPDATE memory_items SET status=? WHERE memory_item_id=?",
+                (record.to_status, record.memory_item_id),
+            )
+
+    def list_memory_items(self, *, run_id: str | None = None) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id:
+            clauses.append("json_extract(evidence_json, '$.run_id') = ?")
+            params.append(run_id)
+        query = "SELECT * FROM memory_items"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._memory_item_from_row(row) for row in rows]
+
+    def add_critic_record(self, record: CriticRecordV1) -> None:
+        now = record.created_at or _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO critic_records (
+                    run_id, critic_version, failure_tags_json, evidence_spans_json,
+                    reward_snapshot_json, reflection_text, improvement_candidates_json,
+                    parser_status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, critic_version) DO UPDATE SET
+                    failure_tags_json=excluded.failure_tags_json,
+                    evidence_spans_json=excluded.evidence_spans_json,
+                    reward_snapshot_json=excluded.reward_snapshot_json,
+                    reflection_text=excluded.reflection_text,
+                    improvement_candidates_json=excluded.improvement_candidates_json,
+                    parser_status=excluded.parser_status,
+                    created_at=excluded.created_at
+                """,
+                (
+                    record.run_id,
+                    record.critic_version,
+                    _json_dump(record.failure_tags),
+                    _json_dump(record.evidence_spans),
+                    _json_dump(record.reward_snapshot),
+                    record.reflection_text,
+                    _json_dump(record.improvement_candidates),
+                    record.parser_status,
+                    now,
+                ),
+            )
+
+    def list_critic_records(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM critic_records"
+        params: list[Any] = []
+        if run_id:
+            query += " WHERE run_id=?"
+            params.append(run_id)
+        query += " ORDER BY created_at"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._critic_from_row(row) for row in rows]
+
+    def resolved_reward_episodes_without_critic(self, critic_version: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT e.run_id
+                FROM episodes e
+                JOIN rewards r ON r.run_id=e.run_id AND r.reward_status='resolved'
+                LEFT JOIN critic_records c
+                    ON c.run_id=e.run_id AND c.critic_version=?
+                WHERE e.status='completed' AND c.run_id IS NULL
+                ORDER BY e.trade_date ASC
+                """,
+                (critic_version,),
+            ).fetchall()
+        episodes = []
+        for row in rows:
+            episode = self.load_episode(row["run_id"])
+            if episode:
+                episodes.append(episode)
+        return episodes
+
+    def _decisions_from_state(
+        self,
+        run_id: str,
+        final_state: dict[str, Any],
+        final_signal: str,
+        *,
+        trading_mode: str | None,
+        horizon: str | None,
+    ) -> list[DecisionRecordV1]:
+        decisions: list[DecisionRecordV1] = []
+        mapping = [
+            ("research_manager", "Research Manager", final_state.get("investment_plan", "")),
+            ("trader", "Trader", final_state.get("trader_investment_plan", "")),
+            ("final", "Risk Manager", final_state.get("final_trade_decision", "")),
+        ]
+        for stage, agent_name, text in mapping:
+            if not text:
+                continue
+            decision = parse_decision_text(
+                str(text),
+                run_id=run_id,
+                stage=stage,
+                agent_name=agent_name,
+                trading_mode=trading_mode,
+                horizon=horizon,
+            )
+            if stage == "final" and not decision.action and final_signal:
+                decision = DecisionRecordV1(
+                    **{
+                        **asdict(decision),
+                        "action": final_signal,
+                        "parser_status": "partial",
+                        "parser_warnings": [*decision.parser_warnings, "used_final_signal_fallback"],
+                    }
+                )
+            decisions.append(decision)
+        return decisions
+
+    def _upsert_decision(self, conn: sqlite3.Connection, decision: DecisionRecordV1) -> None:
+        conn.execute(
+            """
+            INSERT INTO decisions (
+                run_id, stage, agent_name, action, confidence, advisory_rating,
+                trading_mode, horizon, thesis, invalidation, risk_budget,
+                position_plan, raw_text, parser_status, parser_warnings_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, stage, agent_name) DO UPDATE SET
+                action=excluded.action,
+                confidence=excluded.confidence,
+                advisory_rating=excluded.advisory_rating,
+                trading_mode=excluded.trading_mode,
+                horizon=excluded.horizon,
+                thesis=excluded.thesis,
+                invalidation=excluded.invalidation,
+                risk_budget=excluded.risk_budget,
+                position_plan=excluded.position_plan,
+                raw_text=excluded.raw_text,
+                parser_status=excluded.parser_status,
+                parser_warnings_json=excluded.parser_warnings_json
+            """,
+            (
+                decision.run_id,
+                decision.stage,
+                decision.agent_name,
+                decision.action,
+                decision.confidence,
+                decision.advisory_rating,
+                decision.trading_mode,
+                decision.horizon,
+                decision.thesis,
+                decision.invalidation,
+                decision.risk_budget,
+                decision.position_plan,
+                decision.raw_text,
+                decision.parser_status,
+                _json_dump(decision.parser_warnings),
+                _utc_now_iso(),
+            ),
+        )
+
+    def _upsert_trace_span(self, conn: sqlite3.Connection, span: TraceSpanV1) -> None:
+        conn.execute(
+            """
+            INSERT INTO trace_spans (
+                run_id, span_id, parent_span_id, span_type, agent_name, node_name,
+                tool_name, started_at, ended_at, status, metadata_json, artifact_ref,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, span_id) DO UPDATE SET
+                parent_span_id=excluded.parent_span_id,
+                span_type=excluded.span_type,
+                agent_name=excluded.agent_name,
+                node_name=excluded.node_name,
+                tool_name=excluded.tool_name,
+                started_at=excluded.started_at,
+                ended_at=excluded.ended_at,
+                status=excluded.status,
+                metadata_json=excluded.metadata_json,
+                artifact_ref=excluded.artifact_ref
+            """,
+            (
+                span.run_id,
+                span.span_id,
+                span.parent_span_id,
+                span.span_type,
+                span.agent_name,
+                span.node_name,
+                span.tool_name,
+                span.started_at,
+                span.ended_at,
+                span.status,
+                _json_dump(span.metadata_json),
+                span.artifact_ref,
+                _utc_now_iso(),
+            ),
+        )
+
+    def _add_memory_links_from_evidence(
+        self,
+        conn: sqlite3.Connection,
+        memory_item_id: str,
+        evidence: dict[str, Any],
+    ) -> None:
+        links = []
+        for key, linked_type in (
+            ("run_id", "episode"),
+            ("reward_run_id", "reward"),
+            ("critic_run_id", "critic"),
+            ("manual_source_id", "manual"),
+        ):
+            value = evidence.get(key)
+            if value:
+                links.append((linked_type, str(value), "evidence"))
+        for linked_type, linked_id, relation in evidence.get("links", []) if isinstance(evidence.get("links"), list) else []:
+            links.append((str(linked_type), str(linked_id), str(relation or "evidence")))
+
+        now = _utc_now_iso()
+        for linked_type, linked_id, relation in links:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO memory_links (
+                    memory_item_id, linked_type, linked_id, relation, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (memory_item_id, linked_type, linked_id, relation, _json_dump({}), now),
+            )
+
+    def _episode_from_row(self, row: sqlite3.Row) -> EpisodeRecord:
+        return EpisodeRecord(
+            run_id=row["run_id"],
+            symbol=row["symbol"],
+            trade_date=row["trade_date"],
+            status=row["status"],
+            config=_json_load(row["config_json"], {}),
+            selected_analysts=_json_load(row["selected_analysts_json"], []),
+            metadata=_json_load(row["metadata_json"], {}),
+            final_signal=row["final_signal"],
+            audit_path=row["audit_path"],
+            error_message=row["error_message"],
+        )
+
+    def _decision_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["parser_warnings"] = _json_load(item.pop("parser_warnings_json", None), [])
+        item.pop("created_at", None)
+        return item
+
+    def _reward_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["components_json"] = _json_load(item.get("components_json"), {})
+        return item
+
+    def _trace_span_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["metadata_json"] = _json_load(item.get("metadata_json"), {})
+        item.pop("created_at", None)
+        return item
+
+    def _experiment_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["selected_analysts"] = _json_load(item.pop("selected_analysts_json", None), [])
+        item["metadata_json"] = _json_load(item.get("metadata_json"), {})
+        item.pop("created_at", None)
+        item.pop("updated_at", None)
+        return item
+
+    def _memory_item_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["evidence_json"] = _json_load(item.get("evidence_json"), {})
+        item["metadata_json"] = _json_load(item.get("metadata_json"), {})
+        return item
+
+    def _critic_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["failure_tags"] = _json_load(item.pop("failure_tags_json", None), [])
+        item["evidence_spans"] = _json_load(item.pop("evidence_spans_json", None), [])
+        item["reward_snapshot"] = _json_load(item.pop("reward_snapshot_json", None), {})
+        item["improvement_candidates"] = _json_load(
+            item.pop("improvement_candidates_json", None),
+            [],
+        )
+        return item

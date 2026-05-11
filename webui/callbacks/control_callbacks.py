@@ -505,6 +505,41 @@ def register_control_callbacks(app):
         )
 
     @app.callback(
+        Output("trading-horizon-info", "children"),
+        [Input("trading-horizon", "value")]
+    )
+    def update_trading_horizon_info(trading_horizon):
+        """Show the selected holding-period profile."""
+        horizon = (trading_horizon or "swing").lower()
+        profile = {
+            "swing": (
+                "Swing horizon",
+                "2-10 trading days using 1h/4h/1d structure.",
+                ["Entry, stop, target", "Normal execution rules"],
+                "info",
+                "fa-chart-line",
+            ),
+            "position": (
+                "Position horizon",
+                "1-3 months using daily and weekly trend evidence.",
+                ["Trend thesis", "Research-only by default"],
+                "warning",
+                "fa-timeline",
+            ),
+            "trend": (
+                "Trend horizon",
+                "3-6 months using weekly and monthly regime evidence.",
+                ["Quarterly thesis", "Research-only by default"],
+                "warning",
+                "fa-arrow-trend-up",
+            ),
+        }.get(horizon)
+        if not profile:
+            return ""
+        title, description, settings, tone, icon = profile
+        return _status_panel(title, description, settings, tone=tone, icon=icon)
+
+    @app.callback(
         Output("market-hours-validation", "children"),
         [Input("market-hours-input", "value")]
     )
@@ -679,9 +714,16 @@ def register_control_callbacks(app):
     @app.callback(
         Output("trade-after-analyze-info", "children"),
         [Input("trade-after-analyze", "value"),
-         Input("trade-dollar-amount", "value")]
+         Input("trade-dollar-amount", "value"),
+         Input("trading-horizon", "value"),
+         Input("trend-execution-enabled", "value")]
     )
-    def update_trade_after_analyze_info(trade_enabled, dollar_amount):
+    def update_trade_after_analyze_info(
+        trade_enabled,
+        dollar_amount,
+        trading_horizon,
+        trend_execution_enabled,
+    ):
         """Update the trade after analyze information display"""
         if not trade_enabled:
             return _status_panel(
@@ -693,6 +735,16 @@ def register_control_callbacks(app):
             )
 
         amount = dollar_amount if dollar_amount and dollar_amount > 0 else 1000
+        horizon = (trading_horizon or "swing").lower()
+
+        if horizon in {"position", "trend"} and not trend_execution_enabled:
+            return _status_panel(
+                "Trend research-only",
+                "Order execution is blocked until trend execution is explicitly enabled.",
+                ["Analysis only", "No Alpaca order"],
+                tone="warning",
+                icon="fa-lock",
+            )
 
         return _status_panel(
             "Order execution enabled",
@@ -746,9 +798,11 @@ def register_control_callbacks(app):
          State("deep-llm-store", "value"),
          State("deep-llm-parallel-tool-calls", "value"),
          State("allow-shorts", "value"),
+         State("trading-horizon", "value"),
          State("loop-enabled", "value"),
          State("loop-interval", "value"),
          State("trade-after-analyze", "value"),
+         State("trend-execution-enabled", "value"),
          State("trade-dollar-amount", "value"),
          State("market-hour-enabled", "value"),
          State("market-hours-input", "value")]
@@ -762,7 +816,8 @@ def register_control_callbacks(app):
                                quick_top_p, quick_max_output_tokens, quick_store, quick_parallel_tool_calls,
                                deep_reasoning_effort, deep_verbosity, deep_summary, deep_temperature,
                                deep_top_p, deep_max_output_tokens, deep_store, deep_parallel_tool_calls,
-                               allow_shorts, loop_enabled, loop_interval, trade_enabled, trade_amount,
+                               allow_shorts, trading_horizon, loop_enabled, loop_interval,
+                               trade_enabled, trend_execution_enabled, trade_amount,
                                market_hour_enabled, market_hours_input):
         """Handle control button clicks"""
         # Detect which property triggered this callback
@@ -867,6 +922,9 @@ def register_control_callbacks(app):
         # Store trading configuration
         app_state.trade_enabled = trade_enabled
         app_state.trade_amount = trade_amount if trade_amount and trade_amount > 0 else 1000
+        horizon = (trading_horizon or "swing").lower()
+        if horizon not in {"swing", "position", "trend"}:
+            horizon = "swing"
 
         # Validate market hour configuration if enabled
         if market_hour_enabled:
@@ -892,6 +950,8 @@ def register_control_callbacks(app):
                     'analysts_macro': analysts_macro,
                     'research_depth': research_depth,
                     'allow_shorts': allow_shorts,
+                    'trading_horizon': horizon,
+                    'trend_execution_enabled': bool(trend_execution_enabled),
                     'llm_provider': llm_provider,
                     'backend_url': backend_url,
                     'output_language': output_language,
@@ -902,6 +962,7 @@ def register_control_callbacks(app):
                     'deep_llm_params': deep_llm_params,
                     **provider_settings,
                     'trade_enabled': trade_enabled,
+                    'trend_execution_enabled': bool(trend_execution_enabled),
                     'trade_amount': trade_amount
                 }
                 app_state.start_market_hour_mode(symbols, market_hour_config, market_hours_list)
@@ -968,6 +1029,8 @@ def register_control_callbacks(app):
                                 output_language=output_language,
                                 checkpoint_enabled=checkpoint_enabled,
                                 provider_settings=provider_settings,
+                                trading_horizon=horizon,
+                                trend_execution_enabled=trend_execution_enabled,
                             )
 
                             if app_state.stop_market_hour:
@@ -986,6 +1049,8 @@ def register_control_callbacks(app):
                     'analysts_macro': analysts_macro,
                     'research_depth': research_depth,
                     'allow_shorts': allow_shorts,
+                    'trading_horizon': horizon,
+                    'trend_execution_enabled': bool(trend_execution_enabled),
                     'llm_provider': llm_provider,
                     'backend_url': backend_url,
                     'output_language': output_language,
@@ -996,6 +1061,7 @@ def register_control_callbacks(app):
                     'deep_llm_params': deep_llm_params,
                     **provider_settings,
                     'trade_enabled': trade_enabled,
+                    'trend_execution_enabled': bool(trend_execution_enabled),
                     'trade_amount': trade_amount
                 }
                 app_state.start_loop(symbols, loop_config)
@@ -1022,6 +1088,8 @@ def register_control_callbacks(app):
                                 output_language=output_language,
                                 checkpoint_enabled=checkpoint_enabled,
                                 provider_settings=provider_settings,
+                                trading_horizon=horizon,
+                                trend_execution_enabled=trend_execution_enabled,
                             )
 
                     if app_state.stop_loop:
@@ -1061,6 +1129,8 @@ def register_control_callbacks(app):
                             output_language=output_language,
                             checkpoint_enabled=checkpoint_enabled,
                             provider_settings=provider_settings,
+                            trading_horizon=horizon,
+                            trend_execution_enabled=trend_execution_enabled,
                         )
 
             app_state.analysis_running = False
@@ -1094,10 +1164,17 @@ def register_control_callbacks(app):
             "symbols": symbols,  # Store the symbols list
             "num_symbols": num_symbols,  # Store the count
             "mode": mode_text,
+            "trading_horizon": horizon,
+            "trend_execution_enabled": bool(trend_execution_enabled),
             "interval_text": interval_text
         }
 
-        return f"Starting real-time analysis for {', '.join(symbols)} in {mode_text}{interval_text} using current market data...", store_data, num_symbols, 1, num_symbols, 1
+        research_only_note = (
+            " Trend horizon is research-only unless trend execution is explicitly enabled."
+            if horizon in {"position", "trend"} and not trend_execution_enabled
+            else ""
+        )
+        return f"Starting real-time analysis for {', '.join(symbols)} in {mode_text}{interval_text} using {horizon} horizon and current market data.{research_only_note}", store_data, num_symbols, 1, num_symbols, 1
 
     @app.callback(
         [Output("chart-pagination", "max_value", allow_duplicate=True),

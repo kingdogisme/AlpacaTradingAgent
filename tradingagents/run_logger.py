@@ -46,6 +46,7 @@ class RunAuditLogger:
         self._lock = threading.RLock()
         self._active_runs_by_symbol: Dict[str, str] = {}
         self._active_runs: Dict[str, Dict[str, Any]] = {}
+        self._completed_run_paths: Dict[str, str] = {}
         self._recover_stale_running_logs()
         atexit.register(self._close_active_runs_on_exit)
 
@@ -178,6 +179,24 @@ class RunAuditLogger:
         if len(self._active_runs) == 1:
             return next(iter(self._active_runs.keys()))
         return None
+
+    def get_active_run_id(self, symbol: Optional[str] = None) -> Optional[str]:
+        with self._lock:
+            return self._resolve_run_id(None, symbol)
+
+    def get_run_file_path(
+        self,
+        run_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> Optional[str]:
+        with self._lock:
+            resolved_run_id = self._resolve_run_id(run_id, symbol)
+            if not resolved_run_id:
+                return None
+            run_data = self._active_runs.get(resolved_run_id)
+            if not run_data:
+                return self._completed_run_paths.get(resolved_run_id)
+            return run_data.get("file_path")
 
     def log_event(
         self,
@@ -366,15 +385,17 @@ class RunAuditLogger:
                 run_data["summary"]["error_events"] += 1
 
             self._flush_unlocked(resolved_run_id)
+            file_path = run_data.get("file_path", "")
             print(
                 f"[RUN_LOG] Finished run {resolved_run_id} ({status}) -> "
-                f"{run_data.get('file_path', '')}"
+                f"{file_path}"
             )
 
             symbol_key = run_data.get("symbol")
             if symbol_key in self._active_runs_by_symbol:
                 if self._active_runs_by_symbol[symbol_key] == resolved_run_id:
                     del self._active_runs_by_symbol[symbol_key]
+            self._completed_run_paths[resolved_run_id] = file_path
             del self._active_runs[resolved_run_id]
 
     def _flush_unlocked(self, run_id: str) -> None:

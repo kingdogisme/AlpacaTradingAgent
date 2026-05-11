@@ -1,0 +1,28 @@
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = [
+    "tests/unit",
+    "tests/integration/mocked",
+]
+pythonpath = [
+    ".",
+]
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+]
+markers = [
+    "unit: deterministic unit tests with no external network or API calls",
+    "integration: deterministic integration tests with mocked external boundaries",
+    "mocked: tests that exercise end-to-end flows using local mocks only",
+    "slow: local deterministic tests that are slower than the default suite",
+    "external: smoke tests that require real external services and RUN_EXTERNAL_TESTS=1",
+    "network: tests that intentionally open network sockets and RUN_EXTERNAL_TESTS=1",
+]
+filterwarnings = [
+    "default",
+    "ignore::DeprecationWarning:pkg_resources.*",
+    "ignore::DeprecationWarning:google.*",
+    "ignore::PendingDeprecationWarning",
+]

@@ -2,6 +2,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 import time
 import json
 from langchain_core.messages import AIMessage, ToolMessage
+from tradingagents.agents.utils.agent_trading_modes import (
+    get_agent_horizon_context,
+    get_horizon_context,
+)
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -22,6 +26,8 @@ def create_fundamentals_analyst(llm, toolkit):
             current_date = state["trade_date"]
             ticker = state["company_of_interest"]
             company_name = state["company_of_interest"]
+            horizon_context = get_horizon_context(toolkit.config)
+            horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
             
             # print(f"[FUNDAMENTALS] Analyzing {ticker} on {current_date}")
             
@@ -82,14 +88,34 @@ def create_fundamentals_analyst(llm, toolkit):
                 " Use all available fundamentals tools before concluding. "
                 + (f"Active sources now: {', '.join(active_sources)}." if active_sources else "No external fundamentals source is available; reason from existing context only.")
             )
+            if is_crypto and horizon_context["horizon"] == "position":
+                source_guidance += " For DeFiLlama, use lookback_days=90 when calling the tool."
+            elif is_crypto and horizon_context["horizon"] == "trend":
+                source_guidance += " For DeFiLlama, use lookback_days=180 when calling the tool."
             asset_focus = (
                 "Analyze DeFi metrics like TVL changes, protocol upgrades, token unlock schedules, yield farming opportunities, and major partnership announcements that could sustain multi-day crypto price trends."
                 if is_crypto
                 else "Focus on earnings surprises, analyst upgrades/downgrades, insider activity, and fundamental shifts that could sustain multi-day swing moves."
             )
+            if horizon_context["horizon"] == "position":
+                asset_focus = (
+                    "Analyze DeFi metrics over roughly 90 days, protocol revenue/TVL durability, token unlocks, and adoption catalysts that could sustain a 1-3 month crypto trend."
+                    if is_crypto
+                    else "Focus on the last 2-4 quarters, upcoming 1-2 earnings windows, earnings revisions, analyst rating changes, cash-flow direction, and business catalysts that could sustain a 1-3 month position."
+                )
+            elif horizon_context["horizon"] == "trend":
+                asset_focus = (
+                    "Analyze DeFi metrics over roughly 180 days, protocol revenue/TVL trend, regulatory cycle, token supply schedule, and adoption durability that could support or break a 3-6 month crypto thesis."
+                    if is_crypto
+                    else "Focus on the last 4-8 quarters, industry cycle, revenue/margin/free-cash-flow direction, balance-sheet resilience, and valuation support for a 3-6 month quarterly trend thesis."
+                )
             system_message = render_prompt(
                 "analysts/fundamentals_system",
                 asset_focus=asset_focus,
+                horizon_agent_context=horizon_agent_context,
+                horizon_label=horizon_context["label"],
+                holding_period=horizon_context["holding_period"],
+                primary_timeframes=horizon_context["primary_timeframes"],
                 source_guidance=source_guidance,
             )
             asset_context = (

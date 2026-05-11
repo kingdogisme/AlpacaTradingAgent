@@ -1129,6 +1129,28 @@ def get_stockstats_indicator_history(
     )
 
 
+def _configured_horizon() -> str:
+    horizon = str(get_config().get("trading_horizon", "swing") or "swing").strip().lower()
+    return horizon if horizon in ("swing", "position", "trend") else "swing"
+
+
+def _horizon_lookback(kind: str, fallback: int) -> int:
+    config = get_config()
+    horizon = _configured_horizon()
+    key = f"{kind}_openai_lookback_days"
+    configured = config.get(key)
+    if isinstance(configured, dict):
+        return int(configured.get(horizon, fallback))
+    if configured is not None:
+        return int(configured)
+    defaults = {
+        "stock_news": {"position": 60, "trend": 120},
+        "global_news": {"position": 45, "trend": 90},
+        "fundamentals": {"position": 180, "trend": 365},
+    }
+    return int(defaults.get(kind, {}).get(horizon, fallback))
+
+
 def get_stock_news_openai(ticker, curr_date):
     # Get API key from environment variables or config
     api_key = get_api_key("openai_api_key", "OPENAI_API_KEY")
@@ -1161,7 +1183,8 @@ def get_stock_news_openai(ticker, curr_date):
         search_context = "low" if fast_profile else get_search_context_for_depth(research_depth)
         
         from datetime import datetime, timedelta
-        lookback_days = 3 if depth_key == "shallow" else 7 if depth_key == "medium" else 14
+        default_lookback_days = 3 if depth_key == "shallow" else 7 if depth_key == "medium" else 14
+        lookback_days = _horizon_lookback("stock_news", default_lookback_days)
         start_date = (datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 
         model_params = _quick_model_params_for_tool(
@@ -1173,7 +1196,7 @@ def get_stock_news_openai(ticker, curr_date):
 
         if _uses_responses_for_web_search(model):
             # Use responses.create() API with web search capabilities - use standardized ticker
-            user_message = f"Search the web and analyze current social media sentiment and recent news for {ticker_info['display_format']} ({openai_ticker}) from {start_date} to {curr_date}. Include:\n" + \
+            user_message = f"Search the web and analyze current social media sentiment and recent news for {ticker_info['display_format']} ({openai_ticker}) from {start_date} to {curr_date}. Align conclusions to the {_configured_horizon()} horizon. Include:\n" + \
                           f"1. Overall sentiment analysis from recent social media posts\n" + \
                           f"2. Key themes and discussions happening now\n" + \
                           f"3. Notable price-moving news or events from the past week\n" + \
@@ -1271,7 +1294,7 @@ def get_global_news_openai(curr_date, ticker_context=None):
         word_budget = int(config.get("global_news_word_budget", word_budget_default))
         
         from datetime import datetime, timedelta
-        lookback_days = int(profile["lookback_days"])
+        lookback_days = _horizon_lookback("global_news", int(profile["lookback_days"]))
         start_date = (datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 
         max_output_tokens = int(config.get("global_news_max_output_tokens", 1800))
@@ -1308,7 +1331,7 @@ def get_global_news_openai(curr_date, ticker_context=None):
         focus_block = "\n".join(f"{i + 1}. {point}" for i, point in enumerate(focus_points))
         user_message = (
             f"Search the web for global news from {start_date} to {curr_date} most relevant to trading {target}.\n"
-            "Prioritize catalysts with likely impact over the next 2-10 trading days.\n"
+            f"Prioritize catalysts with likely impact over the selected {_configured_horizon()} horizon.\n"
             f"Focus on:\n{focus_block}\n"
             f"Return at most {max_events} events ranked by impact.\n"
             "For each event include: date, what happened, impact level (minor/moderate/major), "
@@ -1397,7 +1420,8 @@ def get_fundamentals_openai(ticker, curr_date):
             search_context = get_search_context_for_depth()
         
         from datetime import datetime, timedelta
-        start_date = (datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
+        lookback_days = _horizon_lookback("fundamentals", 30)
+        start_date = (datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 
         model_params = _quick_model_params_for_tool(
             model,
@@ -1412,21 +1436,21 @@ def get_fundamentals_openai(ticker, curr_date):
             user_message = (
                 f"Provide a concise fundamental analysis for {ticker} "
                 f"covering {start_date} to {curr_date}. "
-                f"Be brief and focus on what matters for a 2-10 day swing trade.\n\n"
+                f"Be brief and focus on what matters for the selected {_configured_horizon()} horizon.\n\n"
                 f"Cover these in SHORT paragraphs (not long essays):\n"
-                f"1. Key valuation snapshot (P/E, EV/EBITDA, P/S — just the numbers)\n"
+                f"1. Key valuation snapshot (P/E, EV/EBITDA, P/S - just the numbers)\n"
                 f"2. Latest earnings/revenue vs estimates (beat or miss, magnitude)\n"
                 f"3. Cash flow & balance sheet health (1-2 sentences)\n"
                 f"4. Recent catalysts (earnings, leadership changes, M&A, etc.)\n"
-                f"5. Key risk for the next 2-10 days\n\n"
+                f"5. Key risk for the selected horizon\n\n"
                 f"End with a compact summary table of key metrics.\n"
                 f"Keep total response under 520 words."
             )
             
             system_text = (
-                "You are a fundamental analyst providing concise, swing-trading-focused analysis. "
+                "You are a fundamental analyst providing concise, horizon-aware analysis. "
                 "Use web search to find the latest financials but keep your output SHORT and actionable. "
-                "Do not write long essays — be direct and data-driven."
+                "Do not write long essays - be direct and data-driven."
             )
             api_params = _build_web_search_response_params(
                 model=model,
@@ -1526,41 +1550,56 @@ def get_alpaca_data_window(
     try:
         # Calculate start date based on look_back_days
         if curr_date:
-            curr_dt = pd.to_datetime(curr_date)
+            curr_dt = pd.to_datetime(curr_date).normalize()
+            end_date = curr_dt.strftime("%Y-%m-%d")
         else:
-            curr_dt = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
+            curr_dt = pd.to_datetime(datetime.now().strftime("%Y-%m-%d")).normalize()
+            end_date = None
             
         start_dt = curr_dt - pd.Timedelta(days=look_back_days)
         start_date = start_dt.strftime("%Y-%m-%d")
+        date_range = f"from {start_date}" + (f" to {end_date}" if end_date else " to present")
         
-        # Get data from Alpaca - don't pass end_date to avoid subscription limitations
+        # Respect curr_date as the point-in-time boundary for historical collection.
         data = AlpacaUtils.get_stock_data(
             symbol=symbol,
             start_date=start_date,
+            end_date=end_date,
             timeframe=timeframe
         )
         
         if data.empty:
-            return f"No data found for {symbol} from {start_date} to present"
+            return f"No data found for {symbol} {date_range}"
         
         # Format the result
-        result = f"## Stock data for {symbol} from {start_date} to present:\n\n"
+        result = f"## Stock data for {symbol} {date_range}:\n\n"
         result += data.to_string()
         
-        # Add latest quote if available
-        try:
-            latest_quote = AlpacaUtils.get_latest_quote(symbol)
-            if latest_quote:
-                result += f"\n\n## Latest Quote for {symbol}:\n"
-                result += f"Bid: {latest_quote['bid_price']} ({latest_quote['bid_size']}), "
-                result += f"Ask: {latest_quote['ask_price']} ({latest_quote['ask_size']}), "
-                result += f"Time: {latest_quote['timestamp']}"
-        except Exception as quote_error:
-            result += f"\n\nCould not fetch latest quote: {str(quote_error)}"
+        if _should_include_latest_quote(end_date):
+            try:
+                latest_quote = AlpacaUtils.get_latest_quote(symbol)
+                if latest_quote:
+                    result += f"\n\n## Latest Quote for {symbol}:\n"
+                    result += f"Bid: {latest_quote['bid_price']} ({latest_quote['bid_size']}), "
+                    result += f"Ask: {latest_quote['ask_price']} ({latest_quote['ask_size']}), "
+                    result += f"Time: {latest_quote['timestamp']}"
+            except Exception as quote_error:
+                result += f"\n\nCould not fetch latest quote: {str(quote_error)}"
         
         return result
     except Exception as e:
         return f"Error getting stock data for {symbol}: {str(e)}"
+
+
+def _should_include_latest_quote(as_of_date: str | None) -> bool:
+    if not _coerce_bool(get_config().get("online_tools", True)):
+        return False
+    if not as_of_date:
+        return True
+    try:
+        return pd.to_datetime(as_of_date).normalize() >= pd.Timestamp.today().normalize()
+    except Exception:
+        return False
 
 def get_alpaca_data(
     symbol: Annotated[str, "ticker symbol of the company"],
@@ -1650,25 +1689,25 @@ def get_alpaca_data(
             range_pct = (daily_range / latest_data['close']) * 100
             result += f"Daily Range: ${latest_data['low']:.2f} - ${latest_data['high']:.2f} ({range_pct:.2f}%)\n"
         
-        # Add latest quote if available
-        try:
-            latest_quote = AlpacaUtils.get_latest_quote(symbol)
-            if latest_quote:
-                result += f"\n## Latest Real-Time Quote:\n"
-                result += f"Bid: ${latest_quote['bid_price']:.2f} (Size: {int(latest_quote['bid_size']):,})\n"
-                result += f"Ask: ${latest_quote['ask_price']:.2f} (Size: {int(latest_quote['ask_size']):,})\n"
-                result += f"Spread: ${float(latest_quote['ask_price']) - float(latest_quote['bid_price']):.2f}\n"
-                
-                # Calculate quote vs close difference if we have close data
-                if not data.empty:
-                    mid_quote = (float(latest_quote['bid_price']) + float(latest_quote['ask_price'])) / 2
-                    last_close = data.iloc[-1]['close']
-                    after_hours_change = mid_quote - last_close
-                    after_hours_pct = (after_hours_change / last_close) * 100
-                    result += f"After-Hours Move: ${after_hours_change:+.2f} ({after_hours_pct:+.2f}%)\n"
+        if _should_include_latest_quote(end_date):
+            try:
+                latest_quote = AlpacaUtils.get_latest_quote(symbol)
+                if latest_quote:
+                    result += f"\n## Latest Real-Time Quote:\n"
+                    result += f"Bid: ${latest_quote['bid_price']:.2f} (Size: {int(latest_quote['bid_size']):,})\n"
+                    result += f"Ask: ${latest_quote['ask_price']:.2f} (Size: {int(latest_quote['ask_size']):,})\n"
+                    result += f"Spread: ${float(latest_quote['ask_price']) - float(latest_quote['bid_price']):.2f}\n"
                     
-        except Exception as quote_error:
-            result += f"\n\nNote: Real-time quote unavailable: {str(quote_error)}"
+                    # Calculate quote vs close difference if we have close data
+                    if not data.empty:
+                        mid_quote = (float(latest_quote['bid_price']) + float(latest_quote['ask_price'])) / 2
+                        last_close = data.iloc[-1]['close']
+                        after_hours_change = mid_quote - last_close
+                        after_hours_pct = (after_hours_change / last_close) * 100
+                        result += f"After-Hours Move: ${after_hours_change:+.2f} ({after_hours_pct:+.2f}%)\n"
+                        
+            except Exception as quote_error:
+                result += f"\n\nNote: Real-time quote unavailable: {str(quote_error)}"
         
         return result
     except Exception as e:
@@ -1703,6 +1742,37 @@ def get_technical_brief(
         return _json.dumps({
             "error": f"Failed to build technical brief for {symbol}: {str(e)}",
             "symbol": symbol,
+            "generated_at": curr_date,
+        })
+
+
+def get_trend_brief(
+    symbol: Annotated[str, "ticker symbol (stocks: AAPL; crypto: BTC/USD)"],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+    horizon: Annotated[str, "Trend horizon: position or trend"] = "position",
+) -> str:
+    """
+    Build a trend-oriented brief for position/trend horizons.
+
+    Args:
+        symbol: Ticker symbol (e.g. AAPL, BTC/USD)
+        curr_date: The current trading date in YYYY-mm-dd format
+        horizon: "position" for 1-3 months or "trend" for 3-6 months
+
+    Returns:
+        str: JSON string of the TrendBrief
+    """
+    from .technical_brief import build_trend_brief
+
+    try:
+        brief = build_trend_brief(symbol, curr_date, horizon)
+        return brief.model_dump_json(indent=2)
+    except Exception as e:
+        import json as _json
+        return _json.dumps({
+            "error": f"Failed to build trend brief for {symbol}: {str(e)}",
+            "symbol": symbol,
+            "horizon": horizon,
             "generated_at": curr_date,
         })
 

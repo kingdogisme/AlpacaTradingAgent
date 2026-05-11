@@ -28,6 +28,74 @@ class TradingModeConfig:
     POSITION_NEUTRAL = "NEUTRAL"
 
 
+DEFAULT_HORIZON_PROFILES = {
+    "swing": {
+        "label": "Swing",
+        "holding_period": "2-10 trading days",
+        "primary_timeframes": "1h/4h/1d",
+    },
+    "position": {
+        "label": "Position",
+        "holding_period": "1-3 months",
+        "primary_timeframes": "1d/1w",
+    },
+    "trend": {
+        "label": "Trend",
+        "holding_period": "3-6 months",
+        "primary_timeframes": "1w/1mo",
+    },
+}
+
+
+def get_horizon_context(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Return normalized trading-horizon instructions for prompts and execution gating."""
+    cfg = config or {}
+    profiles = dict(DEFAULT_HORIZON_PROFILES)
+    profiles.update(cfg.get("horizon_profiles") or {})
+
+    horizon = str(cfg.get("trading_horizon") or "swing").strip().lower()
+    if horizon not in profiles:
+        horizon = "swing"
+
+    profile = dict(profiles[horizon])
+    instructions = render_prompt(
+        f"horizons/{horizon}",
+        label=profile["label"],
+        holding_period=profile["holding_period"],
+        primary_timeframes=profile["primary_timeframes"],
+    )
+    is_trend_horizon = horizon in ("position", "trend")
+
+    return {
+        "horizon": horizon,
+        "label": profile["label"],
+        "holding_period": profile["holding_period"],
+        "primary_timeframes": profile["primary_timeframes"],
+        "instructions": instructions,
+        "is_trend_horizon": is_trend_horizon,
+        "research_only": is_trend_horizon
+        and not bool(cfg.get("trend_execution_enabled", False)),
+        "trend_execution_enabled": bool(cfg.get("trend_execution_enabled", False)),
+    }
+
+
+def get_agent_horizon_context(agent_type: str, horizon_context: Dict[str, Any]) -> str:
+    """Return agent-specific horizon instructions while preserving a common base profile."""
+    agent_key = agent_type if agent_type in ("analyst", "trader", "risk_mgmt") else "analyst"
+    return render_prompt(
+        f"horizons/agent_context_{agent_key}",
+        label=horizon_context["label"],
+        holding_period=horizon_context["holding_period"],
+        primary_timeframes=horizon_context["primary_timeframes"],
+        horizon_instructions=horizon_context["instructions"],
+        research_only_note=(
+            "This horizon is research-only unless trend execution is explicitly enabled."
+            if horizon_context.get("research_only")
+            else "Execution may follow the normal order setting when enabled."
+        ),
+    )
+
+
 def get_trading_mode_context(config: Optional[Dict[str, Any]] = None,
                            current_position: str = "NEUTRAL") -> Dict[str, str]:
     """
@@ -49,10 +117,10 @@ def get_trading_mode_context(config: Optional[Dict[str, Any]] = None,
 
 
 def _get_investment_context() -> Dict[str, str]:
-    """Get context for investment mode (BUY/HOLD/SELL) optimized for swing trading"""
+    """Get context for investment mode (BUY/HOLD/SELL)."""
     return {
         "mode": "investment",
-        "mode_name": "SWING TRADING INVESTMENT MODE",
+        "mode_name": "INVESTMENT MODE",
         "actions": "BUY, HOLD, or SELL",
         "action_list": TradingModeConfig.INVESTMENT_ACTIONS,
         "allow_shorts": False,
@@ -63,7 +131,7 @@ def _get_investment_context() -> Dict[str, str]:
 
 
 def _get_trading_context(current_position: str = "NEUTRAL") -> Dict[str, str]:
-    """Get context for trading mode (LONG/NEUTRAL/SHORT) optimized for swing trading"""
+    """Get context for trading mode (LONG/NEUTRAL/SHORT)."""
 
     position_logic = render_prompt(
         "trading_modes/position_logic",
@@ -72,7 +140,7 @@ def _get_trading_context(current_position: str = "NEUTRAL") -> Dict[str, str]:
 
     return {
         "mode": "trading",
-        "mode_name": "SWING TRADING MODE",
+        "mode_name": "TRADING MODE",
         "actions": "LONG, NEUTRAL, or SHORT",
         "action_list": TradingModeConfig.TRADING_ACTIONS,
         "allow_shorts": True,

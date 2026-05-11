@@ -1,13 +1,18 @@
 /* Custom CSS for TradingAgents Dash UI */
 
+:root {
+    --app-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Heiti SC", Arial, sans-serif;
+    --app-mono-font-family: "JetBrains Mono", "Fira Code", "Consolas", "Monaco", "Menlo", "Ubuntu Mono", "Noto Sans Mono CJK SC", monospace;
+}
+
 body {
     background-color: #0F172A;
     color: #F1F5F9;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: var(--app-font-family);
 }
 
 .dash-markdown {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: var(--app-font-family);
     line-height: 1.6;
 }
 
@@ -159,7 +164,7 @@ body {
 
 /* Researcher Debate styling */
 .researcher-debate {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: var(--app-font-family);
     background-color: #1E293B;
     border-radius: 10px;
     padding: 15px;
@@ -230,7 +235,7 @@ body {
 
 /* Enhanced Alpaca account section styling */
 .enhanced-alpaca-section {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: var(--app-font-family);
 }
 
 .enhanced-account-summary {
@@ -517,7 +522,7 @@ body {
     margin: 1rem 0;
     overflow-x: auto;
     color: #E2E8F0;
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-family: var(--app-mono-font-family);
     font-size: 0.85rem;
     line-height: 1.5;
 }
@@ -527,7 +532,7 @@ body {
     color: #3B82F6;
     padding: 2px 6px;
     border-radius: 4px;
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-family: var(--app-mono-font-family);
     font-size: 0.9em;
 }
 
@@ -841,7 +846,7 @@ body {
     transform: translateY(0);
     margin: 0 2px;
     border-radius: 6px !important;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: var(--app-font-family);
 }
 
 .symbol-btn:hover {
@@ -1138,7 +1143,7 @@ body {
     border: 1px solid #334155 !important;
     border-radius: 8px !important;
     padding: 1.5rem !important;
-    font-family: 'Consolas', 'Monaco', 'Lucida Console', monospace !important;
+    font-family: var(--app-mono-font-family) !important;
     font-size: 14px !important;
     line-height: 1.5 !important;
     color: #E2E8F0 !important;
@@ -1270,7 +1275,7 @@ body {
 }
 
 .tool-outputs-content {
-    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-family: var(--app-mono-font-family);
     line-height: 1.6;
     background: #111827 !important;
     border: 1px solid #374151 !important;
@@ -1467,7 +1472,7 @@ body {
 }
 
 .api-key-input {
-    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-family: var(--app-mono-font-family);
     letter-spacing: 0.5px;
 }
 
@@ -1773,6 +1778,16 @@ body {
 
 .config-field {
     min-width: 0;
+}
+
+.config-muted-note {
+    border: 1px solid rgba(71, 85, 105, 0.62);
+    border-radius: 8px;
+    background: #0F172A;
+    color: #94A3B8;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    padding: 12px;
 }
 
 .config-label,

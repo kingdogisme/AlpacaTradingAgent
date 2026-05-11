@@ -10,7 +10,7 @@ Timeframes: 1h, 4h, 1d (fixed set).
 from __future__ import annotations
 
 import warnings
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -22,10 +22,15 @@ from .ta_schema import (
     KeyLevel,
     MarketStructure,
     MomentumState,
+    RegimeAlignment,
+    RelativeStrengthState,
     SignalSummary,
     Strength,
     TechnicalBrief,
     TimeframeBrief,
+    TrendBrief,
+    TrendInvalidation,
+    TrendTimeframeBrief,
     TrendState,
     VolatilityState,
     VolumeState,
@@ -42,6 +47,17 @@ TIMEFRAMES: Dict[str, Tuple[str, int]] = {
     "1h": ("1Hour", 30),      # ~30 days of hourly bars ≈ 200 bars
     "4h": ("4Hour", 90),      # ~90 days of 4h bars ≈ 540 bars
     "1d": ("1Day", 200),      # 200 calendar days ≈ 140 trading days
+}
+
+TREND_TIMEFRAMES: Dict[str, Dict[str, Tuple[str, int]]] = {
+    "position": {
+        "1d": ("1Day", 420),
+        "1w": ("1Day", 365 * 3),
+    },
+    "trend": {
+        "1w": ("1Day", 365 * 5),
+        "1mo": ("1Day", 365 * 8),
+    },
 }
 
 
@@ -206,6 +222,180 @@ def compute_indicators(
         df["vwap"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
 
     return df
+
+
+def _prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    prepared = df.copy()
+    prepared.columns = [str(c).lower() for c in prepared.columns]
+    if "timestamp" in prepared.columns:
+        prepared["timestamp"] = pd.to_datetime(prepared["timestamp"])
+        prepared = prepared.sort_values("timestamp").set_index("timestamp")
+    elif not isinstance(prepared.index, pd.DatetimeIndex):
+        prepared.index = pd.to_datetime(prepared.index)
+    required = ["open", "high", "low", "close", "volume"]
+    if any(col not in prepared.columns for col in required):
+        return pd.DataFrame()
+    return prepared[required].dropna().sort_index()
+
+
+def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    try:
+        resampler = df.resample(rule)
+    except ValueError:
+        if rule == "ME":
+            resampler = df.resample("M")
+        elif rule == "M":
+            resampler = df.resample("ME")
+        else:
+            raise
+    return (
+        resampler
+        .agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        )
+        .dropna()
+    )
+
+
+def _pct_return(close: pd.Series, periods: int) -> float:
+    close = close.dropna()
+    if len(close) <= periods or close.iloc[-periods - 1] == 0:
+        return 0.0
+    return round((close.iloc[-1] / close.iloc[-periods - 1] - 1) * 100, 2)
+
+
+def _slope_pct(series: pd.Series, periods: int) -> float:
+    values = series.dropna()
+    if len(values) <= periods or values.iloc[-periods - 1] == 0:
+        return 0.0
+    return round((values.iloc[-1] / values.iloc[-periods - 1] - 1) * 100, 2)
+
+
+def _classify_strength(slopes: Dict[str, float]) -> Strength:
+    avg = np.mean([abs(v) for v in slopes.values()]) if slopes else 0.0
+    if avg >= 8:
+        return Strength.STRONG
+    if avg >= 3:
+        return Strength.MODERATE
+    return Strength.WEAK
+
+
+def _trend_timeframe_brief(df: pd.DataFrame, timeframe: str) -> Optional[TrendTimeframeBrief]:
+    if df.empty or len(df) < 30:
+        return None
+    close = df["close"]
+    if timeframe == "1d":
+        ma_periods = {"sma_50": 50, "sma_100": 100, "sma_200": 200}
+        slope_period = 21
+        long_key = "sma_200"
+    elif timeframe == "1w":
+        ma_periods = {"sma_10w": 10, "sma_30w": 30, "sma_40w": 40}
+        slope_period = 8
+        long_key = "sma_40w"
+    else:
+        ma_periods = {"sma_10mo": 10, "sma_20mo": 20}
+        slope_period = 4
+        long_key = "sma_20mo"
+
+    ma_values = {}
+    ma_slopes = {}
+    for name, period in ma_periods.items():
+        ma = _sma(close, period)
+        ma_values[name] = round(float(ma.iloc[-1]), 2) if not pd.isna(ma.iloc[-1]) else 0.0
+        ma_slopes[name] = _slope_pct(ma, slope_period)
+
+    last_close = float(close.iloc[-1])
+    long_ma = ma_values.get(long_key, 0.0)
+    short_ma = next(iter(ma_values.values()), 0.0)
+    bullish = last_close > short_ma and (long_ma == 0.0 or last_close > long_ma)
+    bearish = long_ma > 0.0 and last_close < long_ma and short_ma < long_ma
+    if bullish:
+        direction = Direction.BULLISH
+    elif bearish:
+        direction = Direction.BEARISH
+    else:
+        direction = Direction.NEUTRAL
+
+    hh, hl = _detect_hh_hl(df.reset_index(), lookback=min(40, len(df)))
+    price_vs_long = round(((last_close - long_ma) / long_ma) * 100, 2) if long_ma else 0.0
+    return TrendTimeframeBrief(
+        timeframe=timeframe,
+        close=round(last_close, 2),
+        trend_direction=direction,
+        trend_strength=_classify_strength(ma_slopes),
+        ma_values=ma_values,
+        ma_slopes=ma_slopes,
+        price_vs_long_ma_pct=price_vs_long,
+        higher_highs=hh,
+        higher_lows=hl,
+    )
+
+
+def _benchmark_for(symbol: str) -> Optional[str]:
+    is_crypto = "/" in symbol or "USD" in symbol.upper() or "USDT" in symbol.upper()
+    if is_crypto:
+        base = symbol.replace("/", "-").split("-")[0].upper()
+        return None if base == "BTC" else "BTC/USD"
+    return None if symbol.upper() == "SPY" else "SPY"
+
+
+def _fetch_daily(symbol: str, curr_date: str, lookback_days: int) -> pd.DataFrame:
+    if symbol == "self":
+        return pd.DataFrame()
+    curr_dt = pd.to_datetime(curr_date)
+    start_dt = curr_dt - timedelta(days=lookback_days)
+    raw = AlpacaUtils.get_stock_data(
+        symbol=symbol,
+        start_date=start_dt.strftime("%Y-%m-%d"),
+        end_date=curr_date,
+        timeframe="1Day",
+    )
+    return _prepare_ohlcv(raw)
+
+
+def _relative_strength(symbol: str, daily_df: pd.DataFrame, curr_date: str) -> RelativeStrengthState:
+    benchmark = _benchmark_for(symbol)
+    close = daily_df["close"] if not daily_df.empty else pd.Series(dtype=float)
+    ret_3m = _pct_return(close, 63)
+    ret_6m = _pct_return(close, 126)
+    ret_12m = _pct_return(close, 252)
+
+    bench_3m = bench_6m = bench_12m = 0.0
+    if benchmark:
+        bench_df = _fetch_daily(benchmark, curr_date, 420)
+        bench_close = bench_df["close"] if not bench_df.empty else pd.Series(dtype=float)
+        bench_3m = _pct_return(bench_close, 63)
+        bench_6m = _pct_return(bench_close, 126)
+        bench_12m = _pct_return(bench_close, 252)
+
+    rel_3m = round(ret_3m - bench_3m, 2)
+    rel_6m = round(ret_6m - bench_6m, 2)
+    rel_12m = round(ret_12m - bench_12m, 2)
+    avg_rel = np.mean([rel_3m, rel_6m, rel_12m])
+    rating = "outperforming" if avg_rel > 3 else "underperforming" if avg_rel < -3 else "neutral"
+    return RelativeStrengthState(
+        benchmark=benchmark or "self",
+        return_3m=ret_3m,
+        return_6m=ret_6m,
+        return_12m=ret_12m,
+        benchmark_return_3m=bench_3m,
+        benchmark_return_6m=bench_6m,
+        benchmark_return_12m=bench_12m,
+        relative_3m=rel_3m,
+        relative_6m=rel_6m,
+        relative_12m=rel_12m,
+        rating=rating,
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -826,9 +1016,92 @@ def build_technical_brief(symbol: str, curr_date: str) -> TechnicalBrief:
 
     return TechnicalBrief(
         symbol=symbol,
-        generated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         timeframes=tf_briefs,
         key_levels=levels,
         signal_summary=signal,
+        raw_prices=raw_prices,
+    )
+
+
+def build_trend_brief(symbol: str, curr_date: str, horizon: str = "position") -> TrendBrief:
+    """Build a deterministic trend brief for 1-3M position or 3-6M trend horizons."""
+    horizon_key = str(horizon or "position").strip().lower()
+    if horizon_key not in TREND_TIMEFRAMES:
+        horizon_key = "position"
+
+    max_lookback = max(days for _, days in TREND_TIMEFRAMES[horizon_key].values())
+    daily_df = _fetch_daily(symbol, curr_date, max_lookback)
+    if daily_df.empty:
+        raise ValueError(f"No daily data available for {symbol}")
+
+    tf_briefs: List[TrendTimeframeBrief] = []
+    for tf_key in TREND_TIMEFRAMES[horizon_key]:
+        if tf_key == "1d":
+            tf_df = daily_df
+        elif tf_key == "1w":
+            tf_df = _resample_ohlcv(daily_df, "W-FRI")
+        else:
+            tf_df = _resample_ohlcv(daily_df, "ME")
+        brief = _trend_timeframe_brief(tf_df, tf_key)
+        if brief is not None:
+            tf_briefs.append(brief)
+
+    if not tf_briefs:
+        raise ValueError(f"Insufficient trend data for {symbol}")
+
+    close = daily_df["close"]
+    last_close = float(close.iloc[-1])
+    high_52w = float(daily_df["high"].tail(min(len(daily_df), 252)).max())
+    drawdown_52w = round((last_close / high_52w - 1) * 100, 2) if high_52w else 0.0
+    sma_200 = _sma(close, 200)
+    sma_100 = _sma(close, 100)
+    invalidation_level = 0.0
+    invalidation_basis = "No long moving average available"
+    if not pd.isna(sma_200.iloc[-1]):
+        invalidation_level = round(float(sma_200.iloc[-1]), 2)
+        invalidation_basis = "Daily close below 200D SMA or equivalent weekly trend break"
+    elif not pd.isna(sma_100.iloc[-1]):
+        invalidation_level = round(float(sma_100.iloc[-1]), 2)
+        invalidation_basis = "Daily close below 100D SMA with deteriorating weekly structure"
+
+    bull_count = sum(1 for item in tf_briefs if item.trend_direction == Direction.BULLISH)
+    bear_count = sum(1 for item in tf_briefs if item.trend_direction == Direction.BEARISH)
+    if bull_count > bear_count:
+        regime_direction = Direction.BULLISH
+    elif bear_count > bull_count:
+        regime_direction = Direction.BEARISH
+    else:
+        regime_direction = Direction.NEUTRAL
+    confidence = "high" if max(bull_count, bear_count) == len(tf_briefs) else "medium" if max(bull_count, bear_count) else "low"
+
+    raw_prices = {
+        "last_close": round(last_close, 2),
+        "drawdown_from_52w_high_pct": drawdown_52w,
+        "return_3m_pct": _pct_return(close, 63),
+        "return_6m_pct": _pct_return(close, 126),
+        "return_12m_pct": _pct_return(close, 252),
+    }
+    holding_period = "1-3 months" if horizon_key == "position" else "3-6 months"
+    return TrendBrief(
+        symbol=symbol,
+        horizon=horizon_key,
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        holding_period=holding_period,
+        timeframes=tf_briefs,
+        relative_strength=_relative_strength(symbol, daily_df, curr_date),
+        invalidation=TrendInvalidation(
+            level=invalidation_level,
+            basis=invalidation_basis,
+            drawdown_from_52w_high=drawdown_52w,
+        ),
+        regime_alignment=RegimeAlignment(
+            direction=regime_direction,
+            confidence=confidence,
+            notes=(
+                f"{bull_count} bullish, {bear_count} bearish, "
+                f"{len(tf_briefs) - bull_count - bear_count} neutral timeframe(s)."
+            ),
+        ),
         raw_prices=raw_prices,
     )

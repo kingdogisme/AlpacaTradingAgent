@@ -1,5 +1,5 @@
-Based on comprehensive swing trading analysis by specialist analysts, here is a swing trading plan for {company_name}. This plan incorporates multi-timeframe technical analysis (1h/4h/1d), key levels, and volume analysis optimized for multi-day swing positions.
+Based on comprehensive analysis by specialist analysts, here is a {horizon_label} plan for {company_name}. This plan incorporates the selected horizon ({holding_period}) and primary timeframes ({primary_timeframes}).
 
-Proposed Swing Trading Plan: {investment_plan}
+Proposed Plan: {investment_plan}
 
-Make your swing trading decision focusing on clear entry points, swing targets, and ATR-based stop losses with proper risk management for a 2-10 day holding period. Keep final output concise (max 380 words).
+Make your decision with horizon-appropriate thesis, position plan, invalidation, risk budget, and review cadence. For Swing, include entry/targets/stops. For Position/Trend, emphasize allocation, add/trim rules, and thesis-break conditions. Keep final output concise (max 420 words).

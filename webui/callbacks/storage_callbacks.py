@@ -4,6 +4,8 @@ Storage callbacks for persisting user settings in localStorage
 
 from dash import Input, Output, State, callback_context as ctx
 from webui.utils.storage import get_default_settings
+from webui.layout import create_main_content
+from webui.components.api_config_modal import create_api_config_modal
 
 
 def _parse_symbols(value):
@@ -15,10 +17,21 @@ def _parse_symbols(value):
 def register_storage_callbacks(app):
     """Register storage-related callbacks"""
 
+    @app.callback(
+        Output("ui-content", "children"),
+        Output("api-config-modal-container", "children"),
+        Input("ui-language", "value"),
+    )
+    def update_ui_language(ui_language):
+        """Re-render visible UI content and modal copy when the interface language changes."""
+        lang = ui_language or "zh"
+        return create_main_content(lang=lang), create_api_config_modal(lang=lang)
+
     # Callback to save settings to localStorage when they change
     @app.callback(
         Output("settings-store", "data"),
         [
+            Input("ui-language", "value"),
             Input("ticker-input", "value"),
             Input("analyst-market", "value"),
             Input("analyst-social", "value"),
@@ -27,9 +40,11 @@ def register_storage_callbacks(app):
             Input("analyst-macro", "value"),
             Input("research-depth", "value"),
             Input("allow-shorts", "value"),
+            Input("trading-horizon", "value"),
             Input("loop-interval", "value"),
             Input("market-hours-input", "value"),
             Input("trade-after-analyze", "value"),
+            Input("trend-execution-enabled", "value"),
             Input("trade-dollar-amount", "value"),
             Input("llm-provider", "value"),
             Input("backend-url", "value"),
@@ -49,10 +64,10 @@ def register_storage_callbacks(app):
         ],
         prevent_initial_call=True
     )
-    def save_settings(ticker_symbols, analyst_market, analyst_social, analyst_news,
+    def save_settings(ui_language, ticker_symbols, analyst_market, analyst_social, analyst_news,
                      analyst_fundamentals, analyst_macro, research_depth, allow_shorts,
-                     loop_interval, market_hours_input,
-                     trade_after_analyze, trade_dollar_amount,
+                     trading_horizon, loop_interval, market_hours_input,
+                     trade_after_analyze, trend_execution_enabled, trade_dollar_amount,
                      llm_provider, backend_url, output_language, checkpoint_enabled,
                      quick_llm, deep_llm, quick_llm_custom_model, deep_llm_custom_model,
                      google_thinking_level, anthropic_effort,
@@ -64,6 +79,7 @@ def register_storage_callbacks(app):
             return current_settings or get_default_settings()
         
         new_settings = {
+            "ui_language": ui_language or "zh",
             "ticker_input": ", ".join(_parse_symbols(ticker_symbols)),
             "analyst_market": analyst_market,
             "analyst_social": analyst_social,
@@ -72,11 +88,13 @@ def register_storage_callbacks(app):
             "analyst_macro": analyst_macro,
             "research_depth": research_depth,
             "allow_shorts": allow_shorts,
+            "trading_horizon": trading_horizon or "swing",
             "loop_enabled": loop_enabled,
             "loop_interval": loop_interval,
             "market_hour_enabled": market_hour_enabled,
             "market_hours_input": market_hours_input,
             "trade_after_analyze": trade_after_analyze,
+            "trend_execution_enabled": bool(trend_execution_enabled),
             "trade_dollar_amount": trade_dollar_amount,
             "llm_provider": llm_provider,
             "backend_url": backend_url,

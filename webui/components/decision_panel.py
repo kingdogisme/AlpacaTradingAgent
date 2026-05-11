@@ -5,16 +5,19 @@ webui/components/decision_panel.py - Decision summary panel for the web UI.
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 
-def create_decision_panel():
+from webui.i18n import t
+
+
+def create_decision_panel(lang="en"):
     """Create the decision summary panel for the web UI."""
     return dbc.Card(
         dbc.CardBody([
-            html.H4("Decision Summary", className="mb-3"),
+            html.H4(t(lang, "decision.title"), className="mb-3"),
             html.Hr(),
             html.Div(
                 dcc.Markdown(
                     id="decision-summary",
-                    children="Run analysis to see the final decision summary",
+                    children=t(lang, "decision.placeholder"),
                     className="dash-markdown"
                 ),
                 style={
@@ -29,4 +32,4 @@ def create_decision_panel():
             )
         ]),
         className="mb-4"
-    ) 
+    )

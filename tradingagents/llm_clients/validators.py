@@ -1,17 +1,11 @@
-from .model_catalog import get_known_models
+"""Model validators.
 
-
-VALID_MODELS = {
-    provider: models
-    for provider, models in get_known_models().items()
-    if provider not in ("ollama", "openrouter", "azure")
-}
+Model selection now supports dynamic provider discovery and custom model ids.
+Runtime validation should stay permissive so newly available provider models do
+not trigger stale local whitelist warnings.
+"""
 
 
 def validate_model(provider: str, model: str) -> bool:
-    provider_lower = (provider or "").lower()
-    if provider_lower in ("ollama", "openrouter", "azure"):
-        return True
-    if provider_lower not in VALID_MODELS:
-        return True
-    return model in VALID_MODELS[provider_lower]
+    """Accept provider model ids without local static whitelist enforcement."""
+    return True

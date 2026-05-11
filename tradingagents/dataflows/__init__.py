@@ -20,6 +20,8 @@ from .interface import (
     get_stock_stats_indicators_window,
     get_stockstats_indicator,
     get_stockstats_indicator_history,
+    get_technical_brief,
+    get_trend_brief,
     # Market data functions
     get_alpaca_data_window,
     get_alpaca_data,
@@ -51,6 +53,8 @@ __all__ = [
     "get_stock_stats_indicators_window",
     "get_stockstats_indicator",
     "get_stockstats_indicator_history",
+    "get_technical_brief",
+    "get_trend_brief",
     # Market data functions
     "get_alpaca_data_window",
     "get_alpaca_data",

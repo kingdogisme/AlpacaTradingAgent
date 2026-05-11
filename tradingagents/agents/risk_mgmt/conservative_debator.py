@@ -1,7 +1,12 @@
 from langchain_core.messages import AIMessage
 import time
 import json
-from ..utils.agent_trading_modes import get_trading_mode_context, get_agent_specific_context
+from ..utils.agent_trading_modes import (
+    get_agent_horizon_context,
+    get_agent_specific_context,
+    get_horizon_context,
+    get_trading_mode_context,
+)
 from ..utils.report_context import (
     get_agent_context_bundle,
     build_debate_digest,
@@ -34,6 +39,8 @@ def create_safe_debator(llm, config=None):
         # Get centralized trading mode context
         trading_context = get_trading_mode_context(config, current_position)
         agent_context = get_agent_specific_context("risk_mgmt", trading_context)
+        horizon_context = get_horizon_context(config)
+        horizon_agent_context = get_agent_horizon_context("risk_mgmt", horizon_context)
         
         # Get mode-specific terms for the prompt
         actions = trading_context["actions"]
@@ -60,6 +67,7 @@ def create_safe_debator(llm, config=None):
         prompt = render_prompt(
             "risk/conservative_debator",
             risk_specific_context=risk_specific_context,
+            horizon_agent_context=horizon_agent_context,
             trader_decision=trader_decision,
             actions=actions,
             claim_matrix=claim_matrix,

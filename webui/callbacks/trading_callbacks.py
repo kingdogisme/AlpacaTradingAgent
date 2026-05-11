@@ -2,7 +2,7 @@
 Trading and Alpaca-related callbacks for TradingAgents WebUI
 """
 
-from dash import Input, Output, State, ctx, html
+from dash import Input, Output, State, ctx, html, no_update
 import dash_bootstrap_components as dbc
 import dash.dependencies
 import json
@@ -15,6 +15,7 @@ from webui.components.alpaca_account import (
     render_orders_table_error,
     render_positions_table,
 )
+from webui.i18n import t
 
 
 def register_trading_callbacks(app):
@@ -22,17 +23,20 @@ def register_trading_callbacks(app):
 
     @app.callback(
         Output("alpaca-account-title", "children"),
-        Input("api-keys-store", "data")
+        Input("api-keys-store", "data"),
+        State("ui-language", "value")
     )
-    def update_account_title(stored_keys):
+    def update_account_title(stored_keys, ui_language):
         """Update account section title to reflect current paper/live trading mode"""
         if isinstance(stored_keys, dict) and "alpaca-paper" in stored_keys:
             use_paper_val = stored_keys["alpaca-paper"]
         else:
             from tradingagents.dataflows.config import get_alpaca_use_paper
             use_paper_val = get_alpaca_use_paper()
+        lang = ui_language or "en"
         is_paper = str(use_paper_val).strip().lower() not in ("false", "0", "no")
-        return f"Alpaca {'Paper' if is_paper else 'Live'} Trading Account"
+        mode = t(lang, "alpaca.account.paper") if is_paper else t(lang, "alpaca.account.live")
+        return t(lang, "alpaca.account.title", mode=mode)
 
     @app.callback(
         Output("orders-page-store", "data"),
@@ -42,7 +46,7 @@ def register_trading_callbacks(app):
     def update_orders_page_store(page_clicks):
         """Track Recent Orders page changes from the compact custom pager."""
         if not page_clicks or not any(page_clicks) or not ctx.triggered:
-            return dash.no_update
+            return no_update
 
         try:
             button_id = json.loads(ctx.triggered[0]["prop_id"].split(".")[0])
@@ -51,7 +55,7 @@ def register_trading_callbacks(app):
                 page_value = page_value.rsplit("-", 1)[-1]
             return int(page_value)
         except (ValueError, TypeError, json.JSONDecodeError):
-            return dash.no_update
+            return no_update
 
     @app.callback(
         [Output("positions-table-container", "children"),
@@ -60,27 +64,30 @@ def register_trading_callbacks(app):
         [Input("slow-refresh-interval", "n_intervals"),
          Input("refresh-btn", "n_clicks"),
          Input("refresh-alpaca-btn", "n_clicks"),
-         Input("orders-page-store", "data")]
+         Input("orders-page-store", "data"),
+         Input("ui-language", "value")]
     )
-    def update_enhanced_alpaca_tables(n_intervals, n_clicks, alpaca_refresh, orders_page):
+    def update_enhanced_alpaca_tables(n_intervals, n_clicks, alpaca_refresh, orders_page, ui_language):
         """Update the enhanced positions and orders tables"""
 
+        lang = ui_language or "en"
         page = orders_page if orders_page is not None else 1
 
-        positions_table = render_positions_table()
+        positions_table = render_positions_table(lang=lang)
         try:
             page_data = AlpacaUtils.get_recent_orders_page(page=page, page_size=ORDERS_PAGE_SIZE)
             active_page = page_data.get("page", page)
-            orders_table = render_orders_table_body(page_data.get("orders", []), active_page)
+            orders_table = render_orders_table_body(page_data.get("orders", []), active_page, lang=lang)
             orders_pagination = render_orders_pagination(
                 active_page,
                 page_data.get("total_pages", 1),
                 page_data.get("total_orders", 0),
                 page_data.get("has_more", False),
+                lang=lang,
             )
         except Exception as e:
-            orders_table = render_orders_table_error(e)
-            orders_pagination = render_orders_pagination(1, 1, 0, False)
+            orders_table = render_orders_table_error(e, lang=lang)
+            orders_pagination = render_orders_pagination(1, 1, 0, False, lang=lang)
 
         return positions_table, orders_table, orders_pagination
 

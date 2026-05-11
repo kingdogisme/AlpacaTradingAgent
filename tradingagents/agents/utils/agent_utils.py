@@ -1619,3 +1619,22 @@ class Toolkit:
         done deterministically so the LLM receives pre-digested conclusions.
         """
         return interface.get_technical_brief(symbol, curr_date)
+
+    @staticmethod
+    @tool
+    @timing_wrapper("MARKET")
+    def get_trend_brief(
+        symbol: Annotated[str, "ticker symbol (stocks: AAPL, NVDA; crypto: ETH/USD, BTC/USD)"],
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+        horizon: Annotated[str, "Trend horizon: position or trend"] = "position",
+    ) -> str:
+        """
+        Get a standardized Trend Brief for 1-3 month position or 3-6 month trend analysis.
+
+        Returns compact structured JSON containing:
+        - daily/weekly or weekly/monthly trend direction and moving-average slopes
+        - 3M/6M/12M returns and relative strength versus benchmark
+        - drawdown from 52-week high
+        - trend invalidation level and regime alignment
+        """
+        return interface.get_trend_brief(symbol, curr_date, horizon)

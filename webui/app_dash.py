@@ -71,11 +71,18 @@ def apply_sequential_mode_fix():
         return False
 
 
-def create_app():
+def create_app(base_path: str = "/"):
     """Create and configure the Dash application"""
     
     # Apply the sequential mode fix first
     apply_sequential_mode_fix()
+    
+    if not base_path:
+        base_path = "/"
+    if not base_path.startswith("/"):
+        base_path = f"/{base_path}"
+    if not base_path.endswith("/"):
+        base_path = f"{base_path}/"
     
     # Initialize Flask server
     server = Flask(__name__)
@@ -90,6 +97,8 @@ def create_app():
         ],
         suppress_callback_exceptions=APP_CONFIG["suppress_callback_exceptions"],
         update_title=APP_CONFIG["update_title"],
+        requests_pathname_prefix=base_path,
+        routes_pathname_prefix=base_path,
     )
 
     # Set app title
@@ -104,11 +113,11 @@ def create_app():
     return app
 
 
-def run_app(port=7860, share=False, server_name="127.0.0.1", debug=False, max_threads=1):
+def run_app(port=7860, share=False, server_name="127.0.0.1", debug=False, max_threads=1, base_path="/"):
     """Run the TradingAgents Dash Web UI"""
     
     # Create the app
-    app = create_app()
+    app = create_app(base_path=base_path)
     
     if debug:
         print(f"Starting TradingAgents Dash Web UI on port {port}...")

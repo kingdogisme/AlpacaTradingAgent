@@ -6,7 +6,9 @@ from ..schemas import TraderProposal, render_trader_proposal
 from ..utils.agent_trading_modes import (
     ensure_final_transaction_proposal,
     extract_recommendation,
+    get_agent_horizon_context,
     get_agent_specific_context,
+    get_horizon_context,
     get_trading_mode_context,
 )
 from ..utils.memory import TradingMemoryLog
@@ -92,7 +94,9 @@ def create_trader(llm, memory, config=None):
         
         # Get centralized trading mode context
         trading_context = get_trading_mode_context(config, current_position)
+        horizon_context = get_horizon_context(config)
         agent_context = get_agent_specific_context("trader", trading_context)
+        horizon_agent_context = get_agent_horizon_context("trader", horizon_context)
         
         # Get mode-specific terms for the prompt
         actions = trading_context["actions"]
@@ -105,7 +109,8 @@ def create_trader(llm, memory, config=None):
             state,
             agent_role="trader",
             objective=(
-                f"Prepare a swing trading plan for {company_name}. "
+                f"Prepare a horizon-appropriate trading plan for {company_name}. "
+                f"Horizon: {horizon_context['label']} ({horizon_context['holding_period']}). "
                 f"Current trader plan draft: {investment_plan}"
             ),
             config=config,
@@ -120,11 +125,23 @@ def create_trader(llm, memory, config=None):
         past_memory_str = ""
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
-        decision_memory_str = decision_log.get_past_context(company_name)
+        decision_memory_str = decision_log.get_past_context(
+            company_name,
+            horizon=horizon_context["horizon"],
+        )
 
         trader_context = render_prompt(
             "trader/trader_context",
             agent_context=agent_context,
+            horizon_agent_context=horizon_agent_context,
+            horizon_label=horizon_context["label"],
+            holding_period=horizon_context["holding_period"],
+            primary_timeframes=horizon_context["primary_timeframes"],
+            research_only_note=(
+                "Trend-horizon execution is research-only unless explicitly enabled."
+                if horizon_context["research_only"]
+                else "Execution may follow the normal order setting when enabled."
+            ),
             open_pos_desc=open_pos_desc,
             position_stats_desc=position_stats_desc,
             account_status_desc=account_status_desc,
@@ -146,6 +163,9 @@ def create_trader(llm, memory, config=None):
                 "trader/trader_enhanced_plan",
                 company_name=company_name,
                 analysis_context=analysis_context,
+                horizon_label=horizon_context["label"],
+                holding_period=horizon_context["holding_period"],
+                primary_timeframes=horizon_context["primary_timeframes"],
             )
 
             context = {
@@ -160,6 +180,9 @@ def create_trader(llm, memory, config=None):
                     "trader/trader_user_plan",
                     company_name=company_name,
                     investment_plan=investment_plan,
+                    horizon_label=horizon_context["label"],
+                    holding_period=horizon_context["holding_period"],
+                    primary_timeframes=horizon_context["primary_timeframes"],
                 ),
             }
 
@@ -208,6 +231,9 @@ USER MESSAGE:
             fallback_prompt = render_prompt(
                 "trader/trader_fallback_plan",
                 company_name=company_name,
+                horizon_label=horizon_context["label"],
+                holding_period=horizon_context["holding_period"],
+                primary_timeframes=horizon_context["primary_timeframes"],
             )
             
             analysis_content = invoke_structured_or_freetext(
@@ -258,6 +284,7 @@ USER MESSAGE:
             "trader_investment_plan": final_decision_content,
             "sender": name,
             "trading_mode": trading_mode,
+            "trading_horizon": horizon_context["horizon"],
             "current_position": current_position,
             "recommended_action": extracted_recommendation,
         }

@@ -7,8 +7,10 @@ that knows which knobs are valid for each model family.
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from tradingagents.llm_clients.discovery import discover_models
 from tradingagents.llm_clients.model_catalog import get_model_options as get_provider_catalog_options
 
 
@@ -410,26 +412,61 @@ def provider_supports_custom_model(provider: str) -> bool:
     return bool(get_provider_ui_metadata(provider).get("custom_models"))
 
 
+@lru_cache(maxsize=32)
+def _get_dynamic_model_options(provider: str) -> tuple[Dict[str, str], ...]:
+    provider_key = (provider or "openai").lower()
+    discovered = discover_models(provider_key)
+    return tuple({"label": label, "value": value} for label, value in discovered)
+
+
 def get_model_options_for_provider(provider: str, role: str) -> List[Dict[str, str]]:
+    return get_model_options_with_status(provider, role)["options"]
+
+
+def get_model_options_with_status(provider: str, role: str) -> Dict[str, Any]:
     provider_key = (provider or "openai").lower()
     if provider_key == "openai":
-        return get_openai_model_options(role)
-    if provider_key == "local_openai":
-        return get_openai_model_options(role) + [{"label": "Custom local model ID", "value": "custom"}]
-    options = [
-        {"label": label, "value": value}
-        for label, value in get_provider_catalog_options(provider_key, role)
-    ]
+        return {
+            "options": get_openai_model_options(role),
+            "source": "static",
+            "message": "Using built-in OpenAI model catalog.",
+        }
+
+    options: List[Dict[str, str]] = []
+    source = "dynamic"
+    message = "Discovered live provider models."
+    try:
+        options = [dict(option) for option in _get_dynamic_model_options(provider_key)]
+    except Exception as exc:
+        source = "fallback"
+        message = f"Dynamic discovery unavailable: {exc}. Fell back to built-in model catalog."
+        if provider_key == "local_openai":
+            options = get_openai_model_options(role)
+        else:
+            options = [
+                {"label": label, "value": value}
+                for label, value in get_provider_catalog_options(provider_key, role)
+            ]
+
+    if provider_key == "local_openai" and not options:
+        source = "fallback"
+        message = "Dynamic discovery returned no models. Fell back to built-in local-compatible defaults."
+        options = get_openai_model_options(role)
+
     if provider_supports_custom_model(provider_key) and not any(option["value"] == "custom" for option in options):
-        options.append({"label": "Custom model ID", "value": "custom"})
-    return options
+        custom_label = "Custom local model ID" if provider_key in ("local_openai", "ollama") else "Custom model ID"
+        options.append({"label": custom_label, "value": "custom"})
+    return {"options": options, "source": source, "message": message}
 
 
 def get_default_model_for_provider(provider: str, role: str) -> str:
     provider_key = (provider or "openai").lower()
-    if provider_key in ("openai", "local_openai"):
+    if provider_key == "openai":
         return "gpt-5.4-nano" if role == "quick" else "gpt-5.4-mini"
     options = get_model_options_for_provider(provider, role)
+    non_custom_options = [option for option in options if option.get("value") != "custom"]
+    if non_custom_options:
+        return non_custom_options[0]["value"]
     if options:
         return options[0]["value"]
     return "gpt-5.4-nano" if role == "quick" else "gpt-5.4-mini"

@@ -5,7 +5,7 @@ import unittest
 
 import pytz
 
-MODULE_PATH = pathlib.Path(__file__).resolve().parents[1] / "webui" / "utils" / "market_hours.py"
+MODULE_PATH = pathlib.Path(__file__).resolve().parents[3] / "webui" / "utils" / "market_hours.py"
 SPEC = importlib.util.spec_from_file_location("market_hours_under_test", MODULE_PATH)
 market_hours = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

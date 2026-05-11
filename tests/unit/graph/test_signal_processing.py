@@ -20,6 +20,14 @@ class SignalProcessorTests(unittest.TestCase):
             processor.process_signal("FINAL TRANSACTION PROPOSAL: **SHORT**"),
             "SHORT",
         )
+        self.assertEqual(
+            processor.process_signal("Quarterly thesis intact.\nFINAL TRANSACTION PROPOSAL: **NEUTRAL**"),
+            "NEUTRAL",
+        )
+        self.assertEqual(
+            processor.process_signal("Trend thesis still valid.\nFINAL TRANSACTION PROPOSAL: **HOLD**"),
+            "HOLD",
+        )
 
 
 if __name__ == "__main__":

@@ -1,17 +1,17 @@
 Current Position: {current_position}
 
-Swing Trading Position Transition Logic:
+Position Transition Logic:
 - If Current Position: LONG
-  - Signal: LONG -> Hold swing position, monitor daily with multi-day horizon
-  - Signal: NEUTRAL -> Close LONG position at next favorable exit point
-  - Signal: SHORT -> Close LONG position and enter SHORT swing position
+  - Signal: LONG -> Hold the existing long exposure while the thesis remains valid
+  - Signal: NEUTRAL -> Close the long position and move to cash
+  - Signal: SHORT -> Close the long position and open a short position
 
 - If Current Position: SHORT
-  - Signal: SHORT -> Hold swing position, monitor daily with multi-day horizon
-  - Signal: NEUTRAL -> Close SHORT position at next favorable exit point
-  - Signal: LONG -> Close SHORT position and enter LONG swing position
+  - Signal: SHORT -> Hold the existing short exposure while the thesis remains valid
+  - Signal: NEUTRAL -> Close the short position and move to cash
+  - Signal: LONG -> Close the short position and open a long position
 
 - If Current Position: NEUTRAL (no open position)
-  - Signal: LONG -> Enter LONG swing position based on multi-timeframe setup
-  - Signal: SHORT -> Enter SHORT swing position based on multi-timeframe setup
-  - Signal: NEUTRAL -> Stay in cash, wait for clear swing setup with confluence
+  - Signal: LONG -> Open a long position when the evidence and risk controls justify it
+  - Signal: SHORT -> Open a short position when the evidence and risk controls justify it
+  - Signal: NEUTRAL -> Stay in cash and wait for a justified setup

@@ -2,6 +2,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import AIMessage, ToolMessage
 import time
 import json
+from tradingagents.agents.utils.agent_trading_modes import (
+    get_agent_horizon_context,
+    get_horizon_context,
+)
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -18,6 +22,8 @@ def create_social_media_analyst(llm, toolkit):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
         company_name = state["company_of_interest"]
+        horizon_context = get_horizon_context(toolkit.config)
+        horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
         is_crypto = "/" in ticker or "USD" in ticker.upper() or "USDT" in ticker.upper()
         openai_available = toolkit.has_openai_web_search()
 
@@ -37,6 +43,10 @@ def create_social_media_analyst(llm, toolkit):
         )
         system_message = render_prompt(
             "analysts/social_system",
+            horizon_agent_context=horizon_agent_context,
+            horizon_label=horizon_context["label"],
+            holding_period=horizon_context["holding_period"],
+            primary_timeframes=horizon_context["primary_timeframes"],
             source_guidance=source_guidance,
         )
         asset_context = f"The current company we want to analyze is {ticker}"

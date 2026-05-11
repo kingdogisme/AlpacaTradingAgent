@@ -3,8 +3,10 @@ import json
 from ..schemas import RiskDecision, render_risk_decision
 from ..utils.agent_trading_modes import (
     ensure_final_transaction_proposal,
+    get_agent_horizon_context,
     get_trading_mode_context,
     get_agent_specific_context,
+    get_horizon_context,
     extract_recommendation,
 )
 from ..utils.memory import TradingMemoryLog
@@ -95,7 +97,9 @@ def create_risk_manager(llm, memory, config=None):
         
         # Get centralized trading mode context
         trading_context = get_trading_mode_context(config, current_position)
+        horizon_context = get_horizon_context(config)
         agent_context = get_agent_specific_context("manager", trading_context)
+        horizon_agent_context = get_agent_horizon_context("risk_mgmt", horizon_context)
         
         # Get mode-specific terms for the prompt
         actions = trading_context["actions"]
@@ -108,6 +112,7 @@ def create_risk_manager(llm, memory, config=None):
             agent_role="managers/risk_manager",
             objective=(
                 f"Judge risk debate and finalize risk-adjusted trade decision for {company_name}. "
+                f"Horizon: {horizon_context['label']} ({horizon_context['holding_period']}). "
                 f"Trader plan: {trader_plan}"
             ),
             config=config,
@@ -122,11 +127,23 @@ def create_risk_manager(llm, memory, config=None):
         past_memory_str = ""
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
-        decision_memory_str = decision_log.get_past_context(company_name)
+        decision_memory_str = decision_log.get_past_context(
+            company_name,
+            horizon=horizon_context["horizon"],
+        )
 
         prompt = render_prompt(
             "managers/risk_manager",
             agent_context=agent_context,
+            horizon_agent_context=horizon_agent_context,
+            horizon_label=horizon_context["label"],
+            holding_period=horizon_context["holding_period"],
+            primary_timeframes=horizon_context["primary_timeframes"],
+            research_only_note=(
+                "Trend-horizon execution is research-only unless explicitly enabled."
+                if horizon_context["research_only"]
+                else "Execution may follow the normal order setting when enabled."
+            ),
             decision_format=decision_format,
             open_pos_desc=open_pos_desc,
             position_stats_desc=position_stats_desc,
@@ -184,6 +201,7 @@ def create_risk_manager(llm, memory, config=None):
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_decision_content,
             "trading_mode": trading_mode,
+            "trading_horizon": horizon_context["horizon"],
             "current_position": current_position,
             "recommended_action": extracted_recommendation,
         }

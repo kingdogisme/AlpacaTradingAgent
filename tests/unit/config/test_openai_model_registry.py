@@ -1,9 +1,12 @@
 import unittest
+import warnings
+from unittest.mock import patch
 
 from tradingagents.openai_model_registry import (
     apply_responses_model_params,
     get_default_model_for_provider,
     get_model_options_for_provider,
+    get_model_options_with_status,
     get_openai_model_options,
     get_provider_ui_metadata,
     normalize_model_params,
@@ -12,6 +15,11 @@ from tradingagents.openai_model_registry import (
 
 
 class OpenAIModelRegistryTests(unittest.TestCase):
+    def tearDown(self):
+        from tradingagents.openai_model_registry import _get_dynamic_model_options
+
+        _get_dynamic_model_options.cache_clear()
+
     def test_model_options_remove_deprecated_choices_and_keep_low_cost_model(self):
         quick_values = {option["value"] for option in get_openai_model_options("quick")}
         deep_values = {option["value"] for option in get_openai_model_options("deep")}
@@ -76,7 +84,15 @@ class OpenAIModelRegistryTests(unittest.TestCase):
         self.assertEqual(payload["max_output_tokens"], 128)
         self.assertFalse(payload["store"])
 
-    def test_provider_catalog_exposes_custom_model_paths_where_needed(self):
+    @patch("tradingagents.openai_model_registry.discover_models")
+    def test_provider_catalog_exposes_custom_model_paths_where_needed(self, mock_discover):
+        def fake_discover(provider):
+            if provider == "azure":
+                raise RuntimeError("not supported")
+            return [(f"{provider}-model", f"{provider}-model")]
+
+        mock_discover.side_effect = fake_discover
+
         for provider in ("local_openai", "deepseek", "qwen", "glm", "openrouter", "ollama", "azure"):
             with self.subTest(provider=provider):
                 values = {option["value"] for option in get_model_options_for_provider(provider, "quick")}
@@ -85,10 +101,42 @@ class OpenAIModelRegistryTests(unittest.TestCase):
         self.assertFalse(get_provider_ui_metadata("openai")["backend_visible"])
         self.assertTrue(get_provider_ui_metadata("azure")["backend_visible"])
 
-    def test_openai_provider_defaults_stay_cost_safe_after_switching(self):
+    @patch("tradingagents.openai_model_registry.discover_models")
+    def test_openai_provider_defaults_stay_cost_safe_after_switching(self, mock_discover):
+        mock_discover.return_value = [("local-a", "local-a"), ("local-b", "local-b")]
         self.assertEqual(get_default_model_for_provider("openai", "quick"), "gpt-5.4-nano")
         self.assertEqual(get_default_model_for_provider("openai", "deep"), "gpt-5.4-mini")
-        self.assertEqual(get_default_model_for_provider("local_openai", "quick"), "gpt-5.4-nano")
+        self.assertEqual(get_default_model_for_provider("local_openai", "quick"), "local-a")
+
+    @patch("tradingagents.openai_model_registry.discover_models")
+    def test_dynamic_discovery_preferred_for_supported_non_openai_providers(self, mock_discover):
+        mock_discover.return_value = [("Gemini 3.1 Pro", "gemini-3.1-pro-preview")]
+        result = get_model_options_with_status("google", "deep")
+        values = result["options"]
+        self.assertEqual(values[0]["value"], "gemini-3.1-pro-preview")
+        self.assertEqual(result["source"], "dynamic")
+        self.assertNotIn("custom", {option["value"] for option in values})
+
+    @patch("tradingagents.openai_model_registry.discover_models")
+    def test_falls_back_to_static_catalog_when_discovery_fails(self, mock_discover):
+        mock_discover.side_effect = RuntimeError("network down")
+        result = get_model_options_with_status("google", "quick")
+        values = result["options"]
+        self.assertEqual(result["source"], "fallback")
+        self.assertIn("network down", result["message"])
+        self.assertIn("gemini-2.5-flash", {option["value"] for option in values})
+
+    @patch("tradingagents.openai_model_registry.discover_models")
+    def test_local_openai_empty_discovery_falls_back_to_builtin_defaults(self, mock_discover):
+        mock_discover.return_value = []
+
+        result = get_model_options_with_status("local_openai", "quick")
+        values = result["options"]
+
+        self.assertEqual(result["source"], "fallback")
+        self.assertIn("Dynamic discovery returned no models", result["message"])
+        self.assertIn("gpt-5.4-nano", {option["value"] for option in values})
+        self.assertIn("custom", {option["value"] for option in values})
 
     def test_custom_model_choice_resolves_to_runtime_model_id(self):
         self.assertEqual(resolve_model_choice("custom", " openai/gpt-5.4-mini "), "openai/gpt-5.4-mini")
@@ -105,6 +153,25 @@ class OpenAIModelRegistryTests(unittest.TestCase):
         self.assertEqual(params["temperature"], 0.4)
         self.assertEqual(params["top_p"], 0.7)
         self.assertNotIn("reasoning_effort", params)
+
+
+class ValidatorsTests(unittest.TestCase):
+    def test_validate_model_is_permissive_for_dynamic_runtime_models(self):
+        from tradingagents.llm_clients.validators import validate_model
+
+        self.assertTrue(validate_model("google", "gemini-future-9"))
+        self.assertTrue(validate_model("openrouter", "openai/gpt-5.9-preview"))
+
+    def test_permissive_validation_does_not_emit_unknown_model_warning(self):
+        from tradingagents.llm_clients.google_client import GoogleClient
+
+        with patch("tradingagents.llm_clients.google_client.NormalizedChatGoogleGenerativeAI"):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                GoogleClient("gemini-future-9", api_key="test-key").get_llm()
+
+        runtime_warnings = [item for item in caught if issubclass(item.category, RuntimeWarning)]
+        self.assertEqual(runtime_warnings, [])
 
 
 if __name__ == "__main__":

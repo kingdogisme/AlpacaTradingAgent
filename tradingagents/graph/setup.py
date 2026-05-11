@@ -96,6 +96,7 @@ class GraphSetup:
                 "investment_plan",
                 "trader_investment_plan",
                 "final_trade_decision",
+                "trading_horizon",
             ]
             for output_key in output_keys:
                 output_value = result.get(output_key)
@@ -554,13 +555,13 @@ class GraphSetup:
         bull_researcher_node = self._wrap_node_with_run_logging(
             "Bull Researcher",
             create_bull_researcher(
-                self.quick_thinking_llm, self.bull_memory
+                self.quick_thinking_llm, self.bull_memory, self.config
             ),
         )
         bear_researcher_node = self._wrap_node_with_run_logging(
             "Bear Researcher",
             create_bear_researcher(
-                self.quick_thinking_llm, self.bear_memory
+                self.quick_thinking_llm, self.bear_memory, self.config
             ),
         )
         research_manager_node = self._wrap_node_with_run_logging(

@@ -9,6 +9,7 @@ from datetime import datetime
 import pytz
 from tradingagents.dataflows.alpaca_utils import AlpacaUtils
 from tradingagents.dataflows.config import get_alpaca_use_paper
+from webui.i18n import t
 
 
 ORDERS_PAGE_SIZE = 10
@@ -33,7 +34,7 @@ def _visible_order_pages(active_page, total_pages):
     return visible
 
 
-def render_orders_pagination(active_page, total_pages, total_orders=0, has_more=False):
+def render_orders_pagination(active_page, total_pages, total_orders=0, has_more=False, lang="en"):
     """Render compact Recent Orders pagination with latest/oldest page windows."""
     total_pages = max(1, int(total_pages or 1))
     active_page = max(1, min(int(active_page or 1), total_pages))
@@ -48,7 +49,7 @@ def render_orders_pagination(active_page, total_pages, total_orders=0, has_more=
             outline=True,
             disabled=active_page <= 1,
             className="orders-page-btn",
-            title="Previous page",
+            title=t(lang, "alpaca.orders.prev_page"),
         )
     ]
 
@@ -66,7 +67,7 @@ def render_orders_pagination(active_page, total_pages, total_orders=0, has_more=
                 outline=item != active_page,
                 disabled=item == active_page,
                 className=f"orders-page-btn {'active' if item == active_page else ''}",
-                title=f"Page {item}",
+                title=t(lang, "alpaca.orders.page", page=item),
             )
         )
 
@@ -79,26 +80,26 @@ def render_orders_pagination(active_page, total_pages, total_orders=0, has_more=
             outline=True,
             disabled=active_page >= total_pages,
             className="orders-page-btn",
-            title="Next page",
+            title=t(lang, "alpaca.orders.next_page"),
         )
     )
 
-    total_text = f"{total_orders} orders"
+    total_text = t(lang, "alpaca.orders.count", count=total_orders)
     if has_more:
-        total_text = f"{total_orders}+ orders"
+        total_text = t(lang, "alpaca.orders.count_more", count=total_orders)
 
     return html.Div(
         [
             html.Div(buttons, className="orders-page-buttons"),
             html.Div(
-                f"Page {active_page} of {total_pages} | {total_text}",
+                t(lang, "alpaca.orders.page_meta", active=active_page, total=total_pages, orders=total_text),
                 className="orders-page-meta",
             ),
         ],
         className="orders-pagination",
     )
 
-def render_positions_table():
+def render_positions_table(lang="en"):
     """Render the enhanced positions table with liquidate buttons"""
     try:
         positions_data = AlpacaUtils.get_positions_data()
@@ -107,8 +108,8 @@ def render_positions_table():
             return html.Div([
                 html.Div([
                     html.I(className="fas fa-chart-line fa-2x mb-3"),
-                    html.H5("No Open Positions", className="text-muted"),
-                    html.P("Your portfolio is currently empty", className="text-muted small")
+                    html.H5(t(lang, "alpaca.positions.empty"), className="text-muted"),
+                    html.P(t(lang, "alpaca.positions.empty.help"), className="text-muted small")
                 ], className="text-center p-5")
             ], className="enhanced-table-container")
 
@@ -140,13 +141,13 @@ def render_positions_table():
                     html.Div([
                         html.Strong(position["Symbol"], className="symbol-text"),
                         html.Br(),
-                        html.Small(f"{position['Qty']} shares", className="text-muted")
+                        html.Small(t(lang, "alpaca.positions.qty", qty=position['Qty']), className="text-muted")
                     ])
                 ], className="symbol-cell"),
                 html.Td([
                     html.Div([
                         html.Div(position["Market Value"], className="fw-bold"),
-                        html.Small(f"Entry: {position['Avg Entry']}", className="text-muted")
+                        html.Small(t(lang, "alpaca.positions.entry", entry=position['Avg Entry']), className="text-muted")
                     ])
                 ], className="value-cell"),
                 html.Td([
@@ -164,7 +165,7 @@ def render_positions_table():
                 html.Td([
                     dbc.Button([
                         html.I(className="fas fa-times-circle me-1"),
-                        "Liquidate"
+                        t(lang, "alpaca.positions.liquidate")
                     ],
                     id={"type": "liquidate-btn", "index": position["Symbol"]},
                     color="danger",
@@ -182,11 +183,11 @@ def render_positions_table():
             html.Table([
                 html.Thead([
                     html.Tr([
-                        html.Th("Position", className="table-header"),
-                        html.Th("Market Value", className="table-header"),
-                        html.Th("Today's P/L", className="table-header"),
-                        html.Th("Total P/L", className="table-header"),
-                        html.Th("Actions", className="table-header text-center")
+                        html.Th(t(lang, "alpaca.positions.col.position"), className="table-header"),
+                        html.Th(t(lang, "alpaca.positions.col.market_value"), className="table-header"),
+                        html.Th(t(lang, "alpaca.positions.col.today_pl"), className="table-header"),
+                        html.Th(t(lang, "alpaca.positions.col.total_pl"), className="table-header"),
+                        html.Th(t(lang, "alpaca.positions.col.actions"), className="table-header text-center")
                     ])
                 ]),
                 html.Tbody(table_rows)
@@ -200,20 +201,20 @@ def render_positions_table():
         return html.Div([
             html.Div([
                 html.I(className="fas fa-exclamation-triangle fa-2x mb-3 text-warning"),
-                html.H5("Unable to Load Positions", className="text-warning"),
-                html.P("Check your Alpaca API keys", className="text-muted"),
+                html.H5(t(lang, "alpaca.positions.error"), className="text-warning"),
+                html.P(t(lang, "alpaca.positions.error.help"), className="text-muted"),
                 html.Small(f"Error: {str(e)}", className="text-muted")
             ], className="text-center p-4")
         ], className="enhanced-table-container error-state")
 
-def render_orders_table_body(orders_data, page=1):
+def render_orders_table_body(orders_data, page=1, lang="en"):
     """Render only the Recent Orders table body so the loading spinner stays off pagination."""
     if not orders_data:
         return html.Div([
             html.Div([
                 html.I(className="fas fa-history fa-2x mb-3"),
-                html.H5("No Recent Orders", className="text-muted"),
-                html.P("No trading activity found", className="text-muted small")
+                html.H5(t(lang, "alpaca.orders.empty"), className="text-muted"),
+                html.P(t(lang, "alpaca.orders.empty.help"), className="text-muted small")
             ], className="text-center p-4")
         ], className="orders-empty-state")
 
@@ -241,19 +242,19 @@ def render_orders_table_body(orders_data, page=1):
                 html.Div([
                     html.Span(order["Side"], className=f"fw-bold {side_color}"),
                     html.Br(),
-                    html.Small(f"{order['Qty']} shares", className="text-muted")
+                    html.Small(t(lang, "alpaca.positions.qty", qty=order['Qty']), className="text-muted")
                 ])
             ], className="side-cell"),
             html.Td([
                 html.Div([
                     html.Div(f"{order['Filled Qty']}", className="fw-bold"),
-                    html.Small("filled", className="text-muted")
+                    html.Small(t(lang, "alpaca.orders.filled"), className="text-muted")
                 ])
             ], className="filled-cell"),
             html.Td([
                 html.Div([
                     html.Div(order["Avg. Fill Price"], className="fw-bold"),
-                    html.Small("avg price", className="text-muted")
+                    html.Small(t(lang, "alpaca.orders.avg_price"), className="text-muted")
                 ])
             ], className="price-cell"),
             html.Td([
@@ -269,29 +270,29 @@ def render_orders_table_body(orders_data, page=1):
     return html.Table([
         html.Thead([
             html.Tr([
-                html.Th("Asset", className="table-header"),
-                html.Th("Side & Qty", className="table-header"),
-                html.Th("Filled", className="table-header"),
-                html.Th("Avg Price", className="table-header"),
-                html.Th("Status", className="table-header")
+                html.Th(t(lang, "alpaca.orders.col.asset"), className="table-header"),
+                html.Th(t(lang, "alpaca.orders.col.side_qty"), className="table-header"),
+                html.Th(t(lang, "alpaca.orders.col.filled"), className="table-header"),
+                html.Th(t(lang, "alpaca.orders.col.avg_price"), className="table-header"),
+                html.Th(t(lang, "alpaca.orders.col.status"), className="table-header")
             ])
         ]),
         html.Tbody(table_rows)
     ], className="enhanced-table orders-table")
 
 
-def render_orders_table_error(error):
+def render_orders_table_error(error, lang="en"):
     return html.Div([
         html.Div([
             html.I(className="fas fa-exclamation-triangle fa-2x mb-3 text-warning"),
-            html.H5("Unable to Load Orders", className="text-warning"),
-            html.P("Check your Alpaca API keys", className="text-muted"),
+            html.H5(t(lang, "alpaca.orders.error"), className="text-warning"),
+            html.P(t(lang, "alpaca.orders.error.help"), className="text-muted"),
             html.Small(f"Error: {str(error)}", className="text-muted")
         ], className="text-center p-4")
     ], className="orders-empty-state error-state")
 
 
-def render_orders_table(page=1, page_size=ORDERS_PAGE_SIZE):
+def render_orders_table(page=1, page_size=ORDERS_PAGE_SIZE, lang="en"):
     """Render the enhanced Recent Orders surface with table-only loading."""
     try:
         page_data = AlpacaUtils.get_recent_orders_page(page=page, page_size=page_size)
@@ -304,7 +305,7 @@ def render_orders_table(page=1, page_size=ORDERS_PAGE_SIZE):
             dcc.Loading(
                 html.Div(
                     id="orders-table-body-container",
-                    children=render_orders_table_body(page_data.get("orders", []), active_page),
+                    children=render_orders_table_body(page_data.get("orders", []), active_page, lang=lang),
                     className="orders-table-body",
                 ),
                 type="circle",
@@ -312,7 +313,7 @@ def render_orders_table(page=1, page_size=ORDERS_PAGE_SIZE):
             ),
             html.Div(
                 id="orders-pagination-container",
-                children=render_orders_pagination(active_page, total_pages, total_orders, has_more),
+                children=render_orders_pagination(active_page, total_pages, total_orders, has_more, lang=lang),
             ),
         ], className="enhanced-table-container orders-table-container")
 
@@ -320,14 +321,14 @@ def render_orders_table(page=1, page_size=ORDERS_PAGE_SIZE):
         print(f"Error rendering orders table: {e}")
         return html.Div([
             dcc.Loading(
-                html.Div(id="orders-table-body-container", children=render_orders_table_error(e)),
+                html.Div(id="orders-table-body-container", children=render_orders_table_error(e, lang=lang)),
                 type="circle",
                 className="orders-loading",
             ),
-            html.Div(id="orders-pagination-container", children=render_orders_pagination(1, 1, 0, False)),
+            html.Div(id="orders-pagination-container", children=render_orders_pagination(1, 1, 0, False, lang=lang)),
         ], className="enhanced-table-container orders-table-container error-state")
 
-def render_account_summary():
+def render_account_summary(lang="en"):
     """Render account summary information"""
     try:
         account_info = AlpacaUtils.get_account_info()
@@ -347,7 +348,7 @@ def render_account_summary():
                     html.Div([
                         html.Div([
                             html.I(className="fas fa-wallet me-2"),
-                            "Buying Power"
+                            t(lang, "alpaca.summary.buying_power")
                         ], className="summary-label"),
                         html.Div(f"${buying_power:.2f}", className="summary-value")
                     ], className="summary-item enhanced-summary-item")
@@ -356,7 +357,7 @@ def render_account_summary():
                     html.Div([
                         html.Div([
                             html.I(className="fas fa-dollar-sign me-2"),
-                            "Cash"
+                            t(lang, "alpaca.summary.cash")
                         ], className="summary-label"),
                         html.Div(f"${cash:.2f}", className="summary-value")
                     ], className="summary-item enhanced-summary-item")
@@ -365,7 +366,7 @@ def render_account_summary():
                     html.Div([
                         html.Div([
                             html.I(className=f"{change_icon} me-2"),
-                            "Daily Change"
+                            t(lang, "alpaca.summary.daily_change")
                         ], className="summary-label"),
                         html.Div([
                             f"${daily_change_dollars:.2f} ",
@@ -383,8 +384,8 @@ def render_account_summary():
         return html.Div([
             html.Div([
                 html.I(className="fas fa-exclamation-triangle fa-2x mb-3 text-warning"),
-                html.H5("Unable to Load Account Summary", className="text-warning"),
-                html.P("Check your Alpaca API keys", className="text-muted"),
+                html.H5(t(lang, "alpaca.summary.error"), className="text-warning"),
+                html.P(t(lang, "alpaca.summary.error.help"), className="text-muted"),
                 html.Small(f"Error: {str(e)}", className="text-muted")
             ], className="text-center p-4")
         ], className="enhanced-account-summary error-state")
@@ -405,21 +406,21 @@ def get_recent_orders(page=1, page_size=ORDERS_PAGE_SIZE):
         print(f"Error getting orders data: {e}")
         return []
 
-def render_alpaca_account_section():
+def render_alpaca_account_section(lang="en"):
     """Render the complete Alpaca account section"""
     use_paper_str = get_alpaca_use_paper()
     is_paper = str(use_paper_str).strip().lower() not in ("false", "0", "no")
-    account_mode_label = "Paper Trading" if is_paper else "Live Trading"
+    account_mode_label = t(lang, "alpaca.account.paper") if is_paper else t(lang, "alpaca.account.live")
     return html.Div([
         html.H4([
             html.I(className="fas fa-chart-line me-2"),
-            html.Span(f"Alpaca {account_mode_label} Account", id="alpaca-account-title"),
+            html.Span(t(lang, "alpaca.account.title", mode=account_mode_label), id="alpaca-account-title"),
             html.Button([
                 html.I(className="fas fa-sync-alt")
             ],
             id="refresh-alpaca-btn",
             className="btn btn-sm btn-outline-primary ms-auto",
-            title="Refresh Alpaca account data"
+            title=t(lang, "alpaca.account.refresh")
             )
         ], className="mb-3 d-flex align-items-center"),
         html.Hr(),
@@ -427,20 +428,20 @@ def render_alpaca_account_section():
             dbc.Col([
                 html.H5([
                     html.I(className="fas fa-briefcase me-2"),
-                    "Open Positions"
+                    t(lang, "alpaca.positions.title")
                 ], className="mb-3"),
-                html.Div(id="positions-table-container", children=render_positions_table())
+                html.Div(id="positions-table-container", children=render_positions_table(lang=lang))
             ], md=7),
             dbc.Col([
                 html.H5([
                     html.I(className="fas fa-history me-2"),
-                    "Recent Orders"
+                    t(lang, "alpaca.orders.title")
                 ], className="mb-3"),
                 dcc.Store(id="orders-page-store", data=1),
-                html.Div(id="orders-table-container", children=render_orders_table())
+                html.Div(id="orders-table-container", children=render_orders_table(lang=lang))
             ], md=5)
         ]),
-        render_account_summary(),
+        render_account_summary(lang=lang),
         # Hidden div for liquidation confirmations
         dcc.ConfirmDialog(
             id='liquidate-confirm',

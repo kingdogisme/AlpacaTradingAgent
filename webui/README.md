@@ -20,7 +20,14 @@ This directory contains the Dash and Flask web interface for AlpacaTradingAgent,
 You can run the web UI using the helper script:
 
 ```bash
-python run_webui_dash.py
+python run_webui_dash.py --port 7860
+```
+
+When accessing the UI through a preview/proxy path, pass that path as the Dash
+base path so assets and callbacks resolve correctly:
+
+```bash
+python run_webui_dash.py --port 7860 --base-path /proxy/7860/
 ```
 
 Or directly from Python:

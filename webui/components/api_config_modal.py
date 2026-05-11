@@ -9,6 +9,8 @@ Supports both localStorage persistence and .env file fallback.
 import dash_bootstrap_components as dbc
 from dash import html, dcc
 
+from webui.i18n import t
+
 
 # Define API configuration structure
 API_CONFIGS = [
@@ -150,10 +152,10 @@ API_CONFIGS = [
 ]
 
 
-def create_api_input_row(api_config):
+def create_api_input_row(api_config, lang="en"):
     """Create a single API key input row with show/hide toggle"""
     api_id = api_config["id"]
-    
+
     return dbc.Row([
         dbc.Col([
             dbc.Label([
@@ -164,7 +166,7 @@ def create_api_input_row(api_config):
                 [
                     api_config["help_text"],
                     " - ",
-                    html.A("Get API Key", href=api_config["help_url"], target="_blank", className="text-info")
+                    html.A(t(lang, "api.modal.get_api_key"), href=api_config["help_url"], target="_blank", className="text-info")
                 ],
                 className="text-muted d-block mb-1"
             ),
@@ -187,7 +189,7 @@ def create_api_input_row(api_config):
                     id=f"api-toggle-{api_id}",
                     color="outline-secondary",
                     className="api-toggle-btn",
-                    title="Show/Hide API Key"
+                    title=t(lang, "api.modal.toggle_visibility")
                 ),
                 dbc.Button(
                     html.I(className="fas fa-check"),
@@ -195,28 +197,26 @@ def create_api_input_row(api_config):
                     color="outline-success",
                     disabled=True,
                     className="api-status-indicator",
-                    title="API Key Status"
+                    title=t(lang, "api.modal.key_status")
                 ),
             ]),
         ], width=12),
     ], className="mb-3")
 
 
-def create_api_config_modal():
+def create_api_config_modal(lang="en"):
     """Create the API configuration modal"""
-    
-    # Build API input rows
-    api_inputs = [create_api_input_row(api) for api in API_CONFIGS]
-    
-    # Add Alpaca paper trading toggle
+
+    api_inputs = [create_api_input_row(api, lang=lang) for api in API_CONFIGS]
+
     alpaca_paper_toggle = dbc.Row([
         dbc.Col([
             dbc.Label([
                 html.I(className="fas fa-flask me-2"),
-                "Alpaca Paper Trading"
+                t(lang, "api.modal.paper_title")
             ], className="fw-bold"),
             html.Small(
-                "Enable paper trading mode (recommended for testing)",
+                t(lang, "api.modal.paper_help"),
                 className="text-muted d-block mb-1"
             ),
         ], width=8),
@@ -229,14 +229,14 @@ def create_api_config_modal():
             ),
         ], width=4, className="d-flex align-items-center justify-content-end"),
     ], className="mb-3")
-    
+
     modal = dbc.Modal(
         [
             dbc.ModalHeader(
                 [
                     html.H4([
                         html.I(className="fas fa-cog me-2"),
-                        "API Configuration"
+                        t(lang, "api.modal.title")
                     ], className="mb-0"),
                 ],
                 close_button=True,
@@ -244,30 +244,20 @@ def create_api_config_modal():
             ),
             dbc.ModalBody(
                 [
-                    # Info alert
                     html.Div([
                         html.I(className="fas fa-info-circle me-2"),
-                        "Configure your API keys below. Keys are stored in your browser's local storage and take precedence over .env file settings. ",
-                        html.Strong("Your keys never leave your browser."),
+                        t(lang, "api.modal.info"),
+                        " ",
+                        html.Strong(t(lang, "api.modal.info.strong")),
                     ], className="alert alert-info mb-4"),
-                    
-                    # .env file status
                     html.Div(
                         id="env-file-status",
                         className="mb-3"
                     ),
-                    
                     html.Hr(),
-                    
-                    # API key inputs
                     html.Div(api_inputs),
-                    
                     html.Hr(),
-                    
-                    # Alpaca paper trading toggle
                     alpaca_paper_toggle,
-                    
-                    # Hidden store for tracking visibility states
                     dcc.Store(id="api-visibility-store", data={api["id"]: False for api in API_CONFIGS}),
                 ],
                 className="api-config-modal-body",
@@ -278,7 +268,7 @@ def create_api_config_modal():
                     dbc.Button(
                         [
                             html.I(className="fas fa-trash me-2"),
-                            "Clear All"
+                            t(lang, "api.modal.clear_all")
                         ],
                         id="clear-api-keys-btn",
                         color="outline-danger",
@@ -288,7 +278,7 @@ def create_api_config_modal():
                     dbc.Button(
                         [
                             html.I(className="fas fa-sync me-2"),
-                            "Load from .env"
+                            t(lang, "api.modal.load_env")
                         ],
                         id="load-env-btn",
                         color="outline-info",
@@ -298,7 +288,7 @@ def create_api_config_modal():
                     dbc.Button(
                         [
                             html.I(className="fas fa-save me-2"),
-                            "Save & Apply"
+                            t(lang, "api.modal.save_apply")
                         ],
                         id="save-api-keys-btn",
                         color="primary",
@@ -308,7 +298,7 @@ def create_api_config_modal():
                     dbc.Button(
                         [
                             html.I(className="fas fa-times me-2"),
-                            "Close"
+                            t(lang, "api.modal.close")
                         ],
                         id="close-api-config-btn",
                         color="secondary",
@@ -325,22 +315,22 @@ def create_api_config_modal():
         className="api-config-modal",
         style={"z-index": "9999"}
     )
-    
+
     return modal
 
 
-def create_config_button():
+def create_config_button(lang="en"):
     """Create the Config APIs button for the header"""
     return dbc.Button(
         [
             html.I(className="fas fa-key me-2"),
-            "Config APIs"
+            t(lang, "api.modal.config_button")
         ],
         id="open-api-config-btn",
         color="outline-warning",
         size="sm",
         className="config-apis-btn",
-        title="Configure API Keys"
+        title=t(lang, "api.modal.config_button_title")
     )
 
 

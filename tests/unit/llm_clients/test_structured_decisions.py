@@ -53,12 +53,20 @@ class StructuredDecisionTests(unittest.TestCase):
                 confidence="low",
                 risk_rationale="Downside exceeds reward.",
                 required_controls="Do not re-enter without reversal.",
+                time_horizon="3-6 months",
+                thesis="Quarterly trend is broken.",
+                invalidation="Reclaim weekly trend support.",
+                review_cadence="Quarterly",
+                position_plan="Exit the trend position.",
+                risk_budget="No new exposure until thesis repairs.",
             )
         )
 
         self.assertIn("**Advisory Rating**: Overweight", research)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **BUY**", research)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **LONG**", trader)
+        self.assertIn("**Invalidation**: Reclaim weekly trend support.", risk)
+        self.assertIn("**Review Cadence**: Quarterly", risk)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **SELL**", risk)
         self.assertEqual(extract_recommendation(research, "investment"), "BUY")
 

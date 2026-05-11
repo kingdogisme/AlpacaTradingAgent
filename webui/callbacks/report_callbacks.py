@@ -860,13 +860,39 @@ def register_report_callbacks(app):
         # A race condition can occur where the final report is generated but the analysis_complete flag is not yet set.
         # We should only show the final decision when the state is confirmed as complete.
         if state.get("analysis_complete") and final_report_content is not None:
+            analysis_results = state.get("analysis_results") or {}
+            horizon = (
+                analysis_results.get("trading_horizon")
+                or state.get("trading_horizon")
+                or "swing"
+            )
+            horizon_label = {
+                "swing": "Swing",
+                "position": "Position",
+                "trend": "Trend",
+            }.get(str(horizon).lower(), "Swing")
+            research_only = bool(
+                analysis_results.get("trend_research_only")
+                or (
+                    str(horizon).lower() in {"position", "trend"}
+                    and not state.get("trend_execution_enabled", False)
+                )
+            )
             if state["analysis_results"]:
                 decision_text = f"## Final Decision for {state['ticker_symbol']}\n\n"
+                decision_text += f"**Horizon:** {horizon_label}"
+                if research_only:
+                    decision_text += " - Research-only unless trend execution is explicitly enabled"
+                decision_text += "\n\n"
                 decision_text += f"**Trade Action:** {state['analysis_results'].get('decision', 'No decision')}\n\n"
                 decision_text += "**Date:** " + state['analysis_results'].get("date", "N/A")
             else:
                 # Show the recommended action if available
                 decision_text = f"## Final Decision for {state['ticker_symbol']}\n\n"
+                decision_text += f"**Horizon:** {horizon_label}"
+                if research_only:
+                    decision_text += " - Research-only unless trend execution is explicitly enabled"
+                decision_text += "\n\n"
                 
                 # Display the extracted recommendation prominently
                 if "recommended_action" in state and state["recommended_action"]:
