@@ -4,23 +4,46 @@ from openai import OpenAI
 import numpy as np
 from pathlib import Path
 import re
-from tradingagents.dataflows.config import get_openai_client_config, get_openai_embedding_model
+import requests
+from tradingagents.dataflows.config import (
+    get_embedding_provider,
+    get_google_api_key,
+    get_google_embedding_model,
+    get_openai_client_config,
+    get_openai_embedding_model,
+)
 from tradingagents.agents.utils.agent_trading_modes import extract_recommendation
 
 
 class FinancialSituationMemory:
     def __init__(self, name):
-        client_config = get_openai_client_config()
-        self.client = OpenAI(**client_config) if client_config else None
-        self.embedding_model = get_openai_embedding_model()
-        self.embeddings_enabled = self.client is not None
+        self.embedding_provider = get_embedding_provider()
+        self.client = None
+        self.google_api_key = None
+        if self.embedding_provider in ("disabled", "none", "off"):
+            self.embedding_provider = "disabled"
+            self.embedding_model = None
+            self.embeddings_enabled = False
+        elif self.embedding_provider in ("google", "gemini"):
+            self.embedding_provider = "google"
+            self.embedding_model = get_google_embedding_model()
+            self.google_api_key = get_google_api_key()
+            self.embeddings_enabled = bool(self.google_api_key)
+        else:
+            self.embedding_provider = "openai"
+            client_config = get_openai_client_config()
+            self.client = OpenAI(**client_config) if client_config else None
+            self.embedding_model = get_openai_embedding_model()
+            self.embeddings_enabled = self.client is not None
         self._warned_embedding_failure = False
         self.chroma_client = chromadb.Client(Settings(allow_reset=True))
         self.situation_collection = self.chroma_client.get_or_create_collection(name=name)
 
     def get_embedding(self, text):
-        """Get OpenAI embedding for a text"""
-        if not self.embeddings_enabled or self.client is None:
+        """Get an embedding for a text using the configured provider."""
+        if not self.embeddings_enabled:
+            return None
+        if self.embedding_provider == "openai" and self.client is None:
             return None
 
         # Truncate text if it exceeds the model's token limit
@@ -34,9 +57,9 @@ class FinancialSituationMemory:
             print(f"[MEMORY] Warning: Text truncated to ~{max_chars} characters for embedding")
         
         try:
-            response = self.client.embeddings.create(
-                model=self.embedding_model, input=text
-            )
+            if self.embedding_provider == "google":
+                return self._get_google_embedding(text)
+            response = self.client.embeddings.create(model=self.embedding_model, input=text)
             return response.data[0].embedding
         except Exception as exc:
             self.embeddings_enabled = False
@@ -47,6 +70,25 @@ class FinancialSituationMemory:
                 )
                 self._warned_embedding_failure = True
             return None
+
+    def _get_google_embedding(self, text):
+        model = str(self.embedding_model or "gemini-embedding-001").strip()
+        model_path = model if model.startswith("models/") else f"models/{model}"
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            f"{model_path}:embedContent"
+        )
+        response = requests.post(
+            url,
+            params={"key": self.google_api_key},
+            json={"content": {"parts": [{"text": text}]}},
+            timeout=30,
+        )
+        response.raise_for_status()
+        values = response.json().get("embedding", {}).get("values")
+        if not values:
+            raise ValueError("Gemini embedding response did not include values")
+        return values
 
     def add_situations(self, situations_and_advice):
         """Add financial situations and their corresponding advice. Parameter is a list of tuples (situation, rec)"""

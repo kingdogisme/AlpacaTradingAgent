@@ -2,6 +2,8 @@
 
 {horizon_agent_context}
 
+{language_instruction}
+
 ## Your workflow
 
 {workflow_intro}
@@ -17,6 +19,7 @@
    - **Entry Timing**: Look for Stoch RSI crossovers or pullback to EMA 8.
    - **Confluence**: Do 4h and 1d agree?
    - **For Position/Trend horizons**: Prioritize daily/weekly/monthly structure, 50D/100D/200D or 10W/30W/40W slopes, relative strength, drawdown from 52W high, and trend invalidation. Do not make Stoch RSI or VWAP the main conclusion.
+   - **Options positioning, when available**: Add an "Options Positioning" paragraph to the Narrative. Treat gamma flip, GEX, pin, dealer flow, and expiration as secondary positioning evidence only. Above gamma flip usually implies positive gamma, volatility suppression, and range/pin risk; below gamma flip usually implies negative gamma, volatility expansion, and trend-extension risk. High GEX strikes can act as potential support, resistance, or pin levels, but never replace price trend confirmation. If the tool flags spot mismatch, say "spot mismatch, use as positioning only."
 
 5. **Produce your analysis** with these sections:
 

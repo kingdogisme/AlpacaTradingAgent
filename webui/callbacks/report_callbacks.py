@@ -145,6 +145,61 @@ def normalize_market_markdown_sections(content):
     return normalized.strip()
 
 
+def normalize_decision_markdown_sections(content):
+    """Improve readability for trader and risk-manager decision outputs."""
+    if not content:
+        return content
+
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+    labels = {
+        "action": "Action",
+        "recommendation": "Recommendation",
+        "confidence": "Confidence",
+        "advisory rating": "Advisory Rating",
+        "reasoning": "Reasoning",
+        "risk rationale": "Risk Rationale",
+        "required controls": "Required Controls",
+        "entry": "Entry",
+        "stop / invalidation": "Stop / Invalidation",
+        "stop/invalidation": "Stop / Invalidation",
+        "targets": "Targets",
+        "position sizing": "Position Sizing",
+        "time horizon": "Time Horizon",
+        "thesis": "Thesis",
+        "invalidation": "Invalidation",
+        "review cadence": "Review Cadence",
+        "position plan": "Position Plan",
+        "risk budget": "Risk Budget",
+        "trend risk controls": "Trend Risk Controls",
+    }
+
+    label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
+    normalized = re.sub(
+        rf"(?<!\n)(\*\*(?:{label_pattern})\*\*\s*:)",
+        r"\n\n\1",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        rf"(?m)^\s*\*\*({label_pattern})\*\*\s*:\s*",
+        lambda match: f"### {labels[match.group(1).lower()]}\n",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"(?i)(?<!\n)(FINAL TRANSACTION PROPOSAL\s*:)",
+        r"\n\n\1",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?mi)^FINAL TRANSACTION PROPOSAL\s*:\s*(.+)$",
+        r"---\n\n### Final Transaction Proposal\n\n\1",
+        normalized,
+    )
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
 def create_symbol_button(symbol, index, is_active=False):
     """Create a symbol button for pagination"""
     return dbc.Button(
@@ -186,6 +241,8 @@ def create_markdown_content(content, default_message="No content available yet."
     elif not is_loading_message:
         if report_type == "market_report":
             content = normalize_market_markdown_sections(content)
+        if report_type in {"trader_investment_plan", "final_trade_decision"}:
+            content = normalize_decision_markdown_sections(content)
         content = normalize_markdown_tables(content)
     
     markdown_component = dcc.Markdown(
@@ -288,7 +345,7 @@ def register_report_callbacks(app):
             # Update current symbol
             symbols = list(app_state.symbol_states.keys())
             if 0 <= clicked_index < len(symbols):
-                app_state.current_symbol = symbols[clicked_index]
+                app_state.set_current_symbol(symbols[clicked_index])
                 page_number = clicked_index + 1
                 
                 # ⚡ IMMEDIATE BUTTON UPDATE - No waiting for refresh!

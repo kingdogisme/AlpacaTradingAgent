@@ -94,6 +94,40 @@ def fetch_insider_transactions_live(ticker: str, start_date: str, end_date: str)
     return []
 
 
+def fetch_company_profile_live(ticker: str) -> Dict[str, Any]:
+    data = _request_finnhub_json("/stock/profile2", {"symbol": ticker.upper()})
+    return data if isinstance(data, dict) else {}
+
+
+def fetch_basic_financials_live(ticker: str, metric: str = "all") -> Dict[str, Any]:
+    data = _request_finnhub_json(
+        "/stock/metric",
+        {"symbol": ticker.upper(), "metric": metric},
+    )
+    return data if isinstance(data, dict) else {}
+
+
+def fetch_company_earnings_live(ticker: str, limit: int = 8) -> List[Dict[str, Any]]:
+    data = _request_finnhub_json(
+        "/stock/earnings",
+        {"symbol": ticker.upper(), "limit": limit},
+    )
+    return data if isinstance(data, list) else []
+
+
+def fetch_recommendation_trends_live(ticker: str) -> List[Dict[str, Any]]:
+    data = _request_finnhub_json(
+        "/stock/recommendation",
+        {"symbol": ticker.upper()},
+    )
+    return data if isinstance(data, list) else []
+
+
+def fetch_company_peers_live(ticker: str) -> List[str]:
+    data = _request_finnhub_json("/stock/peers", {"symbol": ticker.upper()})
+    return [str(item) for item in data] if isinstance(data, list) else []
+
+
 
 
 def get_data_in_range(ticker, start_date, end_date, data_type, data_dir, period=None):

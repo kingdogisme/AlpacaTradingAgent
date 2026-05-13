@@ -11,6 +11,7 @@ from ..utils.agent_trading_modes import (
     get_horizon_context,
     get_trading_mode_context,
 )
+from ..utils.language import output_language
 from ..utils.memory import TradingMemoryLog
 from ..utils.report_context import (
     get_agent_context_bundle,
@@ -103,7 +104,7 @@ def create_trader(llm, memory, config=None):
         mode_name = trading_context["mode_name"]
         decision_format = trading_context["decision_format"]
         final_format = trading_context["final_format"]
-        output_language = (config or {}).get("output_language", "English")
+        language = output_language(config)
 
         context_bundle = get_agent_context_bundle(
             state,
@@ -150,7 +151,7 @@ def create_trader(llm, memory, config=None):
             debate_digest=debate_digest,
             decision_format=decision_format,
             final_format=final_format,
-            output_language=output_language,
+            output_language=language,
         )
 
         # Enhanced content validation for investment plan

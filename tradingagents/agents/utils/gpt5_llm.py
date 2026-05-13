@@ -5,10 +5,13 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatResult, ChatGeneration
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from openai import OpenAI
+from pydantic import BaseModel, ConfigDict
 import json
 import time
 
+from tradingagents.agents.utils.structured import ToolStructuredRunnable
 from tradingagents.openai_model_registry import (
     apply_responses_model_params,
     describe_model_params as describe_registry_model_params,
@@ -52,12 +55,12 @@ class GPT5ChatModel(BaseChatModel):
     max_output_tokens: Optional[int] = None
     store: bool = False
     parallel_tool_calls: bool = True
+    model_role: str = "deep"
     
     # Internal client - not a pydantic field
     _client: Optional[OpenAI] = None
     
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -175,6 +178,127 @@ class GPT5ChatModel(BaseChatModel):
                 })
         
         return input_messages
+
+    def _to_responses_function_tool(self, tool: Any) -> Optional[Dict[str, Any]]:
+        """Convert LangChain/Pydantic/OpenAI tool specs to Responses function-tool shape."""
+        try:
+            converted = convert_to_openai_tool(tool)
+        except Exception:
+            converted = None
+
+        if isinstance(converted, dict):
+            normalized = self._normalize_openai_tool_dict(converted)
+            if normalized:
+                return normalized
+
+        if isinstance(tool, dict):
+            normalized = self._normalize_openai_tool_dict(tool)
+            if normalized:
+                return normalized
+
+        tool_name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
+        if not tool_name and hasattr(tool, "func"):
+            tool_name = getattr(tool.func, "__name__", None)
+        if not tool_name:
+            return None
+
+        tool_description = getattr(tool, "description", None)
+        if not tool_description and getattr(tool, "__doc__", None):
+            tool_description = tool.__doc__
+        if not tool_description and hasattr(tool, "func"):
+            tool_description = getattr(tool.func, "__doc__", None)
+
+        tool_parameters = {"type": "object", "properties": {}}
+        if hasattr(tool, "args_schema") and tool.args_schema:
+            try:
+                tool_parameters = tool.args_schema.schema()
+            except Exception:
+                pass
+        elif hasattr(tool, "model_json_schema"):
+            try:
+                tool_parameters = tool.model_json_schema()
+            except Exception:
+                pass
+
+        return {
+            "type": "function",
+            "name": str(tool_name),
+            "description": tool_description or f"Tool: {tool_name}",
+            "parameters": tool_parameters,
+        }
+
+    def _normalize_openai_tool_dict(self, tool: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if tool.get("type") != "function":
+            return None
+
+        function_spec = tool.get("function")
+        if isinstance(function_spec, dict):
+            name = function_spec.get("name")
+            description = function_spec.get("description")
+            parameters = function_spec.get("parameters")
+            strict = function_spec.get("strict", tool.get("strict"))
+        else:
+            name = tool.get("name")
+            description = tool.get("description")
+            parameters = tool.get("parameters")
+            strict = tool.get("strict")
+
+        if not name:
+            return None
+
+        normalized = {
+            "type": "function",
+            "name": name,
+            "description": description or f"Tool: {name}",
+            "parameters": parameters or {"type": "object", "properties": {}},
+        }
+        if strict is not None:
+            normalized["strict"] = strict
+        return normalized
+
+    def _normalize_tool_choice(self, tool_choice: Any) -> Any:
+        if tool_choice in (None, False):
+            return None
+        if tool_choice == "any":
+            return "required"
+        if isinstance(tool_choice, str):
+            return tool_choice
+        if isinstance(tool_choice, dict):
+            function_spec = tool_choice.get("function")
+            if isinstance(function_spec, dict) and function_spec.get("name"):
+                return {"type": "function", "name": function_spec["name"]}
+            return tool_choice
+        return None
+
+    def with_structured_output(
+        self,
+        schema: Any,
+        *,
+        include_raw: bool = False,
+        **kwargs: Any,
+    ) -> ToolStructuredRunnable:
+        """Bind a Pydantic schema without LangChain's parsed-field wrapper.
+
+        LangChain's default structured-output adapter serializes an internal
+        ``parsed`` field through Pydantic. For Pydantic schemas used by our
+        decision agents that can emit serializer warnings even when parsing
+        succeeds. This adapter keeps the same tool-calling contract while
+        returning the parsed schema directly.
+        """
+        kwargs.pop("method", None)
+        kwargs.pop("strict", None)
+        if kwargs:
+            raise ValueError(f"Received unsupported arguments {kwargs}")
+
+        try:
+            is_pydantic_schema = isinstance(schema, type) and issubclass(schema, BaseModel)
+        except TypeError:
+            is_pydantic_schema = False
+
+        if is_pydantic_schema:
+            return ToolStructuredRunnable(self, schema, include_raw=include_raw)
+
+        return super().with_structured_output(schema, include_raw=include_raw)
     
     def _extract_content_from_response(self, response) -> tuple:
         """
@@ -298,24 +422,51 @@ class GPT5ChatModel(BaseChatModel):
         )
         input_chars = len(str(input_messages))
 
+        def _usage_value(source: Any, key: str, default: int = 0) -> int:
+            if source is None:
+                return default
+            if isinstance(source, dict):
+                value = source.get(key, default)
+            else:
+                value = getattr(source, key, default)
+            return int(value or 0)
+
         def _extract_usage_dict(resp) -> Dict[str, int]:
-            usage_dict = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            usage_dict = {
+                "input_tokens": 0,
+                "cache_hit_tokens": 0,
+                "cache_miss_tokens": 0,
+                "cache_creation_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "total_tokens": 0,
+            }
             usage = getattr(resp, "usage", None)
             if usage is None:
                 return usage_dict
 
-            if isinstance(usage, dict):
-                usage_dict["input_tokens"] = int(usage.get("input_tokens", 0) or 0)
-                usage_dict["output_tokens"] = int(usage.get("output_tokens", 0) or 0)
-                usage_dict["total_tokens"] = int(
-                    usage.get("total_tokens", usage_dict["input_tokens"] + usage_dict["output_tokens"]) or 0
-                )
-                return usage_dict
-
             for key in ("input_tokens", "output_tokens", "total_tokens"):
-                value = getattr(usage, key, None)
-                if value is not None:
-                    usage_dict[key] = int(value or 0)
+                usage_dict[key] = _usage_value(usage, key)
+
+            input_details = (
+                usage.get("input_tokens_details")
+                if isinstance(usage, dict)
+                else getattr(usage, "input_tokens_details", None)
+            )
+            output_details = (
+                usage.get("output_tokens_details")
+                if isinstance(usage, dict)
+                else getattr(usage, "output_tokens_details", None)
+            )
+            cache_hit_tokens = _usage_value(input_details, "cached_tokens")
+            cache_creation_tokens = _usage_value(input_details, "cache_creation")
+            usage_dict["cache_hit_tokens"] = cache_hit_tokens
+            usage_dict["cache_creation_tokens"] = cache_creation_tokens
+            usage_dict["cache_miss_tokens"] = max(
+                usage_dict["input_tokens"] - cache_hit_tokens - cache_creation_tokens,
+                0,
+            )
+            usage_dict["reasoning_tokens"] = _usage_value(output_details, "reasoning_tokens")
 
             if usage_dict["total_tokens"] == 0:
                 usage_dict["total_tokens"] = usage_dict["input_tokens"] + usage_dict["output_tokens"]
@@ -332,6 +483,7 @@ class GPT5ChatModel(BaseChatModel):
             payload = {
                 "model": self.model,
                 "purpose": "gpt5_responses",
+                "model_role": self.model_role,
                 "status": status,
                 "latency_seconds": round(float(latency_seconds), 4),
                 "input_chars": input_chars,
@@ -372,44 +524,18 @@ class GPT5ChatModel(BaseChatModel):
         # Handle tool calls if present
         tools = kwargs.get("tools", [])
         if tools:
-            # Convert LangChain tools to OpenAI function format for GPT-5
+            # Convert LangChain/Pydantic tools to OpenAI Responses function-tool format.
             openai_tools = []
             for tool in tools:
-                tool_name = None
-                tool_description = None
-                tool_parameters = None
-                
-                # Try to get tool info from different possible attributes
-                if hasattr(tool, 'name'):
-                    tool_name = tool.name
-                elif hasattr(tool, 'func') and hasattr(tool.func, '__name__'):
-                    tool_name = tool.func.__name__
-                
-                if hasattr(tool, 'description'):
-                    tool_description = tool.description
-                elif hasattr(tool, 'func') and hasattr(tool.func, '__doc__'):
-                    tool_description = tool.func.__doc__ or "No description"
-                
-                if hasattr(tool, 'args_schema') and tool.args_schema:
-                    try:
-                        tool_parameters = tool.args_schema.schema()
-                    except Exception:
-                        tool_parameters = {"type": "object", "properties": {}}
-                else:
-                    tool_parameters = {"type": "object", "properties": {}}
-                
-                # Only add tools that have a valid name
-                if tool_name:
-                    tool_schema = {
-                        "type": "function",
-                        "name": tool_name,  # GPT-5 expects name at top level
-                        "description": tool_description or f"Tool: {tool_name}",
-                        "parameters": tool_parameters
-                    }
+                tool_schema = self._to_responses_function_tool(tool)
+                if tool_schema:
                     openai_tools.append(tool_schema)
             
             if openai_tools:
                 api_params["tools"] = openai_tools
+                tool_choice = self._normalize_tool_choice(kwargs.get("tool_choice"))
+                if tool_choice:
+                    api_params["tool_choice"] = tool_choice
         
         try:
             # Make the API call
@@ -446,6 +572,8 @@ class GPT5ChatModel(BaseChatModel):
             if content:
                 print(f"[GPT5] Extracted content: {len(content)} chars")
                 print(f"[GPT5]   Content preview: {content[:200]}..." if len(content) > 200 else f"[GPT5]   Content: {content}")
+            elif tool_calls:
+                print(f"[GPT5] No text content; response contains tool calls only.")
             else:
                 print(f"[GPT5] WARNING: No content extracted from response!")
                 # Try to get output_text directly
@@ -476,6 +604,18 @@ class GPT5ChatModel(BaseChatModel):
                 content=content,
                 additional_kwargs=additional_kwargs
             )
+            ai_message.usage_metadata = {
+                "input_tokens": usage_dict["input_tokens"],
+                "output_tokens": usage_dict["output_tokens"],
+                "total_tokens": usage_dict["total_tokens"],
+                "input_token_details": {
+                    "cache_read": usage_dict["cache_hit_tokens"],
+                    "cache_creation": usage_dict["cache_creation_tokens"],
+                },
+                "output_token_details": {
+                    "reasoning": usage_dict["reasoning_tokens"],
+                },
+            }
             
             # Set tool_calls attribute directly for better compatibility
             if tool_calls:
@@ -525,8 +665,11 @@ class GPT5ChatModel(BaseChatModel):
             max_output_tokens=self.max_output_tokens,
             store=self.store,
             parallel_tool_calls=self.parallel_tool_calls,
+            model_role=self.model_role,
         )
         new_model._bound_tools = tools
+        if "tool_choice" in kwargs:
+            new_model._bound_tool_choice = kwargs["tool_choice"]
         return new_model
     
     def invoke(self, input: Any, config: Optional[Dict] = None, **kwargs) -> AIMessage:
@@ -542,6 +685,8 @@ class GPT5ChatModel(BaseChatModel):
         # Add bound tools if present
         if hasattr(self, '_bound_tools'):
             kwargs['tools'] = self._bound_tools
+            if hasattr(self, '_bound_tool_choice'):
+                kwargs.setdefault('tool_choice', self._bound_tool_choice)
         
         result = self._generate(messages, **kwargs)
         return result.generations[0].message
@@ -576,6 +721,7 @@ def get_chat_model(model_name: str, api_key: Optional[str] = None, **kwargs):
             max_output_tokens=max_output_tokens,
             store=store,
             parallel_tool_calls=parallel_tool_calls,
+            model_role=model_role,
         )
     else:
         from langchain_openai import ChatOpenAI

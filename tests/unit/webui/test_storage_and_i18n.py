@@ -11,8 +11,11 @@ def test_default_settings_are_copied_and_include_safe_trading_defaults():
 
     assert second["ticker_input"] != "MUTATED"
     assert second["trading_horizon"] == "swing"
+    assert second["output_language"] == "zh-CN"
     assert second["trade_after_analyze"] is False
     assert second["checkpoint_enabled"] is False
+    assert second["quick_llm"] == "gpt-5.4-mini"
+    assert second["deep_llm"] == "gpt-5.4"
 
 
 def test_default_api_keys_are_empty_and_paper_trading_enabled():
@@ -29,4 +32,3 @@ def test_i18n_falls_back_to_english_and_formats_values():
     assert t("missing", "alpaca.account.paper") == "Paper Trading"
     assert t("en", "alpaca.account.title", mode="Paper Trading") == "Alpaca Paper Trading Account"
     assert "模拟" in t("zh", "alpaca.account.paper")
-

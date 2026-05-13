@@ -9,6 +9,18 @@ import threading
 import uuid
 from typing import Any, Dict, Optional
 
+REPORT_OUTPUT_TYPES = {
+    "market_report",
+    "sentiment_report",
+    "news_report",
+    "fundamentals_report",
+    "macro_report",
+    "investment_plan",
+    "trader_investment_plan",
+    "final_trade_decision",
+    "trading_horizon",
+}
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -33,6 +45,55 @@ def _json_safe(value: Any) -> Any:
         return value
     except Exception:
         return str(value)
+
+
+def _empty_llm_usage_summary() -> Dict[str, Any]:
+    return {
+        "llm_call_events": 0,
+        "total_llm_time_seconds": 0.0,
+        "total_llm_input_chars": 0,
+        "total_llm_output_chars": 0,
+        "total_llm_input_tokens": 0,
+        "total_llm_cache_hit_tokens": 0,
+        "total_llm_cache_miss_tokens": 0,
+        "total_llm_cache_creation_tokens": 0,
+        "total_llm_output_tokens": 0,
+        "total_llm_reasoning_tokens": 0,
+        "total_llm_tokens": 0,
+    }
+
+
+def _add_llm_usage_summary(summary: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    summary["llm_call_events"] += 1
+    summary["total_llm_time_seconds"] += float(
+        (payload or {}).get("latency_seconds", 0.0) or 0.0
+    )
+    summary["total_llm_input_chars"] += int(
+        (payload or {}).get("input_chars", 0) or 0
+    )
+    summary["total_llm_output_chars"] += int(
+        (payload or {}).get("output_chars", 0) or 0
+    )
+    usage = (payload or {}).get("usage", {}) or {}
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    cache_hit_tokens = int(
+        usage.get("cache_hit_tokens", usage.get("cached_tokens", 0)) or 0
+    )
+    cache_creation_tokens = int(usage.get("cache_creation_tokens", 0) or 0)
+    cache_miss_tokens = int(
+        usage.get(
+            "cache_miss_tokens",
+            max(input_tokens - cache_hit_tokens - cache_creation_tokens, 0),
+        )
+        or 0
+    )
+    summary["total_llm_input_tokens"] += int(input_tokens)
+    summary["total_llm_cache_hit_tokens"] += int(cache_hit_tokens)
+    summary["total_llm_cache_miss_tokens"] += int(cache_miss_tokens)
+    summary["total_llm_cache_creation_tokens"] += int(cache_creation_tokens)
+    summary["total_llm_output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+    summary["total_llm_reasoning_tokens"] += int(usage.get("reasoning_tokens", 0) or 0)
+    summary["total_llm_tokens"] += int(usage.get("total_tokens", 0) or 0)
 
 
 class RunAuditLogger:
@@ -107,6 +168,7 @@ class RunAuditLogger:
                             "Run terminated before finish_run was called (process exit/termination)."
                         )
                     summary["error_events"] = int(summary.get("error_events", 0) or 0) + 1
+                    self._snapshot_latest_agent_outputs_unlocked(run_data)
 
                     self._flush_unlocked(run_id)
 
@@ -152,16 +214,16 @@ class RunAuditLogger:
                     "node_events": 0,
                     "tool_retry_events": 0,
                     "error_events": 0,
+                    "warning_events": 0,
+                    "timeout_tool_events": 0,
+                    "degraded_tool_events": 0,
                     "total_prompt_chars": 0,
                     "total_tool_time_seconds": 0.0,
                     "total_tool_output_chars": 0,
                     "suspect_tool_events": 0,
-                    "total_llm_time_seconds": 0.0,
-                    "total_llm_input_chars": 0,
-                    "total_llm_output_chars": 0,
-                    "total_llm_input_tokens": 0,
-                    "total_llm_output_tokens": 0,
-                    "total_llm_tokens": 0,
+                    **_empty_llm_usage_summary(),
+                    "llm_usage_by_model": {},
+                    "llm_usage_by_role": {},
                 },
             }
 
@@ -232,29 +294,28 @@ class RunAuditLogger:
                 output = (payload or {}).get("output", "")
                 run_data["summary"]["total_tool_output_chars"] += len(str(output or ""))
                 quality = (payload or {}).get("quality_details", {}) or {}
+                status = str((payload or {}).get("status", "") or "").lower()
+                flags = quality.get("flags", []) or []
                 if bool(quality.get("is_suspect", False)):
                     run_data["summary"]["suspect_tool_events"] += 1
+                if status == "timeout" or "timeout" in flags:
+                    run_data["summary"]["timeout_tool_events"] += 1
+                if status in ("degraded", "timeout") or bool(quality.get("is_suspect", False)) or flags:
+                    run_data["summary"]["degraded_tool_events"] += 1
+                    run_data["summary"]["warning_events"] += 1
             elif event_type == "llm_call":
-                run_data["summary"]["llm_call_events"] += 1
-                run_data["summary"]["total_llm_time_seconds"] += float(
-                    (payload or {}).get("latency_seconds", 0.0) or 0.0
-                )
-                run_data["summary"]["total_llm_input_chars"] += int(
-                    (payload or {}).get("input_chars", 0) or 0
-                )
-                run_data["summary"]["total_llm_output_chars"] += int(
-                    (payload or {}).get("output_chars", 0) or 0
-                )
-                usage = (payload or {}).get("usage", {}) or {}
-                run_data["summary"]["total_llm_input_tokens"] += int(
-                    usage.get("input_tokens", 0) or 0
-                )
-                run_data["summary"]["total_llm_output_tokens"] += int(
-                    usage.get("output_tokens", 0) or 0
-                )
-                run_data["summary"]["total_llm_tokens"] += int(
-                    usage.get("total_tokens", 0) or 0
-                )
+                payload = payload or {}
+                _add_llm_usage_summary(run_data["summary"], payload)
+
+                model_key = str(payload.get("model") or "unknown")
+                by_model = run_data["summary"].setdefault("llm_usage_by_model", {})
+                model_summary = by_model.setdefault(model_key, _empty_llm_usage_summary())
+                _add_llm_usage_summary(model_summary, payload)
+
+                role_key = str(payload.get("model_role") or "unknown")
+                by_role = run_data["summary"].setdefault("llm_usage_by_role", {})
+                role_summary = by_role.setdefault(role_key, _empty_llm_usage_summary())
+                _add_llm_usage_summary(role_summary, payload)
             elif event_type == "agent_output":
                 run_data["summary"]["agent_output_events"] += 1
             elif event_type == "node_execution":
@@ -397,6 +458,25 @@ class RunAuditLogger:
                     del self._active_runs_by_symbol[symbol_key]
             self._completed_run_paths[resolved_run_id] = file_path
             del self._active_runs[resolved_run_id]
+
+    def _snapshot_latest_agent_outputs_unlocked(self, run_data: Dict[str, Any]) -> None:
+        """Save last visible reports so aborted runs can still be inspected/restored."""
+        latest_outputs: Dict[str, Any] = {}
+        for event in run_data.get("events", []):
+            if event.get("type") != "agent_output":
+                continue
+            payload = event.get("payload") or {}
+            output_type = payload.get("output_type")
+            if output_type in REPORT_OUTPUT_TYPES and payload.get("content"):
+                latest_outputs[output_type] = payload.get("content")
+
+        if not latest_outputs:
+            return
+
+        snapshots = run_data.setdefault("snapshots", {})
+        snapshots["latest_agent_outputs"] = _json_safe(latest_outputs)
+        if "final_state" not in snapshots and latest_outputs.get("final_trade_decision"):
+            snapshots["final_state"] = _json_safe(latest_outputs)
 
     def _flush_unlocked(self, run_id: str) -> None:
         run_data = self._active_runs.get(run_id)

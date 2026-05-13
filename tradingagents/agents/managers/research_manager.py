@@ -12,6 +12,7 @@ from ..utils.agent_trading_modes import (
     get_horizon_context,
     get_trading_mode_context,
 )
+from ..utils.language import output_language
 from ..utils.memory import TradingMemoryLog
 from ..utils.structured import bind_structured, invoke_structured_or_freetext
 from tradingagents.prompts import render_prompt
@@ -39,7 +40,7 @@ def create_research_manager(llm, memory, config=None):
         trading_mode = trading_context["mode"]
         final_format = trading_context["final_format"]
         ticker = state.get("company_of_interest", "")
-        output_language = (config or {}).get("output_language", "English")
+        language = output_language(config)
 
         context_bundle = get_agent_context_bundle(
             state,
@@ -83,7 +84,7 @@ def create_research_manager(llm, memory, config=None):
             decision_memory_str=decision_memory_str,
             history=history,
             final_format=final_format,
-            output_language=output_language,
+            output_language=language,
         )
 
         # Capture the COMPLETE prompt that gets sent to the LLM

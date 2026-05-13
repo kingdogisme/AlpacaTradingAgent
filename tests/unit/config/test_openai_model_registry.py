@@ -102,11 +102,23 @@ class OpenAIModelRegistryTests(unittest.TestCase):
         self.assertTrue(get_provider_ui_metadata("azure")["backend_visible"])
 
     @patch("tradingagents.openai_model_registry.discover_models")
-    def test_openai_provider_defaults_stay_cost_safe_after_switching(self, mock_discover):
+    def test_openai_provider_defaults_use_available_local_models_after_switching(self, mock_discover):
         mock_discover.return_value = [("local-a", "local-a"), ("local-b", "local-b")]
-        self.assertEqual(get_default_model_for_provider("openai", "quick"), "gpt-5.4-nano")
-        self.assertEqual(get_default_model_for_provider("openai", "deep"), "gpt-5.4-mini")
+        self.assertEqual(get_default_model_for_provider("openai", "quick"), "gpt-5.4-mini")
+        self.assertEqual(get_default_model_for_provider("openai", "deep"), "gpt-5.4")
         self.assertEqual(get_default_model_for_provider("local_openai", "quick"), "local-a")
+
+    @patch("tradingagents.openai_model_registry.discover_models")
+    def test_deepseek_defaults_prefer_v4_flash_and_pro(self, mock_discover):
+        mock_discover.return_value = [("DeepSeek V3.2", "deepseek-chat")]
+
+        quick_result = get_model_options_with_status("deepseek", "quick")
+        deep_result = get_model_options_with_status("deepseek", "deep")
+
+        self.assertEqual(get_default_model_for_provider("deepseek", "quick"), "deepseek-v4-flash")
+        self.assertEqual(get_default_model_for_provider("deepseek", "deep"), "deepseek-v4-pro")
+        self.assertEqual(quick_result["options"][0]["value"], "deepseek-v4-flash")
+        self.assertEqual(deep_result["options"][0]["value"], "deepseek-v4-pro")
 
     @patch("tradingagents.openai_model_registry.discover_models")
     def test_dynamic_discovery_preferred_for_supported_non_openai_providers(self, mock_discover):
@@ -135,7 +147,7 @@ class OpenAIModelRegistryTests(unittest.TestCase):
 
         self.assertEqual(result["source"], "fallback")
         self.assertIn("Dynamic discovery returned no models", result["message"])
-        self.assertIn("gpt-5.4-nano", {option["value"] for option in values})
+        self.assertIn("gpt-5.4-mini", {option["value"] for option in values})
         self.assertIn("custom", {option["value"] for option in values})
 
     def test_custom_model_choice_resolves_to_runtime_model_id(self):

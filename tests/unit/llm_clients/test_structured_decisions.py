@@ -1,4 +1,8 @@
 import unittest
+import warnings
+from contextlib import redirect_stdout
+from io import StringIO
+from types import SimpleNamespace
 
 from tradingagents.agents.schemas import (
     AdvisoryRating,
@@ -10,8 +14,11 @@ from tradingagents.agents.schemas import (
     render_risk_decision,
     render_trader_proposal,
 )
+from tradingagents.agents.utils.gpt5_llm import GPT5ChatModel
+from tradingagents.agents.utils.structured import bind_structured
 from tradingagents.agents.utils.agent_trading_modes import extract_recommendation
 from tradingagents.agents.utils.structured import invoke_structured_or_freetext
+from tradingagents.llm_clients.openai_client import NormalizedChatOpenAI
 
 
 class Message:
@@ -27,6 +34,45 @@ class PlainLLM:
 class BrokenStructuredLLM:
     def invoke(self, _prompt):
         raise RuntimeError("structured unavailable")
+
+
+class BrokenBindToolsLLM:
+    def bind_tools(self, *_args, **_kwargs):
+        raise RuntimeError("tool binding unavailable")
+
+    def with_structured_output(self, _schema):
+        raise NotImplementedError("structured unavailable")
+
+    def invoke(self, _prompt):
+        return Message("plain fallback\nFINAL TRANSACTION PROPOSAL: **HOLD**")
+
+
+class FakeResponsesClient:
+    def __init__(self, *, tool_name="ResearchPlan", arguments=None):
+        self.calls = []
+        self.responses = self
+        self.tool_name = tool_name
+        self.arguments = arguments or {
+            "recommendation": "HOLD",
+            "confidence": "medium",
+            "rationale": "Evidence is mixed.",
+            "strategic_actions": "Wait for confirmation.",
+        }
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    call_id="call_1",
+                    name=self.tool_name,
+                    arguments=self.arguments,
+                )
+            ],
+            output_text="",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2),
+        )
 
 
 class StructuredDecisionTests(unittest.TestCase):
@@ -80,6 +126,137 @@ class StructuredDecisionTests(unittest.TestCase):
         )
 
         self.assertIn("FINAL TRANSACTION PROPOSAL: **HOLD**", content)
+
+    def test_bind_structured_falls_back_when_tool_binding_is_unavailable(self):
+        structured = bind_structured(BrokenBindToolsLLM(), ResearchPlan, "Research Manager")
+
+        self.assertIsNone(structured)
+
+    def test_gpt5_structured_output_binds_pydantic_schema_as_tool(self):
+        llm = GPT5ChatModel(
+            model="gpt-5.4",
+            api_key="test-key",
+            base_url="http://127.0.0.1:8317/v1",
+        )
+        structured = bind_structured(llm, ResearchPlan, "Research Manager")
+        fake_client = FakeResponsesClient()
+        structured_llm = structured.steps[0]
+        structured_llm.__pydantic_private__["_client"] = fake_client
+
+        parsed = structured.invoke("Return a research plan.")
+
+        self.assertEqual(parsed.recommendation, ExecutableAction.HOLD)
+        payload = fake_client.calls[0]
+        self.assertEqual(payload["tool_choice"], "required")
+        self.assertEqual(payload["tools"][0]["name"], "ResearchPlan")
+        self.assertIn("recommendation", payload["tools"][0]["parameters"]["properties"])
+
+    def test_gpt5_tool_only_response_is_not_logged_as_warning(self):
+        llm = GPT5ChatModel(
+            model="gpt-5.4",
+            api_key="test-key",
+            base_url="http://127.0.0.1:8317/v1",
+        )
+        structured = bind_structured(llm, ResearchPlan, "Research Manager")
+        structured.steps[0].__pydantic_private__["_client"] = FakeResponsesClient()
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            parsed = structured.invoke("Return a research plan.")
+
+        self.assertEqual(parsed.recommendation, ExecutableAction.HOLD)
+        output = stdout.getvalue()
+        self.assertIn("No text content; response contains tool calls only.", output)
+        self.assertNotIn("WARNING: No content extracted from response!", output)
+
+    def test_gpt5_decision_schemas_do_not_emit_parsed_serializer_warning(self):
+        llm = GPT5ChatModel(
+            model="gpt-5.4",
+            api_key="test-key",
+            base_url="http://127.0.0.1:8317/v1",
+        )
+        cases = [
+            (
+                ResearchPlan,
+                "Research Manager",
+                FakeResponsesClient(),
+                "recommendation",
+            ),
+            (
+                TraderProposal,
+                "Trader",
+                FakeResponsesClient(
+                    tool_name="TraderProposal",
+                    arguments={
+                        "action": "HOLD",
+                        "confidence": "medium",
+                        "reasoning": "Evidence is mixed.",
+                    },
+                ),
+                "action",
+            ),
+            (
+                RiskDecision,
+                "Risk Manager",
+                FakeResponsesClient(
+                    tool_name="RiskDecision",
+                    arguments={
+                        "action": "HOLD",
+                        "confidence": "medium",
+                        "risk_rationale": "Risk and reward are balanced.",
+                        "required_controls": "Wait for confirmation.",
+                    },
+                ),
+                "action",
+            ),
+        ]
+
+        for schema, agent_name, fake_client, action_field in cases:
+            structured = bind_structured(llm, schema, agent_name)
+            structured.steps[0].__pydantic_private__["_client"] = fake_client
+
+            with self.subTest(schema=schema.__name__):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    parsed = structured.invoke(f"Return a {schema.__name__}.")
+
+                self.assertEqual(getattr(parsed, action_field), ExecutableAction.HOLD)
+                warning_text = "\n".join(str(warning.message) for warning in caught)
+                self.assertNotIn("Pydantic serializer warnings", warning_text)
+                self.assertNotIn("field_name='parsed'", warning_text)
+
+    def test_gpt5_structured_output_include_raw_uses_plain_result_shape(self):
+        llm = GPT5ChatModel(
+            model="gpt-5.4",
+            api_key="test-key",
+            base_url="http://127.0.0.1:8317/v1",
+        )
+        structured = llm.with_structured_output(ResearchPlan, include_raw=True)
+        structured.steps[0].__pydantic_private__["_client"] = FakeResponsesClient()
+
+        result = structured.invoke("Return a research plan.")
+
+        self.assertEqual(result["parsed"].recommendation, ExecutableAction.HOLD)
+        self.assertIsNone(result["parsing_error"])
+        self.assertTrue(hasattr(result["raw"], "tool_calls"))
+
+    def test_chat_openai_structured_binding_uses_local_tool_adapter(self):
+        llm = NormalizedChatOpenAI(
+            model="gpt-5.5",
+            api_key="test-key",
+            base_url="http://127.0.0.1:8317/v1",
+        )
+
+        structured = bind_structured(llm, ResearchPlan, "Research Manager")
+
+        self.assertEqual(len(structured.steps), 1)
+        self.assertNotIn("PydanticToolsParser", repr(structured))
+        self.assertIn("tools", structured.steps[0].kwargs)
+        self.assertEqual(
+            structured.steps[0].kwargs["tools"][0]["function"]["name"],
+            "ResearchPlan",
+        )
+        self.assertEqual(structured.steps[0].kwargs["tool_choice"], "required")
 
 
 if __name__ == "__main__":

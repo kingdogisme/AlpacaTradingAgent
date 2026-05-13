@@ -6,6 +6,8 @@ from typing import Protocol
 
 import yfinance as yf
 
+from tradingagents.dataflows.benchmarks import benchmark_for_symbol
+
 from .ledger import EpisodeLedger
 from .models import RewardRecordV1
 
@@ -69,11 +71,8 @@ def neutral_band(horizon: str | None, config: dict | None = None) -> float:
     return float(bps) / 10000.0
 
 
-def benchmark_for(symbol: str) -> str | None:
-    if is_crypto_symbol(symbol):
-        base = crypto_base(symbol)
-        return None if base == "BTC" else "BTC-USD"
-    return None if symbol.upper() == "SPY" else "SPY"
+def benchmark_for(symbol: str, config: dict | None = None) -> str | None:
+    return benchmark_for_symbol(symbol, config)
 
 
 def is_crypto_symbol(symbol: str) -> bool:
@@ -206,7 +205,7 @@ class RewardResolver:
                 components={"reason": "missing_raw_return", "symbol": symbol},
             )
 
-        benchmark = benchmark_for(symbol)
+        benchmark = benchmark_for(symbol, self.config)
         benchmark_return = (
             self.price_provider.fetch_return(benchmark, trade_date, holding_days)
             if benchmark

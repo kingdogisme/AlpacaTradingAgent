@@ -178,6 +178,10 @@ class TrendInvalidation(BaseModel):
     level: float
     basis: str
     drawdown_from_52w_high: float
+    trade_level: Optional[float] = None
+    trade_basis: Optional[str] = None
+    regime_level: Optional[float] = None
+    regime_basis: Optional[str] = None
 
 
 class RegimeAlignment(BaseModel):

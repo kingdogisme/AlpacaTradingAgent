@@ -51,7 +51,7 @@ def create_stores():
     """Create store components for state management"""
     from webui.utils.storage import create_storage_store_component, create_api_keys_store_component
     return [
-        dcc.Store(id='app-store'),
+        dcc.Store(id='app-store', storage_type='session'),
         dcc.Store(id='chart-store', data={'last_symbol': None, 'selected_period': '1y'}),
         create_storage_store_component(),
         create_api_keys_store_component()
@@ -186,4 +186,4 @@ def create_main_layout(lang="zh"):
         style={"backgroundColor": COLORS["background"]}
     )
     
-    return layout 
+    return layout

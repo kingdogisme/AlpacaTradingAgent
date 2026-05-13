@@ -21,13 +21,14 @@ from tradingagents.agents.utils.agent_states import (
 from tradingagents.openai_model_registry import normalize_model_params, describe_model_params
 from tradingagents.run_logger import get_run_audit_logger
 from tradingagents.eval import EpisodeLedger
+from tradingagents.dataflows.benchmarks import benchmark_for_symbol
 from tradingagents.dataflows.config import (
     get_llm_api_key,
     get_openai_base_url,
     is_local_openai_enabled,
     set_config,
 )
-from tradingagents.dataflows.ticker_utils import TickerUtils, is_crypto_ticker
+from tradingagents.dataflows.ticker_utils import TickerUtils
 from tradingagents.dataflows.utils import safe_ticker_component
 
 from .checkpointer import clear_checkpoint, get_checkpointer, thread_id
@@ -221,10 +222,7 @@ class TradingAgentsGraph:
             return ticker.replace("/", "-")
 
     def _benchmark_for(self, ticker: str) -> Optional[str]:
-        if is_crypto_ticker(ticker):
-            base = self._ticker_for_yfinance(ticker).split("-")[0].upper()
-            return None if base == "BTC" else "BTC-USD"
-        return None if ticker.upper() == "SPY" else "SPY"
+        return benchmark_for_symbol(ticker, self.config)
 
     def _fetch_return(self, ticker: str, start_date: date, holding_days: int) -> Optional[float]:
         if datetime.now().date() < start_date + timedelta(days=holding_days):
@@ -323,13 +321,55 @@ class TradingAgentsGraph:
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
         """Create tool nodes for different data sources."""
-        news_tools = [
-            self.toolkit.get_google_news,
-            self.toolkit.get_finnhub_news_recent,
-            self.toolkit.get_coindesk_news,
-        ]
+        news_tools = []
+        if self.toolkit.has_sellthenews("sellthenews_news_enabled"):
+            news_tools.append(self.toolkit.get_sellthenews_stock_news)
+        news_tools.extend(
+            [
+                self.toolkit.get_google_news,
+                self.toolkit.get_finnhub_news_recent,
+                self.toolkit.get_coindesk_news,
+            ]
+        )
         if self.config.get("news_global_openai_enabled", False):
-            news_tools.insert(0, self.toolkit.get_global_news_openai)
+            insert_at = (
+                2
+                if self.toolkit.has_sellthenews("sellthenews_news_enabled")
+                else 1
+            )
+            news_tools.insert(insert_at, self.toolkit.get_global_news_openai)
+
+        social_tools = []
+        if self.toolkit.has_sellthenews("sellthenews_social_enabled"):
+            social_tools.append(self.toolkit.get_sellthenews_social_sentiment)
+        social_tools.extend(
+            [
+                # direct social tools
+                self.toolkit.get_reddit_stock_info,
+                self.toolkit.get_reddit_news,
+            ]
+        )
+        if (
+            self.config.get("online_tools", True)
+            and self.toolkit.has_openai_web_search()
+            and self.config.get("social_openai_stock_news_enabled", True)
+        ):
+            # Keep the slow OpenAI search tool available, but behind faster
+            # SellTheNews/Reddit sources so agents naturally treat it as a backstop.
+            social_tools.append(self.toolkit.get_stock_news_openai)
+
+        macro_tools = []
+        if self.toolkit.has_sellthenews("sellthenews_macro_enabled"):
+            macro_tools.append(self.toolkit.get_sellthenews_macro_news)
+        macro_tools.extend(
+            [
+                # macro economic tools
+                self.toolkit.get_macro_analysis,
+                self.toolkit.get_economic_indicators,
+                self.toolkit.get_yield_curve_analysis,
+                self.toolkit.get_macro_news_openai,
+            ]
+        )
 
         return {
             "market": ToolNode(
@@ -344,22 +384,16 @@ class TradingAgentsGraph:
                     self.toolkit.get_alpaca_data_report,
                 ]
             ),
-            "social": ToolNode(
-                [
-                    # online tools
-                    self.toolkit.get_stock_news_openai,
-                    # direct social tools
-                    self.toolkit.get_reddit_stock_info,
-                    self.toolkit.get_reddit_news,
-                ]
-            ),
+            "social": ToolNode(social_tools),
             "news": ToolNode(news_tools),
             "fundamentals": ToolNode(
                 [
                     # online tools
+                    self.toolkit.get_alpha_vantage_fundamentals,
                     self.toolkit.get_fundamentals_openai,
                     self.toolkit.get_defillama_fundamentals,
                     # direct data tools
+                    self.toolkit.get_finnhub_company_fundamentals,
                     self.toolkit.get_finnhub_company_insider_sentiment,
                     self.toolkit.get_finnhub_company_insider_transactions,
                     self.toolkit.get_simfin_balance_sheet,
@@ -367,15 +401,7 @@ class TradingAgentsGraph:
                     self.toolkit.get_simfin_income_stmt,
                 ]
             ),
-            "macro": ToolNode(
-                [
-                    # macro economic tools
-                    self.toolkit.get_macro_analysis,
-                    self.toolkit.get_economic_indicators,
-                    self.toolkit.get_yield_curve_analysis,
-                    self.toolkit.get_macro_news_openai,
-                ]
-            ),
+            "macro": ToolNode(macro_tools),
         }
 
     def propagate(self, company_name, trade_date):
@@ -569,6 +595,7 @@ class TradingAgentsGraph:
             "sentiment_report": final_state["sentiment_report"],
             "news_report": final_state["news_report"],
             "fundamentals_report": final_state["fundamentals_report"],
+            "macro_report": final_state["macro_report"],
             "report_context_stats": final_state.get("report_context", {}).get("stats", {}),
             "investment_debate_state": {
                 "bull_history": final_state["investment_debate_state"]["bull_history"],
@@ -602,8 +629,9 @@ class TradingAgentsGraph:
         )
         directory.mkdir(parents=True, exist_ok=True)
 
-        with open(directory / "full_states_log.json", "w", encoding="utf-8") as f:
-            json.dump(self.log_states_dict, f, indent=4)
+        log_path = directory / f"full_states_log_{trade_date}.json"
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
 
     def reflect_and_remember(self, returns_losses):
         """Reflect on decisions and update memory based on returns."""

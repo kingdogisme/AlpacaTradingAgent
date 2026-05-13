@@ -6,6 +6,8 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_agent_horizon_context,
     get_horizon_context,
 )
+from tradingagents.agents.utils.language import language_instruction
+from tradingagents.dataflows.social_evidence import build_grounded_social_evidence
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -26,20 +28,47 @@ def create_social_media_analyst(llm, toolkit):
         horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
         is_crypto = "/" in ticker or "USD" in ticker.upper() or "USDT" in ticker.upper()
         openai_available = toolkit.has_openai_web_search()
+        sellthenews_available = toolkit.has_sellthenews("sellthenews_social_enabled")
+        openai_stock_news_available = (
+            toolkit.config["online_tools"]
+            and openai_available
+            and bool(toolkit.config.get("social_openai_stock_news_enabled", False))
+        )
+        social_evidence_block = build_grounded_social_evidence(
+            ticker,
+            current_date,
+            enabled=bool(toolkit.config.get("grounded_social_evidence_enabled", True))
+            and bool(toolkit.config.get("online_tools", True)),
+            stocktwits_limit=int(toolkit.config.get("stocktwits_message_limit", 12)),
+            reddit_limit_per_subreddit=int(toolkit.config.get("reddit_public_limit_per_subreddit", 3)),
+            timeout=float(toolkit.config.get("grounded_social_timeout_seconds", 6)),
+        )
 
         reddit_tool = toolkit.get_reddit_news if is_crypto else toolkit.get_reddit_stock_info
         tools = [reddit_tool]
-        if toolkit.config["online_tools"] and openai_available:
-            tools.insert(0, toolkit.get_stock_news_openai)
+        if openai_stock_news_available:
+            tools.append(toolkit.get_stock_news_openai)
+        if sellthenews_available:
+            tools.insert(0, toolkit.get_sellthenews_social_sentiment)
 
         source_labels = ["Reddit"]
-        if toolkit.config["online_tools"] and openai_available:
-            source_labels.insert(0, "OpenAI web-search sentiment")
+        if sellthenews_available:
+            source_labels.insert(0, "SellTheNews WSB sentiment")
+        if openai_stock_news_available:
+            source_labels.append("OpenAI web-search sentiment (low-priority backstop)")
 
         source_guidance = (
             " Use all currently available social tools before concluding."
             f" Active sources: {', '.join(source_labels)}."
+            + " Prefer SellTheNews WSB/company context, Reddit, and grounded samples when they provide enough evidence."
+            + " Treat OpenAI web-search as a low-priority backstop: only call it when those faster sources are sparse, stale, contradictory, or missing company-specific evidence."
             + (" Use `get_reddit_news(curr_date)` for crypto context." if is_crypto else " Use `get_reddit_stock_info(ticker, curr_date)` for stock context.")
+            + (
+                " A grounded social/news evidence block is preloaded below; cite its source labels, timestamps, and sample counts."
+                " If later tool output conflicts with those grounded sample counts, write `Source conflict:` and explain the discrepancy instead of overwriting the grounded counts."
+                if social_evidence_block
+                else ""
+            )
         )
         system_message = render_prompt(
             "analysts/social_system",
@@ -47,9 +76,12 @@ def create_social_media_analyst(llm, toolkit):
             horizon_label=horizon_context["label"],
             holding_period=horizon_context["holding_period"],
             primary_timeframes=horizon_context["primary_timeframes"],
+            language_instruction=language_instruction(toolkit.config),
             source_guidance=source_guidance,
         )
         asset_context = f"The current company we want to analyze is {ticker}"
+        if social_evidence_block:
+            asset_context += "\n\n" + social_evidence_block
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -109,6 +141,7 @@ def create_social_media_analyst(llm, toolkit):
         # Handle iterative tool calls until the model stops requesting them
         while tools and getattr(result, "additional_kwargs", {}).get("tool_calls") and iteration_count < max_tool_iterations:
             iteration_count += 1
+            tool_messages = []
             for tool_call in result.additional_kwargs["tool_calls"]:
                 # Handle different tool call structures
                 if isinstance(tool_call, dict):
@@ -153,19 +186,21 @@ def create_social_media_analyst(llm, toolkit):
                         except Exception as tool_err:
                             tool_result = f"Error running tool '{tool_name}': {str(tool_err)}"
 
-                # Append the assistant tool call and tool result messages so the LLM can continue the conversation
-                tool_call_id = tool_call.get("id") or tool_call.get("tool_call_id")
-                ai_tool_call_msg = AIMessage(
-                    content="",
-                    additional_kwargs={"tool_calls": [tool_call]},
+                # Preserve the original assistant message because DeepSeek thinking
+                # mode requires its reasoning_content to be passed back.
+                tool_call_id = (
+                    tool_call.get("id") or tool_call.get("tool_call_id")
+                    if isinstance(tool_call, dict)
+                    else getattr(tool_call, "id", None) or getattr(tool_call, "tool_call_id", None)
                 )
                 tool_msg = ToolMessage(
                     content=str(tool_result),
                     tool_call_id=tool_call_id,
                 )
+                tool_messages.append(tool_msg)
 
-                messages_history.append(ai_tool_call_msg)
-                messages_history.append(tool_msg)
+            messages_history.append(result)
+            messages_history.extend(tool_messages)
 
             # Ask the LLM to continue with the new context
             result = chain.invoke(messages_history)

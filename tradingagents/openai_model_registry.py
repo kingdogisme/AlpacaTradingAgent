@@ -412,6 +412,38 @@ def provider_supports_custom_model(provider: str) -> bool:
     return bool(get_provider_ui_metadata(provider).get("custom_models"))
 
 
+PREFERRED_PROVIDER_DEFAULTS = {
+    "deepseek": {
+        "quick": "deepseek-v4-flash",
+        "deep": "deepseek-v4-pro",
+    }
+}
+
+
+def _apply_preferred_provider_default(
+    provider: str,
+    role: str,
+    options: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """Ensure provider-specific preferred defaults exist and are ordered first."""
+    provider_key = (provider or "openai").lower()
+    role_key = (role or "quick").lower()
+    preferred_value = PREFERRED_PROVIDER_DEFAULTS.get(provider_key, {}).get(role_key)
+    if not preferred_value:
+        return options
+
+    catalog_options = [
+        {"label": label, "value": value}
+        for label, value in get_provider_catalog_options(provider_key, role_key)
+    ]
+    preferred_option = next(
+        (option for option in catalog_options if option.get("value") == preferred_value),
+        {"label": preferred_value, "value": preferred_value},
+    )
+    remaining = [option for option in options if option.get("value") != preferred_value]
+    return [preferred_option, *remaining]
+
+
 @lru_cache(maxsize=32)
 def _get_dynamic_model_options(provider: str) -> tuple[Dict[str, str], ...]:
     provider_key = (provider or "openai").lower()
@@ -453,6 +485,8 @@ def get_model_options_with_status(provider: str, role: str) -> Dict[str, Any]:
         message = "Dynamic discovery returned no models. Fell back to built-in local-compatible defaults."
         options = get_openai_model_options(role)
 
+    options = _apply_preferred_provider_default(provider_key, role, options)
+
     if provider_supports_custom_model(provider_key) and not any(option["value"] == "custom" for option in options):
         custom_label = "Custom local model ID" if provider_key in ("local_openai", "ollama") else "Custom model ID"
         options.append({"label": custom_label, "value": "custom"})
@@ -462,14 +496,17 @@ def get_model_options_with_status(provider: str, role: str) -> Dict[str, Any]:
 def get_default_model_for_provider(provider: str, role: str) -> str:
     provider_key = (provider or "openai").lower()
     if provider_key == "openai":
-        return "gpt-5.4-nano" if role == "quick" else "gpt-5.4-mini"
+        return "gpt-5.4-mini" if role == "quick" else "gpt-5.4"
+    preferred_default = PREFERRED_PROVIDER_DEFAULTS.get(provider_key, {}).get((role or "quick").lower())
+    if preferred_default:
+        return preferred_default
     options = get_model_options_for_provider(provider, role)
     non_custom_options = [option for option in options if option.get("value") != "custom"]
     if non_custom_options:
         return non_custom_options[0]["value"]
     if options:
         return options[0]["value"]
-    return "gpt-5.4-nano" if role == "quick" else "gpt-5.4-mini"
+    return "gpt-5.4-mini" if role == "quick" else "gpt-5.4"
 
 
 def resolve_model_choice(model_choice: str, custom_model: Optional[str] = None) -> Optional[str]:

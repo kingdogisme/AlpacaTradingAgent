@@ -101,6 +101,19 @@ ROLE_WEIGHTS: Dict[str, Dict[str, float]] = {
 }
 
 
+OPTION_POSITIONING_TERMS = (
+    "gamma",
+    "gex",
+    "gamma flip",
+    "vanna",
+    "charm",
+    "expiration",
+    "pin",
+    "dealer",
+    "strike",
+)
+
+
 STOPWORDS = {
     "the",
     "and",
@@ -358,6 +371,7 @@ def _line_priority(line: str) -> int:
             "position",
             "volatility",
             "sentiment",
+            *OPTION_POSITIONING_TERMS,
         )
     ):
         score += 3
@@ -459,6 +473,8 @@ def _score_chunk(
 
     if any(k in text_lower for k in ("buy", "sell", "hold", "long", "short", "risk")):
         score += 0.5
+    if any(k in text_lower for k in OPTION_POSITIONING_TERMS):
+        score += 0.4
     if any(ch.isdigit() for ch in chunk["text"]):
         score += 0.2
 

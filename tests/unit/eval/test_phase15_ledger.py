@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from tradingagents.eval import (
@@ -79,6 +80,40 @@ def test_trace_normalization_uses_artifact_refs_without_payload_duplication(tmp_
     assert "prompt_text" not in spans[0]["metadata_json"]
     assert "output" not in spans[1]["metadata_json"]
     assert spans[-1]["metadata_json"]["final_signal"] == "BUY"
+
+
+def test_ledger_migrates_legacy_rewards_before_creating_status_index(tmp_path: Path):
+    db_path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE rewards (
+                run_id TEXT NOT NULL,
+                reward_version TEXT NOT NULL,
+                holding_days INTEGER NOT NULL,
+                raw_return REAL,
+                benchmark_return REAL,
+                alpha_return REAL,
+                oracle_label TEXT,
+                classification_reward REAL,
+                pnl_reward REAL,
+                reward_scalar REAL,
+                components_json TEXT NOT NULL,
+                resolved_at TEXT NOT NULL,
+                data_source TEXT NOT NULL,
+                PRIMARY KEY(run_id, reward_version)
+            )
+            """
+        )
+
+    EpisodeLedger(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(rewards)").fetchall()}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(rewards)").fetchall()}
+
+    assert "reward_status" in columns
+    assert "idx_rewards_status" in indexes
 
 
 def test_config_hash_is_order_insensitive_and_experiment_is_recorded(tmp_path: Path):

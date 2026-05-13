@@ -7,6 +7,7 @@ from ..utils.agent_trading_modes import (
     get_horizon_context,
     get_trading_mode_context,
 )
+from ..utils.language import language_instruction
 from ..utils.report_context import (
     get_agent_context_bundle,
     build_debate_digest,
@@ -68,6 +69,7 @@ def create_safe_debator(llm, config=None):
             "risk/conservative_debator",
             risk_specific_context=risk_specific_context,
             horizon_agent_context=horizon_agent_context,
+            language_instruction=language_instruction(config),
             trader_decision=trader_decision,
             actions=actions,
             claim_matrix=claim_matrix,

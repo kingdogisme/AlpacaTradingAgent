@@ -7,6 +7,7 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_agent_horizon_context,
     get_horizon_context,
 )
+from tradingagents.agents.utils.language import language_instruction
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -68,6 +69,10 @@ def create_market_analyst(llm, toolkit):
         horizon_context = get_horizon_context(toolkit.config)
         horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
         is_trend_horizon = horizon_context["horizon"] in ("position", "trend")
+        sellthenews_options_available = (
+            toolkit.has_sellthenews("sellthenews_options_enabled")
+            and not is_crypto
+        )
 
         if toolkit.config["online_tools"] and alpaca_available:
             tools = [toolkit.get_trend_brief if is_trend_horizon else toolkit.get_technical_brief]
@@ -87,6 +92,9 @@ def create_market_analyst(llm, toolkit):
             if alpaca_available:
                 tools.insert(0, toolkit.get_alpaca_data_report)
 
+        if sellthenews_options_available:
+            tools.append(toolkit.get_sellthenews_options_data)
+
         technical_brief_available = toolkit.config["online_tools"] and alpaca_available
         brief_tool_name = "get_trend_brief" if is_trend_horizon else "get_technical_brief"
         indicator_tool_name = (
@@ -102,6 +110,10 @@ def create_market_analyst(llm, toolkit):
         if alpaca_available:
             evidence_sources.append("   - `get_alpaca_data_report` for OHLCV context")
         evidence_sources.append(f"   - `{indicator_tool_name}` for indicator history")
+        if sellthenews_options_available:
+            evidence_sources.append(
+                "   - `get_sellthenews_options_data` for equity options positioning, gamma flip, GEX/pin levels, and expiry risk"
+            )
 
         workflow_intro = (
             "1. **Use the currently available technical tools as your base evidence:**\n"
@@ -145,6 +157,11 @@ def create_market_analyst(llm, toolkit):
                 f"   - Focus on {horizon_context['primary_timeframes']} and {horizon_context['holding_period']} durability.\n"
                 "   - Prefer 200D/40W trend, 3M/6M/12M returns, relative strength, drawdown, and invalidation evidence over Stoch RSI/VWAP timing.\n"
                 "   - Use short-term indicators only as secondary timing context, not as the core thesis.\n"
+                + (
+                    "   - If options positioning is available, use it only as a secondary flow/risk overlay after price-trend confirmation.\n"
+                    if sellthenews_options_available
+                    else ""
+                )
             )
         else:
             iteration_guidance = (
@@ -155,6 +172,11 @@ def create_market_analyst(llm, toolkit):
                 "   - Cross-check indicator history against price levels from Alpaca.\n"
                 if alpaca_available
                 else "   - Do not request unavailable Alpaca data; rely on indicator history and explicitly state that limitation.\n"
+            )
+            + (
+                "   - If options positioning is available, call `get_sellthenews_options_data` once with ticker, current date, and greeks='gamma'.\n"
+                if sellthenews_options_available
+                else ""
             )
             )
 
@@ -176,6 +198,7 @@ def create_market_analyst(llm, toolkit):
             horizon_label=horizon_context["label"],
             holding_period=horizon_context["holding_period"],
             primary_timeframes=horizon_context["primary_timeframes"],
+            language_instruction=language_instruction(toolkit.config),
             workflow_intro=workflow_intro,
             workflow_step_two=workflow_step_two,
             iteration_guidance=iteration_guidance,
@@ -241,6 +264,7 @@ def create_market_analyst(llm, toolkit):
         # Handle iterative tool calls until the model stops requesting them
         while tools and getattr(result, "additional_kwargs", {}).get("tool_calls") and iteration_count < max_tool_iterations:
             iteration_count += 1
+            tool_messages = []
             for tool_call in result.additional_kwargs["tool_calls"]:
                 # Handle different tool call structures
                 if isinstance(tool_call, dict):
@@ -285,19 +309,21 @@ def create_market_analyst(llm, toolkit):
                         except Exception as tool_err:
                             tool_result = f"Error running tool '{tool_name}': {str(tool_err)}"
 
-                # Append the assistant tool call and tool result messages so the LLM can continue the conversation
-                tool_call_id = tool_call.get("id") or tool_call.get("tool_call_id")
-                ai_tool_call_msg = AIMessage(
-                    content="",
-                    additional_kwargs={"tool_calls": [tool_call]},
+                # Preserve the original assistant message because DeepSeek thinking
+                # mode requires its reasoning_content to be passed back.
+                tool_call_id = (
+                    tool_call.get("id") or tool_call.get("tool_call_id")
+                    if isinstance(tool_call, dict)
+                    else getattr(tool_call, "id", None) or getattr(tool_call, "tool_call_id", None)
                 )
                 tool_msg = ToolMessage(
                     content=str(tool_result),
                     tool_call_id=tool_call_id,
                 )
+                tool_messages.append(tool_msg)
 
-                messages_history.append(ai_tool_call_msg)
-                messages_history.append(tool_msg)
+            messages_history.append(result)
+            messages_history.extend(tool_messages)
 
             # Ask the LLM to continue with the new context
             result = chain.invoke(messages_history)

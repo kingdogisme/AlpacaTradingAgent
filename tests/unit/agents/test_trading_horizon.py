@@ -34,6 +34,23 @@ def _mock_ohlcv(days=1800):
     )
 
 
+def _parabolic_ohlcv(days=320):
+    dates = pd.date_range("2024-01-01", periods=days, freq="B")
+    first_leg = pd.Series(range(days - 20), dtype=float) * 0.4 + 100
+    last_leg = pd.Series(range(20), dtype=float) * 12.0 + float(first_leg.iloc[-1]) + 10
+    close = pd.concat([first_leg, last_leg], ignore_index=True)
+    return pd.DataFrame(
+        {
+            "timestamp": dates,
+            "open": close - 2.0,
+            "high": close + 4.0,
+            "low": close - 4.0,
+            "close": close,
+            "volume": 1_000_000,
+        }
+    )
+
+
 class TradingHorizonTests(unittest.TestCase):
     def test_default_and_profiles_are_stable(self):
         self.assertEqual(DEFAULT_CONFIG["trading_horizon"], "swing")
@@ -74,6 +91,22 @@ class TradingHorizonTests(unittest.TestCase):
         self.assertIn("relative_strength", payload)
         self.assertIn("invalidation", payload)
         self.assertIn("regime_alignment", payload)
+
+    def test_position_trend_brief_uses_trade_invalidation_above_regime_break(self):
+        data = _parabolic_ohlcv()
+
+        with patch(
+            "tradingagents.dataflows.technical_brief.AlpacaUtils.get_stock_data",
+            return_value=data,
+        ):
+            brief = build_trend_brief("SNDK", "2026-01-02", "position")
+
+        invalidation = json.loads(brief.model_dump_json())["invalidation"]
+        last_close = float(data["close"].iloc[-1])
+
+        self.assertGreater(invalidation["trade_level"], invalidation["regime_level"])
+        self.assertEqual(invalidation["level"], invalidation["trade_level"])
+        self.assertLess(last_close - invalidation["level"], last_close - invalidation["regime_level"])
 
     def test_memory_prioritizes_same_ticker_same_horizon(self):
         with tempfile.TemporaryDirectory() as tmp:

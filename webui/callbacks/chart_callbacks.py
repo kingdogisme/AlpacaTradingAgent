@@ -89,7 +89,7 @@ def register_chart_callbacks(app):
             # Update current symbol
             symbols = list(app_state.symbol_states.keys())
             if 0 <= clicked_index < len(symbols):
-                app_state.current_symbol = symbols[clicked_index]
+                app_state.set_current_symbol(symbols[clicked_index])
                 page_number = clicked_index + 1
                 
                 # ⚡ IMMEDIATE BUTTON UPDATE - No waiting for refresh!
@@ -220,4 +220,4 @@ def register_chart_callbacks(app):
             button_id == "period-1w", 
             button_id == "period-1mo",
             button_id == "period-1y"
-        ) 
+        )

@@ -219,7 +219,6 @@ class EpisodeLedger:
                     PRIMARY KEY(run_id, reward_version),
                     FOREIGN KEY(run_id) REFERENCES episodes(run_id)
                 );
-                CREATE INDEX IF NOT EXISTS idx_rewards_status ON rewards(reward_status);
 
                 CREATE TABLE IF NOT EXISTS trace_spans (
                     run_id TEXT NOT NULL,
@@ -332,6 +331,7 @@ class EpisodeLedger:
                 conn.execute(
                     "ALTER TABLE rewards ADD COLUMN reward_status TEXT NOT NULL DEFAULT 'resolved'"
                 )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_rewards_status ON rewards(reward_status)")
 
     def start_episode(
         self,

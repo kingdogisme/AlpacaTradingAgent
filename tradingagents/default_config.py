@@ -2,7 +2,41 @@ import os
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
-DEFAULT_CONFIG = {
+_ENV_OVERRIDES = {
+    "TRADINGAGENTS_LLM_PROVIDER": "llm_provider",
+    "TRADINGAGENTS_DEEP_THINK_LLM": "deep_think_llm",
+    "TRADINGAGENTS_QUICK_THINK_LLM": "quick_think_llm",
+    "TRADINGAGENTS_LLM_BACKEND_URL": "backend_url",
+    "TRADINGAGENTS_OUTPUT_LANGUAGE": "output_language",
+    "TRADINGAGENTS_MAX_DEBATE_ROUNDS": "max_debate_rounds",
+    "TRADINGAGENTS_MAX_RISK_ROUNDS": "max_risk_discuss_rounds",
+    "TRADINGAGENTS_CHECKPOINT_ENABLED": "checkpoint_enabled",
+    "TRADINGAGENTS_BENCHMARK_TICKER": "benchmark_ticker",
+}
+
+
+def _coerce_env_value(value: str, reference):
+    """Coerce env-var strings to the type of the existing default value."""
+    if isinstance(reference, bool):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(reference, int) and not isinstance(reference, bool):
+        return int(value)
+    if isinstance(reference, float):
+        return float(value)
+    return value
+
+
+def _apply_env_overrides(config: dict) -> dict:
+    """Apply TRADINGAGENTS_* overrides in-place."""
+    for env_var, key in _ENV_OVERRIDES.items():
+        raw = os.getenv(env_var)
+        if raw is None or raw == "":
+            continue
+        config[key] = _coerce_env_value(raw, config.get(key))
+    return config
+
+
+DEFAULT_CONFIG = _apply_env_overrides({
     "project_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR", "eval_results"),
     "memory_log_path": os.getenv(
@@ -22,6 +56,17 @@ DEFAULT_CONFIG = {
     "memory_policy": "legacy",
     "critic_version": "v1_diagnostic_tags",
     "checkpoint_enabled": False,
+    "benchmark_ticker": None,
+    "benchmark_map": {
+        ".NS": "^NSEI",
+        ".BO": "^BSESN",
+        ".T": "^N225",
+        ".HK": "^HSI",
+        ".L": "^FTSE",
+        ".TO": "^GSPTSE",
+        ".AX": "^AXJO",
+        "": "SPY",
+    },
     # "data_dir": "/Users/yluo/Documents/Code/ScAI/FR1-data",
     "data_dir": "data/ScAI/FR1-data",
     "data_cache_dir": os.getenv(
@@ -33,13 +78,13 @@ DEFAULT_CONFIG = {
     ),
     # LLM settings
     "llm_provider": os.getenv("LLM_PROVIDER", "openai"),
-    "deep_think_llm": "gpt-5.4-mini",
-    "quick_think_llm": "gpt-5.4-nano",
+    "deep_think_llm": "gpt-5.4",
+    "quick_think_llm": "gpt-5.4-mini",
     "backend_url": None,
     "google_thinking_level": None,
     "openai_reasoning_effort": None,
     "anthropic_effort": None,
-    "output_language": "English",
+    "output_language": "zh-CN",
     "deep_llm_params": {
         "reasoning_effort": "medium",
         "text_verbosity": "medium",
@@ -119,6 +164,23 @@ DEFAULT_CONFIG = {
     ],
     "data_fallback_enabled": False,  # Optional yfinance backup for supported Alpaca data failures
     "web_search_timeout_extension_seconds": 45,  # Extra timeout buffer added by timing wrapper for web-search tools
+    "sellthenews_enabled": True,
+    "sellthenews_base_url": "https://mcp.sellthenews.org/mcp",
+    "sellthenews_timeout_seconds": 8,
+    "sellthenews_news_enabled": True,
+    "sellthenews_social_enabled": True,
+    "sellthenews_macro_enabled": True,
+    "sellthenews_options_enabled": False,
+    "sellthenews_options_greeks": "gamma",
+    "sellthenews_options_default_expiration": None,
+    "sellthenews_options_max_chars": 4500,
+    "sellthenews_options_spot_mismatch_threshold_pct": 5.0,
+    "sellthenews_fallback_on_sparse": True,
+    "alpha_vantage_mcp_enabled": True,
+    "alpha_vantage_mcp_base_url": "https://mcp.alphavantage.co/mcp",
+    "alpha_vantage_mcp_timeout_seconds": 8,
+    "alpha_vantage_fundamentals_enabled": True,
+    "alpha_vantage_fallback_on_sparse": True,
     "news_global_openai_enabled": False,  # News analyst uses fast ticker sources by default; macro handles broad global context
     "global_news_fast_profile": True,  # Keep global-news tool lean even at medium/deep research depth
     "stock_news_fast_profile": True,  # Keep stock-news web-search tool lean at medium/deep depth
@@ -129,19 +191,29 @@ DEFAULT_CONFIG = {
     "global_news_word_budget": 550,  # Target output length from global-news tool
     "stock_news_timeout_seconds": 120,  # Timeout for get_stock_news_openai web-search calls
     "stock_news_max_output_tokens": 900,  # Output-token cap for social/news web-search summary tool
+    "social_openai_stock_news_enabled": True,  # Available as a low-priority backstop after SellTheNews/grounded sources
+    "grounded_social_evidence_enabled": True,  # Prefetch public StockTwits/Reddit samples for social analyst grounding
+    "grounded_social_timeout_seconds": 6,
+    "stocktwits_message_limit": 12,
+    "reddit_public_limit_per_subreddit": 3,
     "fundamentals_timeout_seconds": 120,  # Timeout for get_fundamentals_openai web-search calls
     "fundamentals_max_output_tokens": 1000,  # Output-token cap for fundamentals web-search summary tool
+    "fundamentals_include_reasoning": False,  # Keep web-search fundamentals latency bounded by default
     "google_news_max_pages": 3,  # Google News pages fetched before dedupe/limit
     "google_news_max_items": 18,  # Max deduped Google News items returned to analysts
+    "finnhub_news_max_items": 24,  # Max Finnhub company-news items returned to analysts
+    "finnhub_news_max_chars": 12000,  # Max Finnhub company-news payload size
     "openai_store_responses": False,  # Disable response storing by default to reduce latency/payload
     # API keys (these will be overridden by environment variables if present)
     "openai_api_key": None,
     "openai_use_local": False,  # Route core LLM calls to a local OpenAI-compatible endpoint
     "openai_base_url": None,  # Example: http://localhost:1234/v1
+    "embedding_provider": os.getenv("TRADINGAGENTS_EMBEDDING_PROVIDER", "openai"),
     "openai_embedding_model": "text-embedding-ada-002",
+    "google_embedding_model": os.getenv("GOOGLE_EMBEDDING_MODEL", "gemini-embedding-001"),
     "finnhub_api_key": None,
     "alpaca_api_key": None,
     "alpaca_secret_key": None,
     "alpaca_use_paper": "True",  # Set to "True" to use paper trading, "False" for live trading
     "coindesk_api_key": None,
-}
+})

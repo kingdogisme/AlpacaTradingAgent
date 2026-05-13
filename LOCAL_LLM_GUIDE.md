@@ -6,7 +6,8 @@ OpenAI-compatible local endpoint such as LM Studio, Ollama, or vLLM.
 
 What local mode covers:
 - the main quick/deep thinker chat models used by the graph
-- reflection-memory embeddings when your endpoint exposes an embeddings API
+- reflection-memory embeddings when your endpoint exposes an embeddings API,
+  or when `TRADINGAGENTS_EMBEDDING_PROVIDER=google` is configured
 
 What local mode does not replace:
 - OpenAI web-search tools in `tradingagents/dataflows/interface.py`
@@ -25,6 +26,11 @@ OPENAI_API_KEY=local-llm
 
 # Optional when your endpoint exposes embeddings under a custom model name
 OPENAI_EMBEDDING_MODEL=text-embedding-ada-002
+
+# Optional fallback when the local OpenAI-compatible endpoint has no embeddings route
+TRADINGAGENTS_EMBEDDING_PROVIDER=google
+GOOGLE_API_KEY=your_google_api_key_here
+GOOGLE_EMBEDDING_MODEL=gemini-embedding-001
 ```
 
 Model configuration
@@ -65,4 +71,15 @@ Embeddings behavior
 Reflection memory uses embeddings. If your local endpoint does not expose a
 compatible embeddings API, the app now degrades gracefully by skipping memory
 lookups/additions for that run instead of crashing the graph.
+
+To keep local chat models but use Gemini embeddings, set:
+
+```env
+TRADINGAGENTS_EMBEDDING_PROVIDER=google
+GOOGLE_API_KEY=your_google_api_key_here
+GOOGLE_EMBEDDING_MODEL=gemini-embedding-001
+```
+
+Use `TRADINGAGENTS_EMBEDDING_PROVIDER=disabled` to explicitly turn reflection
+memory embeddings off.
 """

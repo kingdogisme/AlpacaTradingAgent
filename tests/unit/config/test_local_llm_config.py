@@ -19,6 +19,8 @@ class LocalLLMConfigTests(unittest.TestCase):
             "OPENAI_USE_LOCAL": os.environ.get("OPENAI_USE_LOCAL"),
             "OPENAI_BASE_URL": os.environ.get("OPENAI_BASE_URL"),
             "OPENAI_EMBEDDING_MODEL": os.environ.get("OPENAI_EMBEDDING_MODEL"),
+            "TRADINGAGENTS_EMBEDDING_PROVIDER": os.environ.get("TRADINGAGENTS_EMBEDDING_PROVIDER"),
+            "GOOGLE_EMBEDDING_MODEL": os.environ.get("GOOGLE_EMBEDDING_MODEL"),
         }
 
         config_module.clear_runtime_api_keys()
@@ -27,7 +29,9 @@ class LocalLLMConfigTests(unittest.TestCase):
                 "openai_api_key": None,
                 "openai_use_local": False,
                 "openai_base_url": None,
+                "embedding_provider": "openai",
                 "openai_embedding_model": "text-embedding-ada-002",
+                "google_embedding_model": "gemini-embedding-001",
             }
         )
         for key in self.original_env:
@@ -86,6 +90,13 @@ class LocalLLMConfigTests(unittest.TestCase):
     def test_embedding_model_can_be_overridden(self):
         os.environ["OPENAI_EMBEDDING_MODEL"] = "nomic-embed-text"
         self.assertEqual(config_module.get_openai_embedding_model(), "nomic-embed-text")
+
+    def test_embedding_provider_and_google_model_can_be_overridden(self):
+        os.environ["TRADINGAGENTS_EMBEDDING_PROVIDER"] = "google"
+        os.environ["GOOGLE_EMBEDDING_MODEL"] = "gemini-embedding-2"
+
+        self.assertEqual(config_module.get_embedding_provider(), "google")
+        self.assertEqual(config_module.get_google_embedding_model(), "gemini-embedding-2")
 
 
 if __name__ == "__main__":

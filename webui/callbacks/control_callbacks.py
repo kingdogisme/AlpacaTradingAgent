@@ -9,6 +9,7 @@ import threading
 import time
 
 from webui.utils.state import app_state
+from webui.utils.report_recovery import load_latest_run_reports
 from webui.components.analysis import start_analysis
 from tradingagents.dataflows.alpaca_utils import AlpacaUtils
 from tradingagents.openai_model_registry import (
@@ -19,6 +20,84 @@ from tradingagents.openai_model_registry import (
     normalize_model_params,
     resolve_model_choice,
 )
+
+
+def _symbols_from_store(store_data):
+    if not isinstance(store_data, dict):
+        return []
+    return _parse_symbol_text(store_data.get("symbols") or [])
+
+
+def _build_analysis_store_data(
+    symbols,
+    mode_text,
+    interval_text,
+    horizon,
+    trend_execution_enabled,
+    status,
+    message=None,
+):
+    return {
+        "analysis_started": True,
+        "analysis_status": status,
+        "timestamp": time.time(),
+        "symbols": symbols,
+        "num_symbols": len(symbols),
+        "mode": mode_text,
+        "trading_horizon": horizon,
+        "trend_execution_enabled": bool(trend_execution_enabled),
+        "interval_text": interval_text,
+        "message": message or "",
+    }
+
+
+def _state_reports_for_store(symbol):
+    state = app_state.get_state(symbol) or {}
+    return {
+        report_type: content
+        for report_type, content in (state.get("current_reports") or {}).items()
+        if content
+    }
+
+
+def _reports_from_latest_runs(symbols):
+    recovered_by_symbol = {}
+    for symbol in symbols:
+        recovered = load_latest_run_reports(symbol)
+        if recovered and recovered.get("reports"):
+            recovered_by_symbol[symbol] = recovered
+    return recovered_by_symbol
+
+
+def _build_restored_symbol_state(symbol, stored_reports):
+    app_state.build_symbol_state_from_reports(
+        symbol,
+        stored_reports or {},
+        complete=bool((stored_reports or {}).get("final_trade_decision")),
+    )
+
+
+def _restore_symbol_from_latest_run(symbol):
+    recovered = load_latest_run_reports(symbol)
+    if not recovered:
+        app_state.init_symbol_state(symbol)
+        return False
+    state = app_state.build_symbol_state_from_reports(
+        symbol,
+        recovered.get("reports") or {},
+        complete=recovered.get("status") == "completed",
+        prompts=recovered.get("prompts") or {},
+    )
+    if recovered.get("trade_date"):
+        state["trade_date"] = recovered["trade_date"]
+    if recovered.get("final_signal"):
+        state["recommended_action"] = recovered["final_signal"]
+        if state.get("analysis_results"):
+            state["analysis_results"]["decision"] = recovered["final_signal"]
+    if recovered.get("run_file"):
+        state["restored_from_run_file"] = recovered["run_file"]
+    print(f"[RESTORE] Restored {symbol} reports from {recovered.get('run_file')}")
+    return True
 
 
 def _llm_group_style(enabled):
@@ -101,7 +180,7 @@ def _custom_model_placeholder(provider, role):
     provider_key = (provider or "openai").lower()
     examples = {
         "local_openai": "qwen3:latest",
-        "deepseek": "deepseek-chat",
+        "deepseek": "deepseek-v4-flash" if role == "quick" else "deepseek-v4-pro",
         "qwen": "qwen-plus",
         "glm": "glm-5",
         "openrouter": "openai/gpt-5.4-mini",
@@ -805,7 +884,8 @@ def register_control_callbacks(app):
          State("trend-execution-enabled", "value"),
          State("trade-dollar-amount", "value"),
          State("market-hour-enabled", "value"),
-         State("market-hours-input", "value")]
+         State("market-hours-input", "value"),
+         State("app-store", "data")]
     )
     def on_control_button_click(n_clicks, button_children, tickers, analysts_market, analysts_social, analysts_news,
                                analysts_fundamentals, analysts_macro, research_depth,
@@ -818,7 +898,7 @@ def register_control_callbacks(app):
                                deep_top_p, deep_max_output_tokens, deep_store, deep_parallel_tool_calls,
                                allow_shorts, trading_horizon, loop_enabled, loop_interval,
                                trade_enabled, trend_execution_enabled, trade_amount,
-                               market_hour_enabled, market_hours_input):
+                               market_hour_enabled, market_hours_input, current_store_data):
         """Handle control button clicks"""
         # Detect which property triggered this callback
         triggered_prop = None
@@ -847,13 +927,68 @@ def register_control_callbacks(app):
         if is_stop_action:
             if app_state.loop_enabled:
                 app_state.stop_loop_mode()
-                return "Loop analysis stopped.", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+                symbols = list(app_state.symbol_states.keys()) or _symbols_from_store(current_store_data)
+                store_data = dict(current_store_data or {})
+                store_data.update(
+                    {
+                        "analysis_started": bool(symbols),
+                        "analysis_status": "stopped",
+                        "timestamp": time.time(),
+                        "symbols": symbols,
+                        "num_symbols": len(symbols),
+                        "reports": {
+                            symbol: _state_reports_for_store(symbol)
+                            for symbol in symbols
+                        },
+                        "message": "Loop analysis stopped.",
+                    }
+                )
+                max_pages = max(1, len(symbols))
+                active_page = 1
+                return "Loop analysis stopped.", store_data, max_pages, active_page, max_pages, active_page
             elif app_state.market_hour_enabled:
                 app_state.stop_market_hour_mode()
-                return "Market hour analysis stopped.", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+                symbols = list(app_state.symbol_states.keys()) or _symbols_from_store(current_store_data)
+                store_data = dict(current_store_data or {})
+                store_data.update(
+                    {
+                        "analysis_started": bool(symbols),
+                        "analysis_status": "stopped",
+                        "timestamp": time.time(),
+                        "symbols": symbols,
+                        "num_symbols": len(symbols),
+                        "reports": {
+                            symbol: _state_reports_for_store(symbol)
+                            for symbol in symbols
+                        },
+                        "message": "Market hour analysis stopped.",
+                    }
+                )
+                max_pages = max(1, len(symbols))
+                active_page = 1
+                return "Market hour analysis stopped.", store_data, max_pages, active_page, max_pages, active_page
             else:
                 app_state.analysis_running = False
-                return "Analysis stopped.", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+                symbols = list(app_state.symbol_states.keys()) or _symbols_from_store(current_store_data)
+                app_state.finish_analysis_run()
+                store_data = dict(current_store_data or {})
+                store_data.update(
+                    {
+                        "analysis_started": bool(symbols),
+                        "analysis_status": "stopped",
+                        "timestamp": time.time(),
+                        "symbols": symbols,
+                        "num_symbols": len(symbols),
+                        "reports": {
+                            symbol: _state_reports_for_store(symbol)
+                            for symbol in symbols
+                        },
+                        "message": "Analysis stopped.",
+                    }
+                )
+                max_pages = max(1, len(symbols))
+                active_page = 1
+                return "Analysis stopped.", store_data, max_pages, active_page, max_pages, active_page
 
         # Handle start action
         if app_state.analysis_running:
@@ -1133,7 +1268,10 @@ def register_control_callbacks(app):
                             trend_execution_enabled=trend_execution_enabled,
                         )
 
-            app_state.analysis_running = False
+            if market_hour_enabled:
+                app_state.analysis_running = False
+            else:
+                app_state.finish_analysis_run()
 
         if not app_state.analysis_running:
             app_state.analysis_running = True
@@ -1157,24 +1295,105 @@ def register_control_callbacks(app):
             mode_text = "single run mode"
             interval_text = ""
 
-        # Store symbols and pagination data in app-store for page refresh recovery
-        store_data = {
-            "analysis_started": True,
-            "timestamp": time.time(),
-            "symbols": symbols,  # Store the symbols list
-            "num_symbols": num_symbols,  # Store the count
-            "mode": mode_text,
-            "trading_horizon": horizon,
-            "trend_execution_enabled": bool(trend_execution_enabled),
-            "interval_text": interval_text
-        }
-
         research_only_note = (
             " Trend horizon is research-only unless trend execution is explicitly enabled."
             if horizon in {"position", "trend"} and not trend_execution_enabled
             else ""
         )
-        return f"Starting real-time analysis for {', '.join(symbols)} in {mode_text}{interval_text} using {horizon} horizon and current market data.{research_only_note}", store_data, num_symbols, 1, num_symbols, 1
+        start_message = (
+            f"Starting real-time analysis for {', '.join(symbols)} in {mode_text}{interval_text} "
+            f"using {horizon} horizon and current market data.{research_only_note}"
+        )
+        store_data = _build_analysis_store_data(
+            symbols,
+            mode_text,
+            interval_text,
+            horizon,
+            trend_execution_enabled,
+            "running",
+            start_message,
+        )
+        return start_message, store_data, num_symbols, 1, num_symbols, 1
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        [Input("medium-refresh-interval", "n_intervals")],
+        [State("app-store", "data")],
+        prevent_initial_call=True,
+    )
+    def persist_completed_reports(n_intervals, store_data):
+        if not store_data or not store_data.get("analysis_started"):
+            return dash.no_update
+        symbols = _symbols_from_store(store_data)
+        if not symbols or app_state.analysis_running:
+            return dash.no_update
+        if not app_state.symbol_states:
+            return dash.no_update
+
+        reports_by_symbol = {
+            symbol: _state_reports_for_store(symbol)
+            for symbol in symbols
+            if symbol in app_state.symbol_states
+        }
+        if not any(reports_by_symbol.values()):
+            return dash.no_update
+
+        status = "completed" if all(
+            (app_state.get_state(symbol) or {}).get("analysis_complete", False)
+            for symbol in reports_by_symbol
+        ) else store_data.get("analysis_status", "running")
+        message = (
+            f"Analysis complete for {', '.join(symbols)}. Reports are available."
+            if status == "completed"
+            else store_data.get("message", "")
+        )
+        updated = dict(store_data)
+        updated.update(
+            {
+                "analysis_status": status,
+                "timestamp": time.time(),
+                "reports": reports_by_symbol,
+                "message": message,
+            }
+        )
+        return updated
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        [Input("settings-store", "data")],
+        [State("app-store", "data")],
+        prevent_initial_call=True,
+    )
+    def restore_latest_reports_from_settings(settings_data, current_store_data):
+        if current_store_data and current_store_data.get("analysis_started"):
+            return dash.no_update
+        if not isinstance(settings_data, dict):
+            return dash.no_update
+
+        symbols = _parse_symbol_text(settings_data.get("ticker_input"))
+        if not symbols:
+            return dash.no_update
+
+        recovered_by_symbol = _reports_from_latest_runs(symbols)
+        if not recovered_by_symbol:
+            return dash.no_update
+
+        restored_symbols = [symbol for symbol in symbols if symbol in recovered_by_symbol]
+        reports_by_symbol = {
+            symbol: recovered_by_symbol[symbol].get("reports") or {}
+            for symbol in restored_symbols
+        }
+        store_data = _build_analysis_store_data(
+            restored_symbols,
+            "restored latest run",
+            "",
+            settings_data.get("trading_horizon") or "swing",
+            settings_data.get("trend_execution_enabled", False),
+            "restored",
+            f"Restored latest saved reports for {', '.join(restored_symbols)}.",
+        )
+        store_data["reports"] = reports_by_symbol
+        return store_data
 
     @app.callback(
         [Output("chart-pagination", "max_value", allow_duplicate=True),
@@ -1195,7 +1414,18 @@ def register_control_callbacks(app):
         num_symbols = len(symbols)
 
         # Restore symbol states if they don't exist (e.g., after page refresh)
-        if not app_state.symbol_states or len(app_state.symbol_states) != num_symbols:
+        if not app_state.symbol_states and store_data.get("reports"):
+            print(f"[RESTORE] Restoring persisted reports for {symbols}")
+            stored_reports = store_data.get("reports") or {}
+            for symbol in symbols:
+                _build_restored_symbol_state(symbol, stored_reports.get(symbol, {}))
+        elif not app_state.symbol_states and store_data.get("analysis_started"):
+            print(f"[RESTORE] Restoring latest run reports for {symbols}")
+            for symbol in symbols:
+                _restore_symbol_from_latest_run(symbol)
+        elif app_state.analysis_running and (
+            not app_state.symbol_states or len(app_state.symbol_states) != num_symbols
+        ):
             print(f"[RESTORE] Restoring symbol states for {symbols} after page refresh")
             for symbol in symbols:
                 if symbol not in app_state.symbol_states:
@@ -1203,13 +1433,17 @@ def register_control_callbacks(app):
 
             # Set current symbol to first one if none is set
             if not app_state.current_symbol and symbols:
-                app_state.current_symbol = symbols[0]
+                app_state.set_current_symbol(symbols[0])
                 print(f"[RESTORE] Set current symbol to {symbols[0]}")
         else:
             print(f"[RESTORE] Symbol states already exist for {list(app_state.symbol_states.keys())}")
 
-        print(f"[RESTORE] Restoring pagination: max_value={num_symbols}")
-        return num_symbols, 1, num_symbols, 1
+        app_state.ensure_current_symbol()
+        active_symbol = app_state.current_symbol
+        active_page = symbols.index(active_symbol) + 1 if active_symbol in symbols else 1
+
+        print(f"[RESTORE] Restoring pagination: max_value={num_symbols}, active_page={active_page}")
+        return num_symbols, active_page, num_symbols, active_page
 
     @app.callback(
         Output("result-text", "children", allow_duplicate=True),
@@ -1224,8 +1458,11 @@ def register_control_callbacks(app):
         symbols = store_data.get("symbols", [])
         mode = store_data.get("mode", "mode")
         interval_text = store_data.get("interval_text", "")
+        status = store_data.get("analysis_status")
 
         if symbols:
+            if status in {"completed", "failed", "stopped"}:
+                return store_data.get("message") or f"Analysis data for {', '.join(symbols)} is available ({mode}{interval_text})."
             return f"📄 Page refreshed - Analysis data for {', '.join(symbols)} has been restored ({mode}{interval_text}). All symbol pages should now be available."
 
         return ""

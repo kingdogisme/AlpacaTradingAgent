@@ -23,7 +23,12 @@ TOOL_MIN_OUTPUT_CHARS = {
     "get_stock_news_openai": 500,
     "get_global_news_openai": 500,
     "get_fundamentals_openai": 350,
+    "get_alpha_vantage_fundamentals": 700,
     "get_macro_analysis": 280,
+    "get_sellthenews_stock_news": 320,
+    "get_sellthenews_social_sentiment": 320,
+    "get_sellthenews_macro_news": 360,
+    "get_sellthenews_options_data": 320,
 }
 
 DEFAULT_SEMANTIC_RETRY_DISABLED_TOOLS = {
@@ -51,6 +56,7 @@ VALID_SHORT_OUTPUT_PATTERNS = (
     "not found for",
     "no data available",
     "fallback used because openai",
+    "fallback used because tool timeout",
 )
 
 
@@ -211,6 +217,23 @@ def _should_retry_tool_output(
     return True
 
 
+def _build_timeout_fallback(tool_name: str, inputs: dict, timeout_msg: str) -> str | None:
+    if tool_name != "get_fundamentals_openai":
+        return None
+    ticker = inputs.get("ticker")
+    curr_date = inputs.get("curr_date")
+    if not ticker or not curr_date:
+        return None
+    try:
+        return interface.build_openai_fundamentals_fallback(
+            ticker=str(ticker),
+            curr_date=str(curr_date),
+            reason=f"tool timeout before OpenAI fundamentals completed ({timeout_msg})",
+        )
+    except Exception:
+        return None
+
+
 def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
     """
     Decorator to time function calls and track them for UI display with timeout protection
@@ -316,13 +339,27 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                         )
                         print(f"[{analyst_type}] ⏰ {timeout_msg}")
 
+                        fallback_result = _build_timeout_fallback(
+                            tool_name,
+                            input_summary_full,
+                            timeout_msg,
+                        )
+                        result_for_llm = fallback_result or (
+                            f"Error: Tool '{tool_name}' timed out after {effective_timeout_seconds:.1f}s. "
+                            "This may indicate network issues, API problems, or insufficient data."
+                        )
+                        status = "degraded" if fallback_result else "timeout"
+                        quality_flags = ["timeout"]
+                        if fallback_result:
+                            quality_flags.append("fallback_used")
+
                         tool_call_info = {
                             "timestamp": timestamp,
                             "tool_name": tool_name,
                             "inputs": input_summary,
-                            "output": f"TIMEOUT ERROR: {timeout_msg}",
+                            "output": result_for_llm,
                             "execution_time": f"{elapsed:.2f}s",
-                            "status": "timeout",
+                            "status": status,
                             "agent_type": analyst_type,
                             "symbol": getattr(app_state, 'analyzing_symbol', None) or getattr(app_state, 'current_symbol', None),
                             "error_details": {
@@ -331,6 +368,7 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                                 "actual_time": elapsed
                             },
                             "retry_count": retry_count,
+                            "quality_details": {"flags": quality_flags, "is_suspect": True},
                         }
 
                         app_state.tool_calls_log.append(tool_call_info)
@@ -340,19 +378,16 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                             tool_name=tool_name,
                             inputs=input_summary_full,
                             output=tool_call_info["output"],
-                            status="timeout",
+                            status=status,
                             execution_time_seconds=elapsed,
                             agent_type=analyst_type,
                             symbol=tool_call_info["symbol"],
                             error_details=tool_call_info.get("error_details", {}),
-                            quality_details={"flags": ["timeout"], "is_suspect": True},
+                            quality_details=tool_call_info["quality_details"],
                             retry_count=retry_count,
                         )
 
-                        return (
-                            f"Error: Tool '{tool_name}' timed out after {effective_timeout_seconds:.1f}s. "
-                            "This may indicate network issues, API problems, or insufficient data."
-                        )
+                        return result_for_llm
 
                     # Check for very slow execution
                     partial_elapsed = time.time() - start_time
@@ -574,6 +609,14 @@ class Toolkit:
     def has_finnhub(self) -> bool:
         return self._has_key("finnhub_api_key", "FINNHUB_API_KEY")
 
+    def has_alpha_vantage(self) -> bool:
+        return (
+            bool(self.config.get("online_tools", True))
+            and bool(self.config.get("alpha_vantage_mcp_enabled", True))
+            and bool(self.config.get("alpha_vantage_fundamentals_enabled", True))
+            and self._has_key("alpha_vantage_api_key", "ALPHA_VANTAGE_API_KEY")
+        )
+
     def has_alpaca_credentials(self) -> bool:
         return self._has_key("alpaca_api_key", "ALPACA_API_KEY") and self._has_key(
             "alpaca_secret_key", "ALPACA_SECRET_KEY"
@@ -584,6 +627,15 @@ class Toolkit:
 
     def has_coindesk(self) -> bool:
         return self._has_key("coindesk_api_key", "COINDESK_API_KEY")
+
+    def has_sellthenews(self, feature_key: str | None = None) -> bool:
+        if not self.config.get("online_tools", True):
+            return False
+        if not self.config.get("sellthenews_enabled", True):
+            return False
+        if feature_key is None:
+            return True
+        return bool(self.config.get(feature_key, True))
 
     def has_simfin_data(self) -> bool:
         data_dir = self.config.get("data_dir", "")
@@ -615,6 +667,60 @@ class Toolkit:
                 return True
 
         return False
+
+    @staticmethod
+    @tool
+    @timing_wrapper("NEWS")
+    def get_sellthenews_stock_news(
+        ticker: Annotated[str, "Ticker symbol, e.g. AAPL, TSLA, NVDA"],
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+    ) -> str:
+        """
+        Retrieve enhanced company-specific news from SellTheNews MCP with automatic baseline fallback.
+        """
+        return interface.get_sellthenews_stock_news(ticker, curr_date)
+
+    @staticmethod
+    @tool
+    @timing_wrapper("SOCIAL")
+    def get_sellthenews_social_sentiment(
+        ticker: Annotated[str, "Ticker symbol, e.g. AAPL, TSLA, NVDA"],
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+    ) -> str:
+        """
+        Retrieve enhanced WallStreetBets retail sentiment from SellTheNews MCP with automatic baseline fallback.
+        """
+        return interface.get_sellthenews_social_sentiment(ticker, curr_date)
+
+    @staticmethod
+    @tool
+    @timing_wrapper("MACRO")
+    def get_sellthenews_macro_news(
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+        ticker_context: Annotated[str, "Ticker symbol or market context, e.g. AAPL or SPY"] = None,
+    ) -> str:
+        """
+        Retrieve enhanced live macro and market news from SellTheNews MCP with automatic baseline fallback.
+        """
+        return interface.get_sellthenews_macro_news(curr_date, ticker_context)
+
+    @staticmethod
+    @tool
+    @timing_wrapper("MARKET")
+    def get_sellthenews_options_data(
+        ticker: Annotated[str, "Equity ticker symbol with listed options, e.g. AAPL, SPY, NVDA"],
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+        expiration: Annotated[str | None, "Optional expiration date in YYYY-MM-DD format. Leave empty for nearest available expiration."] = None,
+        greeks: Annotated[str, "Comma-separated Greeks to request: gamma, vanna, charm, delta, theta, vega, or all. Default gamma."] = "gamma",
+    ) -> str:
+        """
+        Retrieve SellTheNews options positioning data for equities only.
+
+        This provides dealer-positioning context such as gamma flip, GEX levels,
+        selected expiration, and Greek exposure. It is research evidence only,
+        not an options trading recommendation, and is not applicable to crypto.
+        """
+        return interface.get_sellthenews_options_data(ticker, curr_date, expiration, greeks)
 
     @staticmethod
     @tool
@@ -1046,6 +1152,43 @@ class Toolkit:
         )
 
         return openai_fundamentals_results
+
+    @staticmethod
+    @tool
+    @timing_wrapper("FUNDAMENTALS")
+    def get_alpha_vantage_fundamentals(
+        ticker: Annotated[str, "the company's ticker"],
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+    ):
+        """
+        Retrieve company overview, earnings, estimates, financial statements, and insider transactions from Alpha Vantage MCP.
+        Args:
+            ticker (str): Ticker of a company. e.g. AAPL, TSM
+            curr_date (str): Current date in yyyy-mm-dd format
+        Returns:
+            str: A formatted string containing Alpha Vantage fundamental data with fallback context if unavailable.
+        """
+
+        return interface.get_alpha_vantage_fundamentals(ticker, curr_date)
+
+    @staticmethod
+    @tool
+    @timing_wrapper("FUNDAMENTALS")
+    def get_finnhub_company_fundamentals(
+        ticker: Annotated[str, "the company's ticker"],
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+    ):
+        """
+        Retrieve company profile, key financial metrics, metric trends, earnings history,
+        analyst recommendation trends, and peers from Finnhub.
+        Args:
+            ticker (str): Ticker of a company. e.g. AAPL, LI
+            curr_date (str): Current date in yyyy-mm-dd format
+        Returns:
+            str: A formatted string containing Finnhub fundamentals data.
+        """
+
+        return interface.get_finnhub_company_fundamentals(ticker, curr_date)
 
     @staticmethod
     @tool

@@ -594,7 +594,7 @@ def _model_setup(lang="en"):
                         dbc.Input(
                             id="output-language",
                             type="text",
-                            value="English",
+                            value="zh-CN",
                             className="config-input",
                         ),
                         "language",
@@ -613,8 +613,8 @@ def _model_setup(lang="en"):
             ),
             html.Div(
                 [
-                    _model_panel("quick", t(lang, "config.quick_thinker"), "bolt", "gpt-5.4-nano", lang=lang),
-                    _model_panel("deep", t(lang, "config.deep_thinker"), "brain", "gpt-5.4-mini", lang=lang),
+                    _model_panel("quick", t(lang, "config.quick_thinker"), "bolt", "gpt-5.4-mini", lang=lang),
+                    _model_panel("deep", t(lang, "config.deep_thinker"), "brain", "gpt-5.4", lang=lang),
                 ],
                 className="model-grid",
             ),

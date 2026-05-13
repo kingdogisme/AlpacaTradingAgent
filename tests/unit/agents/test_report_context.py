@@ -47,6 +47,23 @@ def test_agent_context_bundle_includes_claim_matrix_and_selected_chunks():
     assert state["report_context"]["stats"]["reports_with_content"] == 5
 
 
+def test_report_context_extracts_options_positioning_points():
+    state = _state_with_reports()
+    state["market_report"] = (
+        "## Options Positioning\n"
+        "- Gamma flip is $118 with spot above gamma flip, selected expiration 2026-05-15.\n"
+        "- High GEX strike at $120 creates pin risk and dealer hedging resistance."
+    )
+
+    context = build_report_context_index(state)
+    market_points = context["reports"]["market_report"]["coverage_points"]
+    joined = " ".join(market_points).lower()
+
+    assert "gamma flip" in joined
+    assert "gex" in joined
+    assert "expiration" in joined
+
+
 def test_debate_digest_compacts_investment_and_risk_state():
     investment_digest = build_debate_digest(
         {
@@ -72,4 +89,3 @@ def test_debate_digest_compacts_investment_and_risk_state():
     assert "Bull:" in investment_digest
     assert "Risk Debate Digest" in risk_digest
     assert "Latest speaker: Neutral" in risk_digest
-

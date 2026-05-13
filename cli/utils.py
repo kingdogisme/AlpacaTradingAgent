@@ -200,10 +200,10 @@ def select_checkpoint_enabled() -> bool:
 def get_output_language() -> str:
     language = questionary.text(
         "Output language:",
-        default="English",
+        default="zh-CN",
         style=questionary.Style([("text", "fg:green"), ("highlighted", "noinherit")]),
     ).ask()
-    return (language or "English").strip()
+    return (language or "zh-CN").strip()
 
 
 def ask_gemini_thinking_config() -> str:

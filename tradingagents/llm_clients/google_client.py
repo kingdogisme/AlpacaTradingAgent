@@ -1,15 +1,34 @@
 import os
+import time
 from typing import Any, Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import BaseLLMClient, UsageTrackingChatModel, normalize_content
 from .validators import validate_model
 
 
-class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
+class NormalizedChatGoogleGenerativeAI(UsageTrackingChatModel, ChatGoogleGenerativeAI):
+    provider: str = "google"
+    model_role: str = "unknown"
+
     def invoke(self, input, config=None, **kwargs):
         return normalize_content(super().invoke(input, config, **kwargs))
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        call_started = time.time()
+        result = super()._generate(
+            messages,
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
+        self._record_usage_result(
+            messages=messages,
+            result=result,
+            latency_seconds=time.time() - call_started,
+        )
+        return result
 
 
 class GoogleClient(BaseLLMClient):
@@ -40,7 +59,9 @@ class GoogleClient(BaseLLMClient):
         for key in ("timeout", "max_retries", "callbacks", "http_client", "http_async_client"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
-        return NormalizedChatGoogleGenerativeAI(**llm_kwargs)
+        llm = NormalizedChatGoogleGenerativeAI(**llm_kwargs)
+        llm.model_role = self.kwargs.get("model_role", "unknown")
+        return llm
 
     def validate_model(self) -> bool:
         return validate_model("google", self.model)

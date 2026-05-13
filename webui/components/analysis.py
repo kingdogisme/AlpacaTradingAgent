@@ -63,6 +63,74 @@ def _ledger_fail(ledger, run_id, error_message):
         print(f"[EVAL] Failed to mark episode failure: {exc}")
 
 
+def _latest_logged_agent_output(run_logger, run_id, symbol):
+    if not run_id:
+        return {}
+    with run_logger._lock:
+        run_data = run_logger._active_runs.get(run_id)
+        if not run_data:
+            return {}
+        output = {}
+        for event in run_data.get("events", []):
+            if event.get("type") != "agent_output":
+                continue
+            payload = event.get("payload") or {}
+            output_type = payload.get("output_type")
+            content = payload.get("content")
+            if output_type and content:
+                output[output_type] = content
+        return output
+
+
+def _persist_partial_run_state(run_logger, run_id, symbol, current_state):
+    """Keep UI reports visible when a run fails or is interrupted before final_state."""
+    if not current_state:
+        return
+    try:
+        logged_outputs = _latest_logged_agent_output(run_logger, run_id, symbol)
+        reports = current_state.setdefault("current_reports", {})
+        output_map = {
+            "market_report": "market_report",
+            "sentiment_report": "sentiment_report",
+            "news_report": "news_report",
+            "fundamentals_report": "fundamentals_report",
+            "macro_report": "macro_report",
+            "investment_plan": "research_manager_report",
+            "trader_investment_plan": "trader_investment_plan",
+            "final_trade_decision": "final_trade_decision",
+        }
+        for output_type, report_type in output_map.items():
+            content = logged_outputs.get(output_type)
+            if content and not reports.get(report_type):
+                reports[report_type] = content
+        if reports.get("final_trade_decision") and not reports.get("portfolio_decision"):
+            reports["portfolio_decision"] = reports["final_trade_decision"]
+
+        final_decision = reports.get("final_trade_decision")
+        if final_decision:
+            decision = extract_recommendation(
+                final_decision,
+                current_state.get("trading_mode", "investment"),
+            ) or current_state.get("recommended_action")
+            if decision:
+                current_state["recommended_action"] = decision
+            current_state["analysis_complete"] = True
+            current_state["analysis_results"] = {
+                "ticker": symbol,
+                "date": current_state.get("trade_date") or "",
+                "decision": decision or "No decision",
+                "trading_horizon": current_state.get("trading_horizon", "swing"),
+                "trend_research_only": (
+                    current_state.get("trading_horizon") in {"position", "trend"}
+                    and not current_state.get("trend_execution_enabled", False)
+                ),
+            }
+        app_state.update_reports_count()
+        app_state.needs_ui_update = True
+    except Exception as exc:
+        print(f"[STATE] Failed to persist partial run state for {symbol}: {exc}")
+
+
 def execute_trade_after_analysis(ticker, allow_shorts, trade_amount):
     """Execute trade based on analysis results"""
     try:
@@ -170,7 +238,7 @@ def run_analysis(
     deep_llm_params=None,
     llm_provider="openai",
     backend_url=None,
-    output_language="English",
+    output_language="zh-CN",
     checkpoint_enabled=False,
     provider_settings=None,
     trading_horizon="swing",
@@ -228,7 +296,7 @@ def run_analysis(
         config["deep_llm_params"] = deep_llm_params or {}
         config["llm_provider"] = llm_provider or "openai"
         config["backend_url"] = backend_url or None
-        config["output_language"] = output_language or "English"
+        config["output_language"] = output_language or "zh-CN"
         config["checkpoint_enabled"] = bool(checkpoint_enabled)
         horizon = str(trading_horizon or "swing").strip().lower()
         config["trading_horizon"] = horizon if horizon in {"swing", "position", "trend"} else "swing"
@@ -405,6 +473,7 @@ def run_analysis(
         print(f"Analysis error: {e}")
         import traceback
         traceback.print_exc()
+        _persist_partial_run_state(run_logger, run_id, ticker, current_state)
         if run_started:
             _ledger_fail(ledger, run_id, str(e))
             run_logger.finish_run(
@@ -420,6 +489,7 @@ def run_analysis(
         # Mark analysis as no longer running
         print(f"Real-time analysis for {ticker} completed")
         if current_state:
+            _persist_partial_run_state(run_logger, run_id, ticker, current_state)
             current_state["analysis_running"] = False
 
     return "Real-time analysis complete"
@@ -440,7 +510,7 @@ def start_analysis(
     deep_llm_params=None,
     llm_provider="openai",
     backend_url=None,
-    output_language="English",
+    output_language="zh-CN",
     checkpoint_enabled=False,
     provider_settings=None,
     trading_horizon="swing",

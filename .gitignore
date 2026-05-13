@@ -1,9 +1,11 @@
 env/
+.venv/
 __pycache__/
 .DS_Store
 *.csv
 src/
 eval_results/
+eval_results_mu_e2e/
 eval_data/
 *.egg-info/
 .env

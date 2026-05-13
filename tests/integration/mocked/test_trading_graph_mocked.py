@@ -104,7 +104,13 @@ class MockedTradingGraphTests(unittest.TestCase):
                     self.assertEqual(signal, "BUY")
                     self.assertEqual(state["macro_report"], "macro")
                     self.assertTrue(
-                        (tmp_path / "results" / safe_ticker / "TradingAgentsStrategy_logs" / "full_states_log.json").exists()
+                        (
+                            tmp_path
+                            / "results"
+                            / safe_ticker
+                            / "TradingAgentsStrategy_logs"
+                            / "full_states_log_2026-01-02.json"
+                        ).exists()
                     )
                     self.assertIn(ticker, Path(config["memory_log_path"]).read_text(encoding="utf-8"))
                     episode_rows = graph.episode_ledger.list_episodes({"symbol": ticker})

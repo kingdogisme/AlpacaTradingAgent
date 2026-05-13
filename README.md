@@ -46,7 +46,7 @@ Alpaca execution should be treated as an optional downstream adapter. The core a
 - **Horizon Awareness**: Supports `swing`, `position`, and `trend` research horizons with different evidence and review cadence expectations
 
 ### 🧠 **Multi-Provider LLM Runtime**
-- **Default OpenAI GPT-5.4 Path**: Uses `gpt-5.4-nano` for quick agents and `gpt-5.4-mini` for deeper manager/trader agents
+- **Default OpenAI GPT-5.4 Path**: Uses `gpt-5.4-mini` for quick agents and `gpt-5.4` for deeper manager/trader agents
 - **Provider Choice**: Supports OpenAI, local OpenAI-compatible endpoints, Google Gemini, Anthropic Claude, xAI, DeepSeek, Qwen, GLM, OpenRouter, Ollama, and Azure OpenAI
 - **Provider-Specific Controls**: Preserves GPT reasoning controls, Gemini thinking level, Claude effort, custom model IDs, and Azure deployment names
 - **Local Compatibility**: `OPENAI_USE_LOCAL` and `OPENAI_BASE_URL` continue to route core LLM calls to a local OpenAI-compatible backend
@@ -238,8 +238,9 @@ Set `LLM_PROVIDER` in `.env`, the CLI, or the WebUI. Supported providers include
   - Set `ALPACA_USE_PAPER=False` only when intentionally testing live execution
 
 #### Optional APIs
-- **Alpha Vantage API Key** (Optional fallback market data):
+- **Alpha Vantage API Key** (optional MCP fundamentals source):
   - Get from [Alpha Vantage](https://www.alphavantage.co/support/#api-key)
+  - Used by the fundamentals analyst for company overview, financial statements, earnings, estimates, and insider transactions
   - Fallback routing is optional and does not replace Alpaca as the primary market data path
 
 #### Runtime Paths
@@ -381,7 +382,7 @@ The web interface is now best understood as a research and review console, with 
 
 ### Implementation Details
 
-Built with LangGraph for flexibility and modularity. The enhanced version integrates multiple LLM providers, market/research data tools, an audit logger, a local evaluation ledger, and optional Alpaca execution. We recommend `gpt-5.4-nano` for low-cost testing runs and `gpt-5.4-mini` or stronger models for deeper manager/trader stages.
+Built with LangGraph for flexibility and modularity. The enhanced version integrates multiple LLM providers, market/research data tools, an audit logger, a local evaluation ledger, and optional Alpaca execution. We recommend `gpt-5.4-mini` for quick agents and `gpt-5.4` or stronger models for deeper manager/trader stages.
 
 ### Python Usage
 
@@ -411,8 +412,8 @@ from tradingagents.default_config import DEFAULT_CONFIG
 
 # Create custom config for enhanced features
 config = DEFAULT_CONFIG.copy()
-config["deep_think_llm"] = "gpt-5.4-mini"  # Balanced current default
-config["quick_think_llm"] = "gpt-5.4-nano"  # New low-cost quick model
+config["deep_think_llm"] = "gpt-5.4"  # Strong current default
+config["quick_think_llm"] = "gpt-5.4-mini"  # Balanced current default
 config["quick_llm_params"] = {
     "reasoning_effort": "low",
     "text_verbosity": "low",

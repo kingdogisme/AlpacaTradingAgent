@@ -1,5 +1,6 @@
 # -------------------------------- config.py -----------------------
 import tradingagents.default_config as default_config
+import copy
 from typing import Dict, Optional
 import os
 from dotenv import load_dotenv
@@ -19,7 +20,7 @@ def initialize_config():
     """Initialize the configuration with default values."""
     global _config, DATA_DIR
     if _config is None:
-        _config = default_config.DEFAULT_CONFIG.copy()
+        _config = copy.deepcopy(default_config.DEFAULT_CONFIG)
         DATA_DIR = _config["data_dir"]
 
 
@@ -27,8 +28,12 @@ def set_config(config: Dict):
     """Update the configuration with custom values."""
     global _config, DATA_DIR
     if _config is None:
-        _config = default_config.DEFAULT_CONFIG.copy()
-    _config.update(config)
+        _config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+    for key, value in config.items():
+        if isinstance(value, dict) and isinstance(_config.get(key), dict):
+            _config[key].update(value)
+        else:
+            _config[key] = copy.deepcopy(value)
     DATA_DIR = _config["data_dir"]
 
 
@@ -36,7 +41,7 @@ def get_config() -> Dict:
     """Get the current configuration."""
     if _config is None:
         initialize_config()
-    return _config.copy()
+    return copy.deepcopy(_config)
 
 
 def set_runtime_api_keys(api_keys: Dict[str, str]):
@@ -111,6 +116,26 @@ def get_openai_embedding_model() -> str:
         os.getenv("OPENAI_EMBEDDING_MODEL")
         or config.get("openai_embedding_model")
         or "text-embedding-ada-002"
+    )
+
+
+def get_embedding_provider() -> str:
+    """Return the provider used by reflection memory embeddings."""
+    config = get_config()
+    return (
+        os.getenv("TRADINGAGENTS_EMBEDDING_PROVIDER")
+        or config.get("embedding_provider")
+        or "openai"
+    ).strip().lower()
+
+
+def get_google_embedding_model() -> str:
+    """Return the Gemini embedding model used by reflection memory."""
+    config = get_config()
+    return (
+        os.getenv("GOOGLE_EMBEDDING_MODEL")
+        or config.get("google_embedding_model")
+        or "gemini-embedding-001"
     )
 
 

@@ -2,6 +2,7 @@ As the Neutral Risk Analyst, your role is to provide a balanced perspective, wei
 
 {risk_specific_context}
 {horizon_agent_context}
+{language_instruction}
 
 Here is the trader's decision:
 {trader_decision}

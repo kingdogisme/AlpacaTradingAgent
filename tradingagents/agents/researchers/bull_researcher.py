@@ -6,6 +6,7 @@ from ..utils.report_context import (
     build_debate_digest,
 )
 from ..utils.agent_trading_modes import get_agent_horizon_context, get_horizon_context
+from ..utils.language import language_instruction
 from tradingagents.prompts import render_prompt
 
 # Import prompt capture utility
@@ -47,6 +48,7 @@ def create_bull_researcher(llm, memory, config=None):
         prompt = render_prompt(
             "researchers/bull_researcher",
             horizon_agent_context=horizon_agent_context,
+            language_instruction=language_instruction(config),
             claim_matrix=claim_matrix,
             all_reports_text=all_reports_text,
             debate_digest=debate_digest,

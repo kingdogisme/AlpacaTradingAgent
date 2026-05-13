@@ -6,6 +6,7 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_agent_horizon_context,
     get_horizon_context,
 )
+from tradingagents.agents.utils.language import language_instruction
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -29,10 +30,13 @@ def create_macro_analyst(llm, toolkit):
             horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
             fred_available = toolkit.has_fred()
             openai_available = toolkit.has_openai_web_search()
+            sellthenews_available = toolkit.has_sellthenews("sellthenews_macro_enabled")
             
             # print(f"[MACRO] Analyzing macro environment on {current_date}")
             
             tools = []
+            if sellthenews_available:
+                tools.append(toolkit.get_sellthenews_macro_news)
             if fred_available:
                 tools.extend(
                     [
@@ -45,6 +49,8 @@ def create_macro_analyst(llm, toolkit):
                 tools.append(toolkit.get_macro_news_openai)
 
             active_sources = []
+            if sellthenews_available:
+                active_sources.append("SellTheNews live market/macro news")
             if fred_available:
                 active_sources.append("FRED macro data")
             macro_news_available = toolkit.config["online_tools"] and openai_available
@@ -54,6 +60,11 @@ def create_macro_analyst(llm, toolkit):
             source_guidance = (
                 " Combine all currently available macro tools before concluding."
                 f" Active sources: {', '.join(active_sources) if active_sources else 'none'}."
+                + (
+                    " Prefer SellTheNews macro news for live market catalysts; if it is sparse or fallback-labeled, cross-check with FRED and OpenAI macro sources."
+                    if sellthenews_available
+                    else ""
+                )
                 + (
                     f" Use `get_macro_news_openai(curr_date, ticker_context='{ticker}')` for relevance."
                     if macro_news_available
@@ -67,6 +78,7 @@ def create_macro_analyst(llm, toolkit):
                 horizon_label=horizon_context["label"],
                 holding_period=horizon_context["holding_period"],
                 primary_timeframes=horizon_context["primary_timeframes"],
+                language_instruction=language_instruction(toolkit.config),
                 source_guidance=source_guidance,
             )
             asset_context = (
@@ -142,6 +154,7 @@ def create_macro_analyst(llm, toolkit):
                 iteration_count += 1
                 # print(f"[MACRO] Tool execution iteration {iteration_count}")
                 
+                tool_messages = []
                 for tool_call in result.additional_kwargs["tool_calls"]:
                     # Handle different tool call structures
                     if isinstance(tool_call, dict):
@@ -208,10 +221,18 @@ def create_macro_analyst(llm, toolkit):
                                 tool_result = f"Error running tool '{tool_name}': {str(tool_err)}"
                                 tool_failures.append(tool_name)
 
-                    tool_call_id = tool_call.get("id") or tool_call.get("tool_call_id")
-                    ai_tool_call_msg = AIMessage(content="", additional_kwargs={"tool_calls": [tool_call]})
+                    # Preserve the original assistant message because DeepSeek thinking
+                    # mode requires its reasoning_content to be passed back.
+                    tool_call_id = (
+                        tool_call.get("id") or tool_call.get("tool_call_id")
+                        if isinstance(tool_call, dict)
+                        else getattr(tool_call, "id", None) or getattr(tool_call, "tool_call_id", None)
+                    )
                     tool_msg = ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
-                    messages_history.extend([ai_tool_call_msg, tool_msg])
+                    tool_messages.append(tool_msg)
+
+                messages_history.append(result)
+                messages_history.extend(tool_messages)
 
                 # Get next response from LLM
                 try:

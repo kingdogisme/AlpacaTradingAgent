@@ -4,7 +4,7 @@ from datetime import date
 from pathlib import Path
 
 from tradingagents.eval import EpisodeLedger
-from tradingagents.eval.rewards import RewardResolver
+from tradingagents.eval.rewards import RewardResolver, benchmark_for
 
 
 class SyntheticPriceProvider:
@@ -78,6 +78,34 @@ def test_reward_resolver_handles_no_benchmark_crypto(tmp_path: Path):
     assert rewards[0].benchmark_return is None
     assert rewards[0].alpha_return is None
     assert rewards[0].oracle_label == "HOLD"
+
+
+def test_reward_resolver_uses_regional_benchmark_map(tmp_path: Path):
+    ledger = EpisodeLedger(tmp_path / "eval.sqlite")
+    _completed_episode(ledger, "run-1", "7203.T", "BUY")
+    resolver = RewardResolver(
+        ledger,
+        price_provider=SyntheticPriceProvider({"7203.T": 0.04, "^N225": 0.01}),
+        config={
+            "benchmark_map": {".T": "^N225", "": "SPY"},
+            "eval_neutral_band_bps": {"swing": 100},
+        },
+    )
+
+    rewards = resolver.score_due_episodes(as_of="2026-01-20")
+
+    assert len(rewards) == 1
+    assert rewards[0].benchmark_return == 0.01
+    assert round(rewards[0].alpha_return, 4) == 0.03
+    assert rewards[0].components_json["benchmark"] == "^N225"
+
+
+def test_benchmark_override_preserves_crypto_behavior():
+    config = {"benchmark_ticker": "QQQ", "benchmark_map": {".T": "^N225", "": "SPY"}}
+
+    assert benchmark_for("7203.T", config) == "QQQ"
+    assert benchmark_for("BTC/USD", config) is None
+    assert benchmark_for("ETH/USD", config) == "BTC-USD"
 
 
 def test_reward_resolver_marks_insufficient_data(tmp_path: Path):

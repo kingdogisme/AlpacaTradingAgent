@@ -152,6 +152,13 @@ class AppState:
         """Get the state for a specific symbol."""
         return self.symbol_states.get(symbol)
 
+    def set_current_symbol(self, symbol):
+        """Switch the symbol displayed in the UI if the state exists."""
+        if symbol and symbol in self.symbol_states:
+            self.current_symbol = symbol
+            return True
+        return False
+
     def get_current_state(self):
         """Get the state for the current symbol."""
         if self.current_symbol:
@@ -162,6 +169,18 @@ class AppState:
         """Get the state for the symbol currently being analyzed."""
         if self.analyzing_symbol:
             return self.symbol_states.get(self.analyzing_symbol)
+        return None
+
+    def ensure_current_symbol(self):
+        """Keep the UI pinned to an available symbol after queues finish."""
+        if self.current_symbol in self.symbol_states:
+            return self.current_symbol
+        if self.analyzing_symbol in self.symbol_states:
+            self.current_symbol = self.analyzing_symbol
+            return self.current_symbol
+        if self.symbol_states:
+            self.current_symbol = next(iter(self.symbol_states))
+            return self.current_symbol
         return None
 
     def init_symbol_state(self, symbol):
@@ -234,6 +253,65 @@ class AppState:
             "report_timestamps": {}  # Track when each report was last updated
         }
 
+    def build_symbol_state_from_reports(self, symbol, reports, *, complete=False, prompts=None):
+        """Restore displayable symbol state from persisted reports."""
+        self.init_symbol_state(symbol)
+        state = self.symbol_states[symbol]
+        current_reports = state["current_reports"]
+        for report_type, content in (reports or {}).items():
+            if report_type in current_reports and content:
+                current_reports[report_type] = content
+
+        if prompts:
+            for report_type, prompt in prompts.items():
+                if report_type in state["agent_prompts"] and prompt:
+                    state["agent_prompts"][report_type] = prompt
+
+        if current_reports.get("investment_plan") and not current_reports.get("research_manager_report"):
+            current_reports["research_manager_report"] = current_reports["investment_plan"]
+        if current_reports.get("portfolio_decision") and not current_reports.get("final_trade_decision"):
+            current_reports["final_trade_decision"] = current_reports["portfolio_decision"]
+        if current_reports.get("final_trade_decision") and not current_reports.get("portfolio_decision"):
+            current_reports["portfolio_decision"] = current_reports["final_trade_decision"]
+
+        report_to_agent = {
+            "market_report": "Market Analyst",
+            "sentiment_report": "Social Analyst",
+            "news_report": "News Analyst",
+            "fundamentals_report": "Fundamentals Analyst",
+            "macro_report": "Macro Analyst",
+            "bull_report": "Bull Researcher",
+            "bear_report": "Bear Researcher",
+            "research_manager_report": "Research Manager",
+            "trader_investment_plan": "Trader",
+            "risky_report": "Risky Analyst",
+            "safe_report": "Safe Analyst",
+            "neutral_report": "Neutral Analyst",
+            "final_trade_decision": "Portfolio Manager",
+        }
+        for report_type, agent in report_to_agent.items():
+            if current_reports.get(report_type):
+                state["agent_statuses"][agent] = "completed"
+
+        if complete:
+            for agent in state["agent_statuses"]:
+                state["agent_statuses"][agent] = "completed"
+            state["analysis_complete"] = True
+        else:
+            state["analysis_complete"] = bool(current_reports.get("final_trade_decision"))
+
+        if state["analysis_complete"]:
+            state["analysis_results"] = {
+                "ticker": symbol,
+                "date": "",
+                "decision": state.get("recommended_action") or "No decision",
+            }
+
+        self.update_reports_count()
+        self.ensure_current_symbol()
+        self.needs_ui_update = True
+        return state
+
     def update_agent_status(self, agent, status, symbol=None):
         """Update the status of an agent for a specific symbol (or current symbol if none specified)."""
         if symbol is None:
@@ -277,6 +355,7 @@ class AppState:
         self.analysis_queue = []
         self.symbol_states = {}
         self.current_symbol = None
+        self.analyzing_symbol = None
         self.analysis_running = False
         self.analysis_trace = []
         self.tool_calls_count = 0
@@ -453,7 +532,7 @@ class AppState:
                 "report_timestamps": {}
             })
         
-        self.current_symbol = None
+        self.ensure_current_symbol()
         self.analysis_trace = []
         self.tool_calls_count = 0
         self.llm_calls_count = 0
@@ -493,6 +572,13 @@ class AppState:
         self.market_hour_enabled = False
         self.analysis_running = False
         print("[STATE] Stopping market hour mode")
+
+    def finish_analysis_run(self):
+        """Mark the active single-run analysis as finished while preserving UI state."""
+        self.analysis_running = False
+        self.analyzing_symbol = None
+        self.ensure_current_symbol()
+        self.needs_ui_update = True
     
     def start_new_session_for_symbol(self, symbol):
         """Start a new analysis session for an existing symbol."""

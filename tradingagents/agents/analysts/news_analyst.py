@@ -6,6 +6,7 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_agent_horizon_context,
     get_horizon_context,
 )
+from tradingagents.agents.utils.language import language_instruction
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -28,13 +29,17 @@ def create_news_analyst(llm, toolkit):
         openai_available = toolkit.has_openai_web_search()
         finnhub_available = toolkit.has_finnhub()
         coindesk_available = toolkit.has_coindesk()
+        sellthenews_available = toolkit.has_sellthenews("sellthenews_news_enabled")
 
         global_news_available = (
             toolkit.config["online_tools"]
             and openai_available
             and bool(toolkit.config.get("news_global_openai_enabled", False))
         )
-        tools = [toolkit.get_google_news]
+        tools = []
+        if sellthenews_available:
+            tools.append(toolkit.get_sellthenews_stock_news)
+        tools.append(toolkit.get_google_news)
         if global_news_available:
             tools.append(toolkit.get_global_news_openai)
         if is_crypto:
@@ -44,7 +49,10 @@ def create_news_analyst(llm, toolkit):
             if finnhub_available:
                 tools.append(toolkit.get_finnhub_news_recent)
 
-        source_labels = ["Google News"]
+        source_labels = []
+        if sellthenews_available:
+            source_labels.append("SellTheNews MCP")
+        source_labels.append("Google News")
         if global_news_available:
             source_labels.append("OpenAI global web search")
         if is_crypto and coindesk_available:
@@ -67,6 +75,7 @@ def create_news_analyst(llm, toolkit):
         source_guidance = (
             " Use all currently available news tools before concluding."
             f" Active sources: {', '.join(source_labels)}."
+            " Prefer SellTheNews MCP when available; if its output is sparse or fallback-labeled, cross-check with the remaining sources."
             " For `get_finnhub_news_recent`, pass ticker and curr_date from context."
             " Do not request broad macro/global web searches unless OpenAI global web search is listed as an active source;"
             " the Macro analyst handles that context when enabled."
@@ -78,6 +87,7 @@ def create_news_analyst(llm, toolkit):
             horizon_label=horizon_context["label"],
             holding_period=horizon_context["holding_period"],
             primary_timeframes=horizon_context["primary_timeframes"],
+            language_instruction=language_instruction(toolkit.config),
             global_news_guidance=global_news_guidance,
             source_guidance=source_guidance,
         )
@@ -141,6 +151,7 @@ def create_news_analyst(llm, toolkit):
         # Handle iterative tool calls until the model stops requesting them
         while tools and getattr(result, "additional_kwargs", {}).get("tool_calls") and iteration_count < max_tool_iterations:
             iteration_count += 1
+            tool_messages = []
             for tool_call in result.additional_kwargs["tool_calls"]:
                 # Handle different tool call structures
                 if isinstance(tool_call, dict):
@@ -185,19 +196,21 @@ def create_news_analyst(llm, toolkit):
                         except Exception as tool_err:
                             tool_result = f"Error running tool '{tool_name}': {str(tool_err)}"
 
-                # Append the assistant tool call and tool result messages so the LLM can continue the conversation
-                tool_call_id = tool_call.get("id") or tool_call.get("tool_call_id")
-                ai_tool_call_msg = AIMessage(
-                    content="",
-                    additional_kwargs={"tool_calls": [tool_call]},
+                # Preserve the original assistant message because DeepSeek thinking
+                # mode requires its reasoning_content to be passed back.
+                tool_call_id = (
+                    tool_call.get("id") or tool_call.get("tool_call_id")
+                    if isinstance(tool_call, dict)
+                    else getattr(tool_call, "id", None) or getattr(tool_call, "tool_call_id", None)
                 )
                 tool_msg = ToolMessage(
                     content=str(tool_result),
                     tool_call_id=tool_call_id,
                 )
+                tool_messages.append(tool_msg)
 
-                messages_history.append(ai_tool_call_msg)
-                messages_history.append(tool_msg)
+            messages_history.append(result)
+            messages_history.extend(tool_messages)
 
             # Ask the LLM to continue with the new context
             result = chain.invoke(messages_history)

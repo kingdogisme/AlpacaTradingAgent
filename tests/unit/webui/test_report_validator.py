@@ -5,6 +5,7 @@ from webui.utils.report_validator import (
     is_report_complete,
     validate_reports_for_ui,
 )
+from webui.callbacks.report_callbacks import normalize_decision_markdown_sections
 
 
 def test_report_completion_rejects_short_table_before_minimum_length():
@@ -41,3 +42,19 @@ def test_validate_reports_marks_missing_and_incomplete_content():
     assert "In Progress" in validated["market_report"]
     assert validated["news_report"].startswith("No News Report")
     assert status == {"market_report": "incomplete", "news_report": "missing"}
+
+
+def test_decision_markdown_normalization_splits_inline_fields():
+    content = (
+        "**Action**: HOLD **Confidence**: medium "
+        "**Risk Rationale**: Volatility is elevated. "
+        "**Required Controls**: Keep stop discipline. "
+        "FINAL TRANSACTION PROPOSAL: **HOLD**"
+    )
+
+    normalized = normalize_decision_markdown_sections(content)
+
+    assert "### Action\nHOLD" in normalized
+    assert "### Confidence\nmedium" in normalized
+    assert "### Risk Rationale\nVolatility is elevated." in normalized
+    assert "### Final Transaction Proposal\n\n**HOLD**" in normalized

@@ -43,14 +43,14 @@ class CLIModelDiscoveryTests(unittest.TestCase):
     @patch("cli.utils.get_model_options_with_status")
     def test_prints_static_catalog_status(self, mock_status, mock_print):
         mock_status.return_value = {
-            "options": [{"label": "GPT-5.4 nano", "value": "gpt-5.4-nano"}],
+            "options": [{"label": "GPT-5.4 Mini", "value": "gpt-5.4-mini"}],
             "source": "static",
             "message": "Using built-in OpenAI model catalog.",
         }
 
         options = cli_utils._print_model_discovery_status("openai", "quick")
 
-        self.assertEqual(options[0]["value"], "gpt-5.4-nano")
+        self.assertEqual(options[0]["value"], "gpt-5.4-mini")
         printed = mock_print.call_args.args[0]
         self.assertIn("Model catalog", printed)
         self.assertIn("built-in OpenAI model catalog", printed)
@@ -87,7 +87,7 @@ class CLIModelDiscoveryTests(unittest.TestCase):
 
 
 class CLIHorizonSelectionTests(unittest.TestCase):
-    @patch("cli.main.get_output_language", return_value="English")
+    @patch("cli.main.get_output_language", return_value="zh-CN")
     @patch("cli.main.select_checkpoint_enabled", return_value=False)
     @patch("cli.main.ask_anthropic_effort", return_value="")
     @patch("cli.main.ask_gemini_thinking_config", return_value="")
@@ -121,10 +121,11 @@ class CLIHorizonSelectionTests(unittest.TestCase):
         selections = cli_main.get_user_selections()
 
         self.assertEqual(selections["trading_horizon"], "trend")
+        self.assertEqual(selections["output_language"], "zh-CN")
         self.assertTrue(selections["trend_execution_enabled"])
         mock_trend_exec.assert_called_once()
 
-    @patch("cli.main.get_output_language", return_value="English")
+    @patch("cli.main.get_output_language", return_value="zh-CN")
     @patch("cli.main.select_checkpoint_enabled", return_value=False)
     @patch("cli.main.ask_anthropic_effort", return_value="")
     @patch("cli.main.ask_gemini_thinking_config", return_value="")

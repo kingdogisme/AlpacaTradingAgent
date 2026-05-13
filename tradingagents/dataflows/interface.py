@@ -11,6 +11,11 @@ from .finnhub_utils import (
     fetch_company_news_live,
     fetch_insider_sentiment_live,
     fetch_insider_transactions_live,
+    fetch_basic_financials_live,
+    fetch_company_earnings_live,
+    fetch_company_peers_live,
+    fetch_company_profile_live,
+    fetch_recommendation_trends_live,
 )
 from .alpaca_utils import AlpacaUtils
 from .coindesk_utils import get_news as get_coindesk_news_util
@@ -23,6 +28,7 @@ from datetime import datetime
 import json
 import os
 import pandas as pd
+import re
 from .config import get_config, set_config, DATA_DIR, get_api_key
 from .interface_utils import (
     _coerce_bool,
@@ -37,6 +43,19 @@ from tradingagents.openai_model_registry import (
     apply_responses_model_params,
     is_responses_model,
     normalize_model_params,
+)
+from tradingagents.integrations.sellthenews import (
+    SellTheNewsBadResponse,
+    SellTheNewsClient,
+    SellTheNewsUnavailable,
+    SPARSE_MARKERS,
+    looks_sparse,
+)
+from tradingagents.integrations.alpha_vantage_mcp import (
+    AlphaVantageMCPBadResponse,
+    AlphaVantageMCPClient,
+    AlphaVantageMCPUnavailable,
+    looks_unavailable as alpha_vantage_looks_unavailable,
 )
 
 
@@ -64,6 +83,205 @@ def _cap_headline_sections(
     if len(clipped) > max_chars:
         clipped = clipped[:max_chars].rstrip() + "\n..."
     return clipped
+
+
+def _is_sellthenews_enabled(config: Dict, feature_key: str) -> bool:
+    return (
+        _coerce_bool(config.get("online_tools", True))
+        and _coerce_bool(config.get("sellthenews_enabled", True))
+        and _coerce_bool(config.get(feature_key, True))
+    )
+
+
+def _sellthenews_client(config: Dict) -> SellTheNewsClient:
+    return SellTheNewsClient(
+        config.get("sellthenews_base_url", "https://mcp.sellthenews.org/mcp"),
+        float(config.get("sellthenews_timeout_seconds", 8)),
+    )
+
+
+def _sellthenews_block(title: str, body: str, *, max_chars: int = 5000) -> str:
+    text = str(body or "").strip()
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return f"## {title}\n\n{text}"
+
+
+def _sellthenews_fallback_block(reason: str, fallback: str) -> str:
+    return (
+        f"## SellTheNews fallback\n"
+        f"SellTheNews source was unavailable or sparse: {reason}.\n\n"
+        f"{fallback}"
+    ).strip()
+
+
+def _sellthenews_options_unavailable_block(reason: str) -> str:
+    return _sellthenews_fallback_block(
+        reason,
+        "SellTheNews options positioning data is unavailable for this run. "
+        "Continue using price action, volatility, volume, and cross-analyst evidence; "
+        "do not infer option-market support/resistance from this fallback.",
+    )
+
+
+def _is_crypto_ticker(ticker: str) -> bool:
+    symbol = str(ticker or "").upper()
+    return "/" in symbol or "USD" in symbol or "USDT" in symbol
+
+
+def _extract_price_after_label(text: str, label: str) -> float | None:
+    pattern = rf"{re.escape(label)}\s*:\s*\$?\s*([0-9][0-9,]*(?:\.\d+)?)"
+    match = re.search(pattern, str(text or ""), flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _sellthenews_options_has_exposure(text: str) -> bool:
+    normalized = " ".join(str(text or "").split()).strip().lower()
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in SPARSE_MARKERS):
+        return False
+    if "spot price:" not in normalized or "selected expiration:" not in normalized:
+        return False
+    if "gamma flip:" not in normalized:
+        return False
+    # The current MCP sometimes returns empty "$positive/$negative/$net" rows.
+    # Treat that as sparse so downstream agents do not overread missing exposure.
+    empty_exposure_pattern = r"\$(positive|negative|net):\s*(?:\n|$)"
+    empty_rows = re.findall(empty_exposure_pattern, str(text or ""), flags=re.IGNORECASE | re.MULTILINE)
+    return len(empty_rows) < 3
+
+
+def _alpaca_mid_quote(ticker: str) -> float | None:
+    try:
+        quote = AlpacaUtils.get_latest_quote(ticker)
+    except Exception:
+        return None
+    if not quote:
+        return None
+    try:
+        bid = float(quote.get("bid_price") or 0)
+        ask = float(quote.get("ask_price") or 0)
+    except (TypeError, ValueError):
+        return None
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    if bid > 0:
+        return bid
+    if ask > 0:
+        return ask
+    return None
+
+
+def _sellthenews_options_quality_notes(
+    ticker: str,
+    options_text: str,
+    config: Dict,
+) -> str:
+    notes: List[str] = []
+    spot = _extract_price_after_label(options_text, "Spot Price")
+    if spot is None or spot <= 0:
+        notes.append("- Data quality: MCP response did not include a usable positive spot price.")
+
+    if "Selected Expiration:" not in str(options_text):
+        notes.append("- Data quality: MCP response did not include selected expiration.")
+
+    alpaca_mid = _alpaca_mid_quote(ticker)
+    threshold = float(config.get("sellthenews_options_spot_mismatch_threshold_pct", 5.0))
+    if spot and spot > 0 and alpaca_mid and alpaca_mid > 0:
+        diff_pct = abs(spot - alpaca_mid) / alpaca_mid * 100
+        if diff_pct > threshold:
+            notes.append(
+                "- Data quality: spot mismatch versus Alpaca latest quote "
+                f"({diff_pct:.1f}% difference); use options data as positioning only."
+            )
+
+    if not _sellthenews_options_has_exposure(options_text):
+        notes.append("- Data quality: exposure rows are sparse or empty; do not treat GEX levels as confirmed.")
+
+    if not notes:
+        notes.append("- Data quality: spot, selected expiration, and exposure fields were present.")
+    return "\n".join(notes)
+
+
+def _sellthenews_search_news(
+    client: SellTheNewsClient,
+    ticker: str,
+    *,
+    limit: int = 10,
+) -> str:
+    return client.call_tool(
+        "search_news",
+        {"query": ticker, "limit": limit, "offset": 0, "sort": "time"},
+    )
+
+
+def _has_sellthenews_articles(text: object) -> bool:
+    normalized = " ".join(str(text or "").split()).strip().lower()
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in SPARSE_MARKERS):
+        return False
+    return (
+        "total articles:" in normalized
+        or "### " in str(text or "")
+        or "\n- " in str(text or "")
+    )
+
+
+def _call_sellthenews_search_news(
+    client: SellTheNewsClient,
+    ticker: str,
+    *,
+    limit: int = 10,
+) -> str:
+    try:
+        return _sellthenews_search_news(client, f"{ticker} stock", limit=limit)
+    except (SellTheNewsUnavailable, SellTheNewsBadResponse):
+        raise
+    except KeyError:
+        return ""
+
+
+def _is_alpha_vantage_enabled(config: Dict, feature_key: str) -> bool:
+    return (
+        _coerce_bool(config.get("online_tools", True))
+        and _coerce_bool(config.get("alpha_vantage_mcp_enabled", True))
+        and _coerce_bool(config.get(feature_key, True))
+        and bool(
+            get_api_key("alpha_vantage_api_key", "ALPHA_VANTAGE_API_KEY")
+            or config.get("alpha_vantage_api_key")
+        )
+    )
+
+
+def _alpha_vantage_mcp_client(config: Dict) -> AlphaVantageMCPClient:
+    return AlphaVantageMCPClient(
+        config.get("alpha_vantage_mcp_base_url", "https://mcp.alphavantage.co/mcp"),
+        get_api_key("alpha_vantage_api_key", "ALPHA_VANTAGE_API_KEY")
+        or config.get("alpha_vantage_api_key"),
+        float(config.get("alpha_vantage_mcp_timeout_seconds", 8)),
+    )
+
+
+def _alpha_vantage_block(title: str, body: str, *, max_chars: int = 3500) -> str:
+    text = str(body or "").strip()
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return f"## {title}\n\n{text}"
+
+
+def _alpha_vantage_fallback_block(reason: str, fallback: str) -> str:
+    return (
+        f"## Alpha Vantage fallback\n"
+        f"Alpha Vantage MCP source was unavailable or sparse: {reason}.\n\n"
+        f"{fallback}"
+    ).strip()
 
 
 def _build_empty_openai_global_fallback(curr_date: str, ticker_context: str | None = None) -> str:
@@ -109,7 +327,11 @@ def _build_empty_openai_stock_news_fallback(ticker: str, curr_date: str) -> str:
     return "\n".join(merged).strip()
 
 
-def _build_empty_openai_fundamentals_fallback(ticker: str, curr_date: str) -> str:
+def _build_empty_openai_fundamentals_fallback(
+    ticker: str,
+    curr_date: str,
+    reason: str = "OpenAI fundamentals web-search returned empty output",
+) -> str:
     insider_sent = get_finnhub_company_insider_sentiment(ticker, curr_date, 30)
     insider_tx = get_finnhub_company_insider_transactions(ticker, curr_date, 30)
     finnhub_news = get_finnhub_news(ticker, curr_date, 5)
@@ -119,11 +341,80 @@ def _build_empty_openai_fundamentals_fallback(ticker: str, curr_date: str) -> st
     news_text = _cap_headline_sections(finnhub_news, max_sections=6, max_chars=2800)
 
     return (
-        f"Fallback used because OpenAI fundamentals web-search returned empty output for {ticker} ({curr_date}).\n\n"
+        f"Fallback used because {reason} for {ticker} ({curr_date}).\n\n"
         f"## Insider Sentiment Snapshot\n{sent_text}\n\n"
         f"## Insider Transactions Snapshot\n{tx_text}\n\n"
         f"## Recent Company News Snapshot\n{news_text}"
     ).strip()
+
+
+def build_openai_fundamentals_fallback(
+    ticker: str,
+    curr_date: str,
+    reason: str | None = None,
+) -> str:
+    return _build_empty_openai_fundamentals_fallback(
+        ticker=ticker,
+        curr_date=curr_date,
+        reason=reason or "OpenAI fundamentals web-search returned empty output",
+    )
+
+
+def get_alpha_vantage_fundamentals(ticker: str, curr_date: str) -> str:
+    config = get_config()
+    if not _is_alpha_vantage_enabled(config, "alpha_vantage_fundamentals_enabled"):
+        return _build_empty_openai_fundamentals_fallback(
+            ticker,
+            curr_date,
+            reason="Alpha Vantage MCP disabled or API key missing",
+        )
+
+    client = _alpha_vantage_mcp_client(config)
+    try:
+        blocks = []
+        for tool_name, max_chars in (
+            ("COMPANY_OVERVIEW", 2800),
+            ("EARNINGS", 2600),
+            ("EARNINGS_ESTIMATES", 2600),
+            ("INSIDER_TRANSACTIONS", 2400),
+            ("INCOME_STATEMENT", 2200),
+            ("BALANCE_SHEET", 2200),
+            ("CASH_FLOW", 2200),
+        ):
+            arguments = {"symbol": ticker}
+            if tool_name == "INSIDER_TRANSACTIONS":
+                arguments["from_date"] = (
+                    datetime.strptime(curr_date, "%Y-%m-%d") - relativedelta(days=90)
+                ).strftime("%Y-%m-%d")
+            text = client.call_tool(tool_name, arguments)
+            if text.strip():
+                title = tool_name.replace("_", " ").title()
+                blocks.append(_alpha_vantage_block(f"Alpha Vantage {title}", text, max_chars=max_chars))
+
+        combined = "\n\n".join(blocks).strip()
+        if (
+            _coerce_bool(config.get("alpha_vantage_fallback_on_sparse", True))
+            and (looks_sparse(combined, min_chars=700) or alpha_vantage_looks_unavailable(combined))
+        ):
+            fallback = _build_empty_openai_fundamentals_fallback(
+                ticker,
+                curr_date,
+                reason="Alpha Vantage fundamentals coverage was sparse",
+            )
+            return _alpha_vantage_fallback_block("fundamentals coverage was sparse", fallback)
+        return combined
+    except (
+        AlphaVantageMCPUnavailable,
+        AlphaVantageMCPBadResponse,
+        KeyError,
+        ValueError,
+    ) as exc:
+        fallback = _build_empty_openai_fundamentals_fallback(
+            ticker,
+            curr_date,
+            reason=f"Alpha Vantage MCP failed: {str(exc)}",
+        )
+        return _alpha_vantage_fallback_block(str(exc), fallback)
 
 
 def _uses_responses_for_web_search(model: str) -> bool:
@@ -272,9 +563,25 @@ def get_finnhub_news(
     if not combined_result:
         return f"## {ticker} News, from {before} to {curr_date}: No Finnhub news items found."
 
+    config = get_config()
+    max_sections = int(config.get("finnhub_news_max_items", 24))
+    max_chars = int(config.get("finnhub_news_max_chars", 12000))
+    capped_result = _cap_headline_sections(
+        combined_result,
+        max_sections=max_sections,
+        max_chars=max_chars,
+    )
+    cap_note = ""
+    if capped_result.strip() != combined_result.strip():
+        cap_note = (
+            f"\nNote: Finnhub news output capped to {max_sections} items / "
+            f"{max_chars} chars to keep analyst prompts bounded.\n"
+        )
+
     return (
         f"## {ticker} News, from {before} to {curr_date} (source: {source_label}):\n"
-        + str(combined_result)
+        + cap_note
+        + str(capped_result)
     )
 
 
@@ -460,6 +767,194 @@ def get_finnhub_company_insider_transactions(
         + "\nThe change field reflects variation in insider holdings; share is volume; "
         "transactionPrice is execution price per share; transactionCode describes trade type."
     )
+
+
+def _format_latest_metric_series(series: dict, metric_name: str, max_points: int = 5) -> str:
+    values = series.get(metric_name, []) if isinstance(series, dict) else []
+    if not isinstance(values, list) or not values:
+        return ""
+
+    parts = []
+    for item in values[:max_points]:
+        if not isinstance(item, dict):
+            continue
+        parts.append(f"{item.get('period', 'N/A')}: {item.get('v')}")
+    return "; ".join(parts)
+
+
+def get_finnhub_company_fundamentals(
+    ticker: Annotated[str, "ticker symbol"],
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"],
+) -> str:
+    """
+    Retrieve Finnhub profile, basic financial metrics, earnings history,
+    recommendation trends, and peers for a stock.
+    """
+
+    if not _coerce_bool(get_config().get("online_tools", True)):
+        return f"## Finnhub Fundamentals for {ticker}: unavailable because online tools are disabled."
+
+    sections = [f"## Finnhub Fundamentals for {ticker} as of {curr_date}"]
+    profile = {}
+    metrics_payload = {}
+    earnings = []
+    recommendations = []
+    peers = []
+    errors = []
+
+    for label, call in (
+        ("company profile", lambda: fetch_company_profile_live(ticker)),
+        ("basic financials", lambda: fetch_basic_financials_live(ticker, "all")),
+        ("earnings", lambda: fetch_company_earnings_live(ticker, limit=8)),
+        ("recommendation trends", lambda: fetch_recommendation_trends_live(ticker)),
+        ("company peers", lambda: fetch_company_peers_live(ticker)),
+    ):
+        try:
+            value = call()
+            if label == "company profile":
+                profile = value
+            elif label == "basic financials":
+                metrics_payload = value
+            elif label == "earnings":
+                earnings = value
+            elif label == "recommendation trends":
+                recommendations = value
+            elif label == "company peers":
+                peers = value
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+
+    if profile:
+        fields = [
+            ("Name", profile.get("name")),
+            ("Ticker", profile.get("ticker") or ticker),
+            ("Exchange", profile.get("exchange")),
+            ("Country", profile.get("country")),
+            ("Industry", profile.get("finnhubIndustry")),
+            ("Currency", profile.get("currency")),
+            ("Market cap", profile.get("marketCapitalization")),
+            ("Shares outstanding", profile.get("shareOutstanding")),
+            ("IPO", profile.get("ipo")),
+        ]
+        sections.append(
+            "### Company Profile\n"
+            + "\n".join(f"- {name}: {value}" for name, value in fields if value not in (None, ""))
+        )
+
+    metric = metrics_payload.get("metric", {}) if isinstance(metrics_payload, dict) else {}
+    series = metrics_payload.get("series", {}) if isinstance(metrics_payload, dict) else {}
+    if metric:
+        key_metrics = [
+            "marketCapitalization",
+            "enterpriseValue",
+            "peTTM",
+            "forwardPE",
+            "psTTM",
+            "pb",
+            "evRevenueTTM",
+            "evEbitdaTTM",
+            "grossMarginTTM",
+            "operatingMarginTTM",
+            "netProfitMarginTTM",
+            "revenueGrowthTTMYoy",
+            "epsGrowthTTMYoy",
+            "roeTTM",
+            "roaTTM",
+            "currentRatioQuarterly",
+            "quickRatioQuarterly",
+            "totalDebt/totalEquityQuarterly",
+            "52WeekHigh",
+            "52WeekLow",
+            "beta",
+        ]
+        metric_lines = [
+            f"- {key}: {metric.get(key)}"
+            for key in key_metrics
+            if metric.get(key) not in (None, "")
+        ]
+        if metric_lines:
+            sections.append("### Key Metrics\n" + "\n".join(metric_lines))
+
+    annual = series.get("annual", {}) if isinstance(series, dict) else {}
+    quarterly = series.get("quarterly", {}) if isinstance(series, dict) else {}
+    trend_lines = []
+    for name in (
+        "salesPerShare",
+        "eps",
+        "grossMargin",
+        "operatingMargin",
+        "netMargin",
+        "roe",
+        "currentRatio",
+        "totalDebtToEquity",
+    ):
+        formatted = _format_latest_metric_series(annual, name, max_points=4)
+        if formatted:
+            trend_lines.append(f"- Annual {name}: {formatted}")
+    for name in (
+        "salesPerShare",
+        "eps",
+        "grossMargin",
+        "operatingMargin",
+        "netMargin",
+        "roeTTM",
+        "peTTM",
+        "psTTM",
+    ):
+        formatted = _format_latest_metric_series(quarterly, name, max_points=5)
+        if formatted:
+            trend_lines.append(f"- Quarterly {name}: {formatted}")
+    if trend_lines:
+        sections.append("### Metric Trends\n" + "\n".join(trend_lines[:14]))
+
+    if earnings:
+        earnings_lines = []
+        for item in earnings[:8]:
+            if not isinstance(item, dict):
+                continue
+            earnings_lines.append(
+                "- {period} Q{quarter}: actual={actual}, estimate={estimate}, "
+                "surprise={surprise}, surprisePercent={surprise_percent}".format(
+                    period=item.get("period"),
+                    quarter=item.get("quarter"),
+                    actual=item.get("actual"),
+                    estimate=item.get("estimate"),
+                    surprise=item.get("surprise"),
+                    surprise_percent=item.get("surprisePercent"),
+                )
+            )
+        if earnings_lines:
+            sections.append("### Earnings History\n" + "\n".join(earnings_lines))
+
+    if recommendations:
+        rec_lines = []
+        for item in recommendations[:6]:
+            if not isinstance(item, dict):
+                continue
+            rec_lines.append(
+                "- {period}: strongBuy={strong_buy}, buy={buy}, hold={hold}, "
+                "sell={sell}, strongSell={strong_sell}".format(
+                    period=item.get("period"),
+                    strong_buy=item.get("strongBuy"),
+                    buy=item.get("buy"),
+                    hold=item.get("hold"),
+                    sell=item.get("sell"),
+                    strong_sell=item.get("strongSell"),
+                )
+            )
+        if rec_lines:
+            sections.append("### Analyst Recommendation Trends\n" + "\n".join(rec_lines))
+
+    if peers:
+        sections.append("### Peers\n" + ", ".join(peers[:20]))
+
+    if errors:
+        sections.append("### Finnhub Endpoint Notes\n" + "\n".join(f"- {item}" for item in errors))
+
+    if len(sections) == 1:
+        return f"## Finnhub Fundamentals for {ticker}: No profile, metrics, earnings, recommendation, or peer data found."
+
+    return "\n\n".join(sections)
 
 
 def get_coindesk_news(
@@ -1174,7 +1669,7 @@ def get_stock_news_openai(ticker, curr_date):
         client = get_openai_client_with_timeout(api_key, timeout_seconds=timeout_seconds)
 
         # Get the selected quick model from config
-        model = config.get("quick_think_llm", "gpt-5.4-nano")  # fallback to default
+        model = config.get("quick_think_llm", "gpt-5.4-mini")  # fallback to default
         
         # Research depth controls prompt scope and search context
         research_depth = config.get("research_depth", "Medium")
@@ -1281,7 +1776,7 @@ def get_global_news_openai(curr_date, ticker_context=None):
         client = get_openai_client_with_timeout(api_key, timeout_seconds=timeout_seconds)
         
         # Get the selected quick model from config
-        model = config.get("quick_think_llm", "gpt-5.4-nano")  # fallback to default
+        model = config.get("quick_think_llm", "gpt-5.4-mini")  # fallback to default
         
         # Research depth controls prompt scope/search context; global news uses a tuned fast profile.
         research_depth = config.get("research_depth", "Medium")
@@ -1395,6 +1890,181 @@ def get_global_news_openai(curr_date, ticker_context=None):
         return f"OpenAI global-news call failed: {str(e)}\n\n{fallback}"
 
 
+def get_sellthenews_stock_news(ticker: str, curr_date: str) -> str:
+    config = get_config()
+    if not _is_sellthenews_enabled(config, "sellthenews_news_enabled"):
+        return _build_empty_openai_stock_news_fallback(ticker, curr_date)
+
+    client = _sellthenews_client(config)
+    try:
+        blocks = []
+        search = _call_sellthenews_search_news(client, ticker, limit=12)
+        if _has_sellthenews_articles(search):
+            blocks.append(_sellthenews_block("SellTheNews ticker search", search, max_chars=5200))
+
+        primary = client.call_tool(
+            "get_stock_news",
+            {"ticker": ticker, "limit": 20, "offset": 0},
+        )
+        blocks.append(_sellthenews_block("Enhanced News Source: SellTheNews", primary, max_chars=5200))
+
+        if looks_sparse(primary, min_chars=280) and not _has_sellthenews_articles(search):
+            search = _call_sellthenews_search_news(client, ticker, limit=10)
+            if _has_sellthenews_articles(search):
+                blocks.append(_sellthenews_block("SellTheNews supplementary search", search, max_chars=3000))
+        elif not looks_sparse(primary, min_chars=280):
+            next_page = client.call_tool(
+                "get_stock_news",
+                {"ticker": ticker, "limit": 10, "offset": 20},
+            )
+            if next_page.strip() and not looks_sparse(next_page, min_chars=280):
+                blocks.append(_sellthenews_block("SellTheNews older company news", next_page, max_chars=3000))
+
+        combined = "\n\n".join(blocks)
+        if (
+            _coerce_bool(config.get("sellthenews_fallback_on_sparse", True))
+            and looks_sparse(combined, min_chars=320)
+            and not _has_sellthenews_articles(combined)
+        ):
+            fallback = _build_empty_openai_stock_news_fallback(ticker, curr_date)
+            return _sellthenews_fallback_block("company news coverage was sparse", fallback)
+        return combined
+    except (SellTheNewsUnavailable, SellTheNewsBadResponse, KeyError) as exc:
+        fallback = _build_empty_openai_stock_news_fallback(ticker, curr_date)
+        return _sellthenews_fallback_block(str(exc), fallback)
+
+
+def get_sellthenews_social_sentiment(ticker: str, curr_date: str) -> str:
+    config = get_config()
+    if not _is_sellthenews_enabled(config, "sellthenews_social_enabled"):
+        return get_reddit_company_news(ticker, curr_date, 7, 5)
+
+    client = _sellthenews_client(config)
+    try:
+        blocks = []
+        sentiment = client.call_tool("get_wsb_analysis", {"lang": "en", "offset": 0})
+        blocks.append(_sellthenews_block("Enhanced Social Sentiment Source: SellTheNews WSB", sentiment, max_chars=3500))
+
+        company_news = client.call_tool(
+            "get_stock_news",
+            {"ticker": ticker, "limit": 5, "offset": 0},
+        )
+        search = _call_sellthenews_search_news(client, ticker, limit=8)
+        if looks_sparse(company_news, min_chars=180):
+            if _has_sellthenews_articles(search):
+                company_news = search
+        if company_news.strip():
+            blocks.append(_sellthenews_block("SellTheNews company-news context", company_news, max_chars=1800))
+        if _has_sellthenews_articles(search) and search.strip() != company_news.strip():
+            blocks.append(_sellthenews_block("SellTheNews ticker search context", search, max_chars=2200))
+
+        combined = "\n\n".join(blocks)
+        if _coerce_bool(config.get("sellthenews_fallback_on_sparse", True)) and (
+            looks_sparse(sentiment, min_chars=260)
+            or (
+                looks_sparse(company_news, min_chars=180)
+                and not _has_sellthenews_articles(company_news)
+            )
+        ):
+            fallback = get_reddit_company_news(ticker, curr_date, 7, 5)
+            return _sellthenews_fallback_block("social/company-specific coverage was sparse", fallback)
+        return combined
+    except (SellTheNewsUnavailable, SellTheNewsBadResponse, KeyError) as exc:
+        fallback = get_reddit_company_news(ticker, curr_date, 7, 5)
+        return _sellthenews_fallback_block(str(exc), fallback)
+
+
+def get_sellthenews_macro_news(curr_date: str, ticker_context: str | None = None) -> str:
+    config = get_config()
+    if not _is_sellthenews_enabled(config, "sellthenews_macro_enabled"):
+        return _build_empty_openai_global_fallback(curr_date, ticker_context)
+
+    client = _sellthenews_client(config)
+    target = str(ticker_context or "global markets").strip()
+    try:
+        live_news = client.call_tool(
+            "get_live_news",
+            {"limit": 5, "offset": 0, "marketOnly": True, "lang": "en"},
+        )
+        blocks = [_sellthenews_block("Enhanced Macro/Market News Source: SellTheNews", live_news, max_chars=4500)]
+
+        if looks_sparse(live_news, min_chars=320):
+            search = client.call_tool(
+                "search_news",
+                {
+                    "query": f"{target} macro economy inflation rates stocks",
+                    "lang": "en",
+                    "limit": 5,
+                    "offset": 0,
+                    "sort": "time",
+                },
+            )
+            if search.strip():
+                blocks.append(_sellthenews_block("SellTheNews macro search", search, max_chars=3000))
+
+        combined = "\n\n".join(blocks)
+        if _coerce_bool(config.get("sellthenews_fallback_on_sparse", True)) and looks_sparse(
+            combined, min_chars=360
+        ):
+            fallback = _build_empty_openai_global_fallback(curr_date, ticker_context)
+            return _sellthenews_fallback_block("macro news coverage was sparse", fallback)
+        return combined
+    except (SellTheNewsUnavailable, SellTheNewsBadResponse, KeyError) as exc:
+        fallback = _build_empty_openai_global_fallback(curr_date, ticker_context)
+        return _sellthenews_fallback_block(str(exc), fallback)
+
+
+def get_sellthenews_options_data(
+    ticker: str,
+    curr_date: str,
+    expiration: str | None = None,
+    greeks: str = "gamma",
+) -> str:
+    config = get_config()
+    if _is_crypto_ticker(ticker):
+        return _sellthenews_options_unavailable_block(
+            f"options data is not applicable to crypto ticker {ticker}"
+        )
+    if not _is_sellthenews_enabled(config, "sellthenews_options_enabled"):
+        return _sellthenews_options_unavailable_block("options data source is disabled")
+
+    selected_greeks = str(greeks or config.get("sellthenews_options_greeks", "gamma") or "gamma").strip()
+    selected_expiration = expiration or config.get("sellthenews_options_default_expiration")
+    max_chars = int(config.get("sellthenews_options_max_chars", 4500))
+    fallback_on_sparse = _coerce_bool(
+        config.get(
+            "sellthenews_options_fallback_on_sparse",
+            config.get("sellthenews_fallback_on_sparse", True),
+        )
+    )
+    arguments = {"ticker": ticker, "greeks": selected_greeks}
+    if selected_expiration:
+        arguments["expiration"] = selected_expiration
+
+    client = _sellthenews_client(config)
+    try:
+        options_text = client.call_tool("get_options_data", arguments)
+        notes = _sellthenews_options_quality_notes(ticker, options_text, config)
+        body = (
+            f"Ticker: {ticker}\n"
+            f"As-of date: {curr_date}\n"
+            f"Requested Greeks: {selected_greeks}\n"
+            f"Requested Expiration: {selected_expiration or 'nearest available'}\n\n"
+            f"{notes}\n\n"
+            f"{options_text}"
+        )
+        block = _sellthenews_block(
+            "SellTheNews Options Positioning",
+            body,
+            max_chars=max_chars,
+        )
+        if fallback_on_sparse and not _sellthenews_options_has_exposure(options_text):
+            return _sellthenews_fallback_block("options exposure data was sparse", block)
+        return block
+    except (SellTheNewsUnavailable, SellTheNewsBadResponse, KeyError) as exc:
+        return _sellthenews_options_unavailable_block(str(exc))
+
+
 def get_fundamentals_openai(ticker, curr_date):
     # Get API key from environment variables or config
     api_key = get_api_key("openai_api_key", "OPENAI_API_KEY")
@@ -1411,7 +2081,7 @@ def get_fundamentals_openai(ticker, curr_date):
         client = get_openai_client_with_timeout(api_key, timeout_seconds=timeout_seconds)
 
         # Get the selected quick model from config
-        model = config.get("quick_think_llm", "gpt-5.4-nano")  # fallback to default
+        model = config.get("quick_think_llm", "gpt-5.4-mini")  # fallback to default
         
         fundamentals_fast_profile = _coerce_bool(config.get("fundamentals_fast_profile", True))
         if fundamentals_fast_profile:
@@ -1460,7 +2130,9 @@ def get_fundamentals_openai(ticker, curr_date):
                 max_output_tokens=max_output_tokens,
                 store_responses=store_responses,
                 model_params=model_params,
-                include_reasoning=True,
+                include_reasoning=_coerce_bool(
+                    config.get("fundamentals_include_reasoning", False)
+                ),
             )
             response = _create_response_with_output_cap_fallback(client, api_params)
         else:
@@ -1495,6 +2167,7 @@ def get_fundamentals_openai(ticker, curr_date):
             return _build_empty_openai_fundamentals_fallback(
                 ticker=ticker,
                 curr_date=curr_date,
+                reason="OpenAI fundamentals web-search returned empty output",
             )
 
         return content
@@ -1502,6 +2175,7 @@ def get_fundamentals_openai(ticker, curr_date):
         fallback = _build_empty_openai_fundamentals_fallback(
             ticker=ticker,
             curr_date=curr_date,
+            reason=f"OpenAI fundamentals call failed: {str(e)}",
         )
         return f"OpenAI fundamentals call failed for {ticker}: {str(e)}\n\n{fallback}"
 

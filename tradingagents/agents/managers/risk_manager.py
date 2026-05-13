@@ -9,6 +9,7 @@ from ..utils.agent_trading_modes import (
     get_horizon_context,
     extract_recommendation,
 )
+from ..utils.language import output_language
 from ..utils.memory import TradingMemoryLog
 from ..utils.report_context import (
     get_agent_context_bundle,
@@ -106,7 +107,7 @@ def create_risk_manager(llm, memory, config=None):
         mode_name = trading_context["mode_name"]
         decision_format = trading_context["decision_format"]
         final_format = trading_context["final_format"]
-        output_language = (config or {}).get("output_language", "English")
+        language = output_language(config)
         context_bundle = get_agent_context_bundle(
             state,
             agent_role="managers/risk_manager",
@@ -157,7 +158,7 @@ def create_risk_manager(llm, memory, config=None):
             decision_memory_str=decision_memory_str,
             actions=actions,
             final_format=final_format,
-            output_language=output_language,
+            output_language=language,
         )
 
         # Capture the COMPLETE prompt that gets sent to the LLM

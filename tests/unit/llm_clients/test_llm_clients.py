@@ -3,10 +3,19 @@ import unittest
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.llm_clients.google_client import GoogleClient
 from tradingagents.llm_clients.openai_client import DeepSeekChatOpenAI
+from tradingagents.llm_clients.base_client import UsageTrackingChatModel
+
+
+class FakeTrackedChat(UsageTrackingChatModel):
+    model_name = "fake-model"
+    provider = "fake"
+    model_role = "quick"
+
 
 
 class LLMClientFactoryTests(unittest.TestCase):
@@ -102,6 +111,70 @@ class LLMClientFactoryTests(unittest.TestCase):
             kwargs = chat_cls.call_args.kwargs
             self.assertEqual(kwargs["thinking_level"], "low")
             self.assertNotIn("thinking_budget", kwargs)
+
+    def test_usage_tracking_chat_model_logs_cache_hits(self):
+        message = AIMessage(content="answer")
+        message.usage_metadata = {
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "total_tokens": 125,
+            "input_token_details": {"cache_read": 40, "cache_creation": 10},
+            "output_token_details": {"reasoning": 5},
+        }
+        result = ChatResult(generations=[ChatGeneration(message=message)])
+        calls = []
+
+        with patch("webui.utils.state.app_state.register_llm_call") as register:
+            FakeTrackedChat()._record_usage_result(
+                messages=[{"role": "user", "content": "hi"}],
+                result=result,
+                latency_seconds=0.1,
+            )
+            calls = register.call_args.kwargs
+
+        self.assertEqual(calls["model_name"], "fake-model")
+        self.assertEqual(calls["purpose"], "fake_chat")
+        self.assertEqual(calls["usage"]["input_tokens"], 100)
+        self.assertEqual(calls["usage"]["cache_hit_tokens"], 40)
+        self.assertEqual(calls["usage"]["cache_miss_tokens"], 50)
+        self.assertEqual(calls["usage"]["cache_creation_tokens"], 10)
+        self.assertEqual(calls["usage"]["reasoning_tokens"], 5)
+
+    def test_usage_tracking_chat_model_prefers_raw_deepseek_cache_fields(self):
+        message = AIMessage(content="answer")
+        message.usage_metadata = {
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "total_tokens": 125,
+        }
+        result = ChatResult(
+            generations=[ChatGeneration(message=message)],
+            llm_output={
+                "token_usage": {
+                    "prompt_tokens": 100,
+                    "prompt_cache_hit_tokens": 60,
+                    "prompt_cache_miss_tokens": 40,
+                    "completion_tokens": 25,
+                    "total_tokens": 125,
+                }
+            },
+        )
+
+        with patch("webui.utils.state.app_state.register_llm_call") as register:
+            FakeTrackedChat()._record_usage_result(
+                messages=[{"role": "user", "content": "hi"}],
+                result=result,
+                latency_seconds=0.1,
+            )
+            calls = register.call_args.kwargs
+
+        self.assertEqual(calls["model_name"], "fake-model")
+        self.assertEqual(calls["purpose"], "fake_chat")
+        self.assertEqual(calls["usage"]["input_tokens"], 100)
+        self.assertEqual(calls["usage"]["cache_hit_tokens"], 60)
+        self.assertEqual(calls["usage"]["cache_miss_tokens"], 40)
+        self.assertEqual(calls["usage"]["output_tokens"], 25)
+        self.assertEqual(calls["usage"]["total_tokens"], 125)
 
 
 if __name__ == "__main__":

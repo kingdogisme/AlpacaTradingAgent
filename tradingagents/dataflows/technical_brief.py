@@ -342,11 +342,10 @@ def _trend_timeframe_brief(df: pd.DataFrame, timeframe: str) -> Optional[TrendTi
 
 
 def _benchmark_for(symbol: str) -> Optional[str]:
-    is_crypto = "/" in symbol or "USD" in symbol.upper() or "USDT" in symbol.upper()
-    if is_crypto:
-        base = symbol.replace("/", "-").split("-")[0].upper()
-        return None if base == "BTC" else "BTC/USD"
-    return None if symbol.upper() == "SPY" else "SPY"
+    from tradingagents.dataflows.benchmarks import benchmark_for_symbol
+
+    benchmark = benchmark_for_symbol(symbol)
+    return "BTC/USD" if benchmark == "BTC-USD" else benchmark
 
 
 def _fetch_daily(symbol: str, curr_date: str, lookback_days: int) -> pd.DataFrame:
@@ -1056,14 +1055,49 @@ def build_trend_brief(symbol: str, curr_date: str, horizon: str = "position") ->
     drawdown_52w = round((last_close / high_52w - 1) * 100, 2) if high_52w else 0.0
     sma_200 = _sma(close, 200)
     sma_100 = _sma(close, 100)
+    sma_50 = _sma(close, 50)
+    atr_14 = _atr(daily_df["high"], daily_df["low"], close, 14)
     invalidation_level = 0.0
-    invalidation_basis = "No long moving average available"
+    invalidation_basis = "No moving average or ATR invalidation available"
+    regime_level = 0.0
+    regime_basis = "No long moving average available"
     if not pd.isna(sma_200.iloc[-1]):
-        invalidation_level = round(float(sma_200.iloc[-1]), 2)
-        invalidation_basis = "Daily close below 200D SMA or equivalent weekly trend break"
+        regime_level = round(float(sma_200.iloc[-1]), 2)
+        regime_basis = "Daily close below 200D SMA or equivalent weekly trend break"
     elif not pd.isna(sma_100.iloc[-1]):
-        invalidation_level = round(float(sma_100.iloc[-1]), 2)
-        invalidation_basis = "Daily close below 100D SMA with deteriorating weekly structure"
+        regime_level = round(float(sma_100.iloc[-1]), 2)
+        regime_basis = "Daily close below 100D SMA with deteriorating weekly structure"
+
+    trade_candidates: List[float] = []
+    atr_value = float(atr_14.iloc[-1]) if not pd.isna(atr_14.iloc[-1]) else 0.0
+    if atr_value > 0:
+        atr_multiple = 1.0 if horizon_key == "position" else 1.5
+        trade_candidates.append(last_close - atr_multiple * atr_value)
+    swing_window = 10 if horizon_key == "position" else 21
+    if len(daily_df) >= swing_window:
+        recent_low = float(daily_df["low"].tail(swing_window).min())
+        if recent_low < last_close:
+            trade_candidates.append(recent_low)
+    short_ma = sma_50.iloc[-1] if horizon_key == "position" else sma_100.iloc[-1]
+    if not pd.isna(short_ma) and float(short_ma) < last_close:
+        trade_candidates.append(float(short_ma))
+
+    valid_trade_candidates = [
+        value for value in trade_candidates if value > 0 and value < last_close
+    ]
+    trade_level = round(max(valid_trade_candidates), 2) if valid_trade_candidates else 0.0
+    trade_basis = (
+        "Position trade invalidation: daily close below the tighter of recent support, "
+        "short moving average, or ATR trailing level"
+        if horizon_key == "position"
+        else "Trend trade invalidation: daily close below recent support, intermediate moving average, or ATR trailing level"
+    )
+    if trade_level > 0:
+        invalidation_level = trade_level
+        invalidation_basis = f"{trade_basis}. Regime invalidation remains: {regime_basis}"
+    else:
+        invalidation_level = regime_level
+        invalidation_basis = regime_basis
 
     bull_count = sum(1 for item in tf_briefs if item.trend_direction == Direction.BULLISH)
     bear_count = sum(1 for item in tf_briefs if item.trend_direction == Direction.BEARISH)
@@ -1094,6 +1128,10 @@ def build_trend_brief(symbol: str, curr_date: str, horizon: str = "position") ->
             level=invalidation_level,
             basis=invalidation_basis,
             drawdown_from_52w_high=drawdown_52w,
+            trade_level=trade_level or None,
+            trade_basis=trade_basis if trade_level > 0 else None,
+            regime_level=regime_level or None,
+            regime_basis=regime_basis if regime_level > 0 else None,
         ),
         regime_alignment=RegimeAlignment(
             direction=regime_direction,

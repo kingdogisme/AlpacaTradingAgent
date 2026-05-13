@@ -11,6 +11,39 @@ from tradingagents.dataflows.config import get_alpaca_api_key, get_alpaca_secret
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from typing import Union
 
+
+US_MARKET_TIMEZONE = "America/New_York"
+INTRADAY_PERIODS = {"15m", "1d", "1w", "1mo"}
+
+
+def _is_crypto_ticker(ticker: str) -> bool:
+    return "/" in str(ticker or "")
+
+
+def _prepare_chart_timestamps(df: pd.DataFrame, ticker: str, period: str) -> pd.DataFrame:
+    """Normalize stock intraday timestamps to US market time for range breaks."""
+    if df.empty or "timestamp" not in df.columns or _is_crypto_ticker(ticker) or period not in INTRADAY_PERIODS:
+        return df
+
+    prepared = df.copy()
+    timestamps = pd.to_datetime(prepared["timestamp"])
+    if timestamps.dt.tz is None:
+        timestamps = timestamps.dt.tz_localize(pytz.UTC)
+    prepared["timestamp"] = timestamps.dt.tz_convert(US_MARKET_TIMEZONE).dt.tz_localize(None)
+    return prepared
+
+
+def _stock_market_rangebreaks(ticker: str, period: str):
+    if _is_crypto_ticker(ticker):
+        return []
+    if period in INTRADAY_PERIODS:
+        return [
+            dict(bounds=["sat", "mon"]),
+            dict(bounds=[16, 9.5], pattern="hour"),
+        ]
+    return [dict(bounds=["sat", "mon"])]
+
+
 def create_chart(ticker: str, period: str = "1y", end_date: Union[str, datetime] = None):
     """
     Create a Plotly candlestick+volume chart for a given ticker and period.
@@ -46,6 +79,7 @@ def create_chart(ticker: str, period: str = "1y", end_date: Union[str, datetime]
     # if we got no data, make a demo chart
     if df.empty:
         return create_demo_chart(ticker, period, end_date, error_msg="No data returned from Alpaca API.")
+    df = _prepare_chart_timestamps(df, ticker, period)
 
     # build chart
     fig = go.Figure()
@@ -61,21 +95,7 @@ def create_chart(ticker: str, period: str = "1y", end_date: Union[str, datetime]
     if end_date:
         title += f" (as of {pd.to_datetime(end_date).date()})"
     
-    # Improved layout with better gap handling - different rangebreaks for different timeframes
-    rangebreaks = []
-    if "/" not in ticker:  # Only apply to stocks, not crypto
-        if period in ["15m", "1d"]:
-            # For intraday charts, hide non-trading hours
-            rangebreaks = [
-                dict(bounds=["sat", "mon"]),  # Hide weekends
-                dict(bounds=[20, 9.5], pattern="hour"),  # Hide non-trading hours (8PM to 9:30AM)
-            ]
-        elif period in ["1w", "1mo"]:
-            # For weekly/monthly charts, only hide weekends
-            rangebreaks = [
-                dict(bounds=["sat", "mon"]),  # Hide weekends
-            ]
-        # For 1y charts, no rangebreaks to avoid issues with daily data
+    rangebreaks = _stock_market_rangebreaks(ticker, period)
     
     fig.update_layout(
         title=title,
@@ -127,21 +147,7 @@ def create_demo_chart(ticker, period="1y", end_date=None, error_msg=None):
     # Add candlestick trace on top
     fig.add_trace(go.Candlestick(x=dates, open=opens, high=highs, low=lows, close=closes, name='Price'))
     
-    # Apply the same improved layout with gap handling - different rangebreaks for different timeframes
-    rangebreaks = []
-    if "/" not in ticker:  # Only apply to stocks, not crypto
-        if period in ["15m", "1d"]:
-            # For intraday charts, hide non-trading hours
-            rangebreaks = [
-                dict(bounds=["sat", "mon"]),  # Hide weekends
-                dict(bounds=[20, 9.5], pattern="hour"),  # Hide non-trading hours (8PM to 9:30AM)
-            ]
-        elif period in ["1w", "1mo"]:
-            # For weekly/monthly charts, only hide weekends
-            rangebreaks = [
-                dict(bounds=["sat", "mon"]),  # Hide weekends
-            ]
-        # For 1y charts, no rangebreaks to avoid issues with daily data
+    rangebreaks = _stock_market_rangebreaks(ticker, period)
     
     fig.update_layout(
         title=title, 

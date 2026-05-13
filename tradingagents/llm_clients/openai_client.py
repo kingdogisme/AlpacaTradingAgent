@@ -1,16 +1,35 @@
 import os
+import time
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import BaseLLMClient, UsageTrackingChatModel, normalize_content
 from .validators import validate_model
 
 
-class NormalizedChatOpenAI(ChatOpenAI):
+class NormalizedChatOpenAI(UsageTrackingChatModel, ChatOpenAI):
+    provider: str = "openai"
+    model_role: str = "unknown"
+
     def invoke(self, input, config=None, **kwargs):
         return normalize_content(super().invoke(input, config, **kwargs))
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        call_started = time.time()
+        result = super()._generate(
+            messages,
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
+        self._record_usage_result(
+            messages=messages,
+            result=result,
+            latency_seconds=time.time() - call_started,
+        )
+        return result
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         return super().with_structured_output(schema, method=method or "function_calling", **kwargs)
@@ -103,8 +122,12 @@ class OpenAIClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
+        model_role = self.kwargs.get("model_role", "unknown")
         chat_cls = DeepSeekChatOpenAI if self.provider == "deepseek" else NormalizedChatOpenAI
-        return chat_cls(**llm_kwargs)
+        llm = chat_cls(**llm_kwargs)
+        llm.provider = self.provider
+        llm.model_role = model_role
+        return llm
 
     def validate_model(self) -> bool:
         if self.provider in ("openai", "local_openai"):

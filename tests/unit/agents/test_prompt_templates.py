@@ -10,6 +10,7 @@ from tradingagents.prompts import (
     load_prompt,
     render_prompt,
 )
+from tradingagents.agents.utils.language import language_instruction, output_language
 
 
 class DefaultPromptValues(dict):
@@ -82,6 +83,80 @@ class PromptTemplateTests(unittest.TestCase):
                 rendered = template.format_map(values)
                 self.assertIsInstance(rendered, str)
                 self.assertGreater(len(rendered.strip()), 20)
+
+    def test_default_output_language_is_chinese(self):
+        self.assertEqual(output_language({}), "zh-CN")
+        self.assertIn("zh-CN", language_instruction({}))
+
+    def test_options_positioning_guidance_is_present(self):
+        market_prompt = load_prompt("analysts/market_system")
+        trader_prompt = load_prompt("trader/trader_context")
+        conservative_prompt = load_prompt("risk/conservative_context")
+        aggressive_prompt = load_prompt("risk/aggressive_context")
+        neutral_prompt = load_prompt("risk/neutral_context")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+
+        self.assertIn("gamma flip", market_prompt)
+        self.assertIn("GEX", market_prompt)
+        self.assertIn("OPTIONS POSITIONING", trader_prompt)
+        self.assertIn("gamma flip", trader_prompt)
+        self.assertIn("negative gamma", conservative_prompt)
+        self.assertIn("technical breakout", aggressive_prompt)
+        self.assertIn("high-GEX strikes", neutral_prompt)
+        self.assertIn("gamma flip", risk_manager_prompt)
+        self.assertIn("Do not recommend option contracts", risk_manager_prompt)
+        self.assertIn("Optimize risk-adjusted return", risk_manager_prompt)
+        self.assertIn("excessive conservatism", risk_manager_prompt)
+
+    def test_key_agent_templates_accept_language_instruction(self):
+        values = DefaultPromptValues(
+            {
+                "actions": "BUY, HOLD, or SELL",
+                "agent_context": "Agent context.",
+                "all_reports_text": "Reports.",
+                "anchor_guidance": "Anchor guidance.",
+                "claim_matrix": "Claim matrix.",
+                "current_neutral_response": "",
+                "current_response": "",
+                "current_risky_response": "",
+                "current_safe_response": "",
+                "debate_digest": "Digest.",
+                "decision_format": "FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL**",
+                "global_news_guidance": "",
+                "history": "",
+                "holding_period": "2-10 trading days",
+                "horizon_agent_context": "Horizon context.",
+                "horizon_label": "Swing",
+                "iteration_guidance": "Iterate.",
+                "language_instruction": language_instruction({"output_language": "zh-CN"}),
+                "past_memory_str": "",
+                "primary_timeframes": "1h/4h/1d",
+                "risk_specific_context": "Risk context.",
+                "source_guidance": "Source guidance.",
+                "system_intro": "Intro.",
+                "ticker": "AAPL",
+                "trader_decision": "Trader plan.",
+                "workflow_intro": "Workflow.",
+                "workflow_step_two": "Step two.",
+            }
+        )
+        templates = [
+            "analysts/market_system",
+            "analysts/news_system",
+            "analysts/fundamentals_system",
+            "analysts/macro_system",
+            "analysts/social_system",
+            "researchers/bull_researcher",
+            "researchers/bear_researcher",
+            "risk/aggressive_debator",
+            "risk/conservative_debator",
+            "risk/neutral_debator",
+        ]
+
+        for template_name in templates:
+            with self.subTest(template=template_name):
+                rendered = load_prompt(template_name).format_map(values)
+                self.assertIn("Write the analysis in zh-CN", rendered)
 
     def test_template_placeholders_are_parseable(self):
         formatter = string.Formatter()

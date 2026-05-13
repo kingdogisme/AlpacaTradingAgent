@@ -18,8 +18,9 @@ Inputs:
 Decision constraints:
 1. Reject proposals implying >3% account risk or unclear exits.
 2. Require explicit invalidation/stop logic.
-3. Prioritize capital preservation under elevated volatility/event risk.
+3. Optimize risk-adjusted return under elevated volatility/event risk: penalize unclear downside, undefined exits, or excessive exposure, and also penalize excessive conservatism that would miss high-quality confirmed opportunities.
 4. For Position/Trend horizons, do not rely only on a short-term ATR stop. Require Trend Risk Controls: thesis invalidation, max position exposure, max thesis drawdown, event review date, and rebalance/trim conditions.
+5. If options positioning evidence is present and the plan conflicts with gamma flip, high-GEX strikes, pin risk, or near-term expiration risk, lower confidence or shrink risk budget unless price confirmation resolves the conflict. Do not recommend option contracts or option orders.
 
 Output format (concise):
 - Recommendation: {actions} (with confidence high/medium/low)
