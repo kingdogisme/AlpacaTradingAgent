@@ -656,6 +656,8 @@ class AlpacaUtils:
             daily_change_percent = (daily_change_dollars / last_equity) * 100 if last_equity != 0 else 0
             
             return {
+                "equity": equity,
+                "last_equity": last_equity,
                 "buying_power": buying_power,
                 "cash": cash,
                 "daily_change_dollars": daily_change_dollars,
@@ -664,6 +666,8 @@ class AlpacaUtils:
         except Exception as e:
             print(f"Error fetching account info: {e}")
             return {
+                "equity": 0,
+                "last_equity": 0,
                 "buying_power": 0,
                 "cash": 0,
                 "daily_change_dollars": 0,

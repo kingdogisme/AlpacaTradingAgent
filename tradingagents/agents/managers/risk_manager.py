@@ -78,10 +78,12 @@ def create_risk_manager(llm, memory, config=None):
 
         buying_power = account_info.get("buying_power", 0.0)
         cash = account_info.get("cash", 0.0)
+        equity = account_info.get("equity", 0.0)
         daily_change_dollars = account_info.get("daily_change_dollars", 0.0)
         daily_change_percent = account_info.get("daily_change_percent", 0.0)
         account_status_desc = (
             "Account Status:\n"
+            f"- Account Equity / NAV: ${equity:,.2f}\n"
             f"- Buying Power: ${buying_power:,.2f}\n"
             f"- Cash: ${cash:,.2f}\n"
             f"- Daily Change: ${daily_change_dollars:,.2f} ({daily_change_percent:.2f}%)"
@@ -168,7 +170,7 @@ def create_risk_manager(llm, memory, config=None):
             structured_llm,
             llm,
             prompt,
-            render_risk_decision,
+            lambda decision: render_risk_decision(decision, language),
             "Risk Manager",
         )
 

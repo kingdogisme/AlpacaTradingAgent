@@ -9,10 +9,20 @@ class FakeSellTheNewsClient:
     def __init__(self, responses):
         self.responses = responses
         self.calls = []
+        self.chain_calls = []
 
     def call_tool(self, name, arguments):
         self.calls.append((name, arguments))
         response = self.responses[name]
+        if isinstance(response, Exception):
+            raise response
+        if isinstance(response, list):
+            return response.pop(0)
+        return response
+
+    def get_options_chain(self, ticker, *, expiration=None, greeks="gamma"):
+        self.chain_calls.append((ticker, expiration, greeks))
+        response = self.responses["get_options_chain"]
         if isinstance(response, Exception):
             raise response
         if isinstance(response, list):
@@ -30,6 +40,7 @@ def _set_sellthenews_config(original_config, **overrides):
             "sellthenews_social_enabled": True,
             "sellthenews_macro_enabled": True,
             "sellthenews_options_enabled": False,
+            "sellthenews_options_chain_api_enabled": False,
             "sellthenews_options_greeks": "gamma",
             "sellthenews_options_default_expiration": None,
             "sellthenews_options_max_chars": 4500,
@@ -273,6 +284,79 @@ def test_sellthenews_options_data_success(monkeypatch):
     assert client.calls == [
         ("get_options_data", {"ticker": "NVDA", "greeks": "gamma"})
     ]
+
+
+def test_sellthenews_options_chain_api_success(monkeypatch):
+    original_config = config_module.get_config()
+    try:
+        _set_sellthenews_config(
+            original_config,
+            sellthenews_options_enabled=True,
+            sellthenews_options_chain_api_enabled=True,
+        )
+        client = FakeSellTheNewsClient(
+            {
+                "get_options_chain": {
+                    "ok": True,
+                    "ticker": "NVDA",
+                    "expiration_dates": ["2026-05-15", "2026-05-22"],
+                    "selected_exp": "2026-05-15",
+                    "updated_at": "2026-05-12T20:00:00Z",
+                    "expiration": {
+                        "spot": 220.88,
+                        "forward_price": 220.9,
+                        "implied_move_abs": 4.1,
+                        "implied_move_pct": 1.86,
+                        "total_call_oi": 117535,
+                        "total_put_oi": 74676,
+                        "pc_oi_ratio": 0.64,
+                        "call_wall": 220,
+                        "call_wall_oi": 23291,
+                        "put_wall": 180,
+                        "put_wall_oi": 7853,
+                        "max_pain": 212.5,
+                        "gamma_flip": 217.5,
+                        "net_gex": 168678205.9,
+                        "oi_source": "oi",
+                        "insights": [
+                            {
+                                "title": "Positive Gamma Environment",
+                                "text": "Dealers are long gamma.",
+                            }
+                        ],
+                        "gex_by_strike": {
+                            "217.5": 5626170.66,
+                            "220.0": 73257612.23,
+                            "210.0": -2359386.44,
+                        },
+                        "greeks_exposure": {
+                            "gamma": {
+                                "positive": {"220.0": 150155.06},
+                                "negative": {"210.0": -4842.41},
+                                "net": {"220.0": 150155.06, "210.0": -4842.41},
+                            }
+                        },
+                    },
+                }
+            }
+        )
+        monkeypatch.setattr(interface, "_sellthenews_client", lambda _config: client)
+        monkeypatch.setattr(interface, "_alpaca_mid_quote", lambda ticker: 220.0)
+
+        result = interface.get_sellthenews_options_data("NVDA", "2026-05-12")
+    finally:
+        config_module.set_config(original_config)
+
+    assert "## SellTheNews Options Positioning" in result
+    assert "Source: SellTheNews options chain API" in result
+    assert "Selected Expiration: 2026-05-15" in result
+    assert "Gamma Flip: $217.5" in result
+    assert "Net GEX: 168.7M" in result
+    assert "Positive GEX strikes: $220 (73.3M)" in result
+    assert "positive: $220 (150.2K)" in result
+    assert "SellTheNews fallback" not in result
+    assert client.chain_calls == [("NVDA", None, "gamma")]
+    assert client.calls == []
 
 
 def test_sellthenews_options_disabled_does_not_call_mcp(monkeypatch):

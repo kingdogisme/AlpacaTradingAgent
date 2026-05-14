@@ -94,7 +94,7 @@ def create_research_manager(llm, memory, config=None):
             structured_llm,
             llm,
             prompt,
-            render_research_plan,
+            lambda plan: render_research_plan(plan, language),
             "Research Manager",
         )
         extracted_recommendation = extract_recommendation(response_content, trading_mode)

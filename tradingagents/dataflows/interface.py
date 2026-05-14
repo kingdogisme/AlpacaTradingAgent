@@ -1,4 +1,4 @@
-from typing import Annotated, Dict, List, Tuple
+from typing import Annotated, Any, Dict, List, Tuple
 from .reddit_utils import (
     fetch_top_from_category,
     fetch_top_from_category_online,
@@ -140,6 +140,118 @@ def _extract_price_after_label(text: str, label: str) -> float | None:
         return None
 
 
+def _coerce_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_options_value(value: Any, *, money: bool = False) -> str:
+    number = _coerce_float(value)
+    if number is None:
+        return "unknown"
+    if money:
+        return f"${number:g}"
+    if abs(number) >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M"
+    if abs(number) >= 1_000:
+        return f"{number / 1_000:.1f}K"
+    return f"{number:g}"
+
+
+def _top_numeric_map_items(
+    values: Any,
+    *,
+    limit: int = 5,
+    positive: bool | None = None,
+) -> List[Tuple[float, float]]:
+    if not isinstance(values, dict):
+        return []
+    items: List[Tuple[float, float]] = []
+    for strike_raw, value_raw in values.items():
+        strike = _coerce_float(strike_raw)
+        value = _coerce_float(value_raw)
+        if strike is None or value is None or value == 0:
+            continue
+        if positive is True and value <= 0:
+            continue
+        if positive is False and value >= 0:
+            continue
+        items.append((strike, value))
+    items.sort(key=lambda item: abs(item[1]), reverse=True)
+    return items[:limit]
+
+
+def _format_strike_values(items: List[Tuple[float, float]]) -> str:
+    if not items:
+        return "none"
+    return ", ".join(f"${strike:g} ({_fmt_options_value(value)})" for strike, value in items)
+
+
+def _format_sellthenews_options_chain(data: Dict[str, Any], curr_date: str, greeks: str) -> str:
+    expiration = data.get("expiration") if isinstance(data.get("expiration"), dict) else {}
+    selected_exp = data.get("selected_exp") or expiration.get("expiration")
+    expiration_dates = data.get("expiration_dates") if isinstance(data.get("expiration_dates"), list) else []
+    requested_greeks = [part.strip().lower() for part in str(greeks or "gamma").split(",") if part.strip()]
+    if requested_greeks == ["all"]:
+        requested_greeks = ["gamma", "delta", "theta", "vega", "vanna", "charm"]
+
+    lines = [
+        f"=== Options Data: {data.get('ticker') or 'unknown'} ===",
+        f"As-of date: {curr_date}",
+        f"Spot Price: {_fmt_options_value(expiration.get('spot'), money=True)}",
+        f"Forward Price: {_fmt_options_value(expiration.get('forward_price'), money=True)}",
+        f"Selected Expiration: {selected_exp or 'unknown'}",
+        "Available Expirations: " + (", ".join(map(str, expiration_dates)) if expiration_dates else "unknown"),
+        f"Updated: {data.get('updated_at') or 'unknown'}",
+        f"Gamma Flip: {_fmt_options_value(expiration.get('gamma_flip'), money=True)}",
+        f"Net GEX: {_fmt_options_value(expiration.get('net_gex'))}",
+        f"Call Wall: {_fmt_options_value(expiration.get('call_wall'), money=True)} "
+        f"(OI {_fmt_options_value(expiration.get('call_wall_oi'))})",
+        f"Put Wall: {_fmt_options_value(expiration.get('put_wall'), money=True)} "
+        f"(OI {_fmt_options_value(expiration.get('put_wall_oi'))})",
+        f"Max Pain: {_fmt_options_value(expiration.get('max_pain'), money=True)}",
+        f"Put/Call OI Ratio: {_fmt_options_value(expiration.get('pc_oi_ratio'))}",
+        f"Implied Move: +/-{_fmt_options_value(expiration.get('implied_move_pct'))}% "
+        f"({_fmt_options_value(expiration.get('implied_move_abs'), money=True)})",
+        f"OI Source: {expiration.get('oi_source') or 'unknown'}",
+    ]
+
+    insights = expiration.get("insights")
+    if isinstance(insights, list) and insights:
+        lines.append("\n--- Insights ---")
+        for insight in insights[:6]:
+            if not isinstance(insight, dict):
+                continue
+            title = str(insight.get("title") or "").strip()
+            text = str(insight.get("text") or "").strip()
+            if title or text:
+                lines.append(f"- {title}: {text}".strip())
+
+    lines.append("\n--- Dealer Gamma Exposure ---")
+    gex_by_strike = expiration.get("gex_by_strike")
+    lines.append(f"Positive GEX strikes: {_format_strike_values(_top_numeric_map_items(gex_by_strike, positive=True))}")
+    lines.append(f"Negative GEX strikes: {_format_strike_values(_top_numeric_map_items(gex_by_strike, positive=False))}")
+    lines.append(f"Top absolute GEX strikes: {_format_strike_values(_top_numeric_map_items(gex_by_strike))}")
+
+    greeks_exposure = expiration.get("greeks_exposure")
+    if isinstance(greeks_exposure, dict):
+        for greek in requested_greeks:
+            exposure = greeks_exposure.get(greek)
+            if not isinstance(exposure, dict):
+                continue
+            lines.append(f"\n--- {greek.upper()} Exposure ---")
+            for side in ("positive", "negative", "net"):
+                lines.append(
+                    f"{side}: {_format_strike_values(_top_numeric_map_items(exposure.get(side)))}"
+                )
+
+    return "\n".join(lines).strip()
+
+
 def _sellthenews_options_has_exposure(text: str) -> bool:
     normalized = " ".join(str(text or "").split()).strip().lower()
     if not normalized:
@@ -155,6 +267,27 @@ def _sellthenews_options_has_exposure(text: str) -> bool:
     empty_exposure_pattern = r"\$(positive|negative|net):\s*(?:\n|$)"
     empty_rows = re.findall(empty_exposure_pattern, str(text or ""), flags=re.IGNORECASE | re.MULTILINE)
     return len(empty_rows) < 3
+
+
+def _sellthenews_options_chain_has_exposure(data: Dict[str, Any]) -> bool:
+    expiration = data.get("expiration") if isinstance(data.get("expiration"), dict) else {}
+    if _coerce_float(expiration.get("spot")) is None:
+        return False
+    if not data.get("selected_exp"):
+        return False
+    if _coerce_float(expiration.get("gamma_flip")) is None:
+        return False
+    if _top_numeric_map_items(expiration.get("gex_by_strike"), limit=1):
+        return True
+    greeks_exposure = expiration.get("greeks_exposure")
+    if isinstance(greeks_exposure, dict):
+        for exposure in greeks_exposure.values():
+            if not isinstance(exposure, dict):
+                continue
+            for side in ("positive", "negative", "net"):
+                if _top_numeric_map_items(exposure.get(side), limit=1):
+                    return True
+    return False
 
 
 def _alpaca_mid_quote(ticker: str) -> float | None:
@@ -206,6 +339,38 @@ def _sellthenews_options_quality_notes(
 
     if not notes:
         notes.append("- Data quality: spot, selected expiration, and exposure fields were present.")
+    return "\n".join(notes)
+
+
+def _sellthenews_options_chain_quality_notes(
+    ticker: str,
+    data: Dict[str, Any],
+    config: Dict,
+) -> str:
+    notes: List[str] = []
+    expiration = data.get("expiration") if isinstance(data.get("expiration"), dict) else {}
+    spot = _coerce_float(expiration.get("spot"))
+    if spot is None or spot <= 0:
+        notes.append("- Data quality: SellTheNews response did not include a usable positive spot price.")
+
+    if not data.get("selected_exp"):
+        notes.append("- Data quality: SellTheNews response did not include selected expiration.")
+
+    alpaca_mid = _alpaca_mid_quote(ticker)
+    threshold = float(config.get("sellthenews_options_spot_mismatch_threshold_pct", 5.0))
+    if spot and spot > 0 and alpaca_mid and alpaca_mid > 0:
+        diff_pct = abs(spot - alpaca_mid) / alpaca_mid * 100
+        if diff_pct > threshold:
+            notes.append(
+                "- Data quality: spot mismatch versus Alpaca latest quote "
+                f"({diff_pct:.1f}% difference); use options data as positioning only."
+            )
+
+    if not _sellthenews_options_chain_has_exposure(data):
+        notes.append("- Data quality: exposure rows are sparse or empty; do not treat GEX levels as confirmed.")
+
+    if not notes:
+        notes.append("- Data quality: spot, selected expiration, and numeric exposure fields were present.")
     return "\n".join(notes)
 
 
@@ -2043,6 +2208,33 @@ def get_sellthenews_options_data(
 
     client = _sellthenews_client(config)
     try:
+        options_chain_enabled = _coerce_bool(config.get("sellthenews_options_chain_api_enabled", True))
+        if options_chain_enabled and hasattr(client, "get_options_chain"):
+            options_data = client.get_options_chain(
+                ticker,
+                expiration=selected_expiration,
+                greeks=selected_greeks,
+            )
+            options_text = _format_sellthenews_options_chain(options_data, curr_date, selected_greeks)
+            notes = _sellthenews_options_chain_quality_notes(ticker, options_data, config)
+            body = (
+                f"Ticker: {ticker}\n"
+                f"As-of date: {curr_date}\n"
+                f"Requested Greeks: {selected_greeks}\n"
+                f"Requested Expiration: {selected_expiration or 'nearest available'}\n"
+                f"Source: SellTheNews options chain API\n\n"
+                f"{notes}\n\n"
+                f"{options_text}"
+            )
+            block = _sellthenews_block(
+                "SellTheNews Options Positioning",
+                body,
+                max_chars=max_chars,
+            )
+            if fallback_on_sparse and not _sellthenews_options_chain_has_exposure(options_data):
+                return _sellthenews_fallback_block("options exposure data was sparse", block)
+            return block
+
         options_text = client.call_tool("get_options_data", arguments)
         notes = _sellthenews_options_quality_notes(ticker, options_text, config)
         body = (

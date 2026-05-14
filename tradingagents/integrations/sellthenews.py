@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import requests
 
@@ -33,6 +34,15 @@ class SellTheNewsClient:
     def __init__(self, base_url: str, timeout_seconds: float = 8.0):
         self.base_url = base_url
         self.timeout_seconds = timeout_seconds
+
+    def _site_origin(self) -> str:
+        parsed = urlparse(self.base_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise SellTheNewsUnavailable("SellTheNews base URL is invalid")
+        host = parsed.netloc
+        if host.startswith("mcp."):
+            host = host[len("mcp.") :]
+        return urlunparse((parsed.scheme, host, "", "", "", ""))
 
     def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         payload = {
@@ -68,6 +78,40 @@ class SellTheNewsClient:
         if not text.strip():
             raise SellTheNewsBadResponse("response contained no readable content")
         return text.strip()
+
+    def get_options_chain(
+        self,
+        ticker: str,
+        *,
+        expiration: str | None = None,
+        greeks: str = "gamma",
+    ) -> dict[str, Any]:
+        """Fetch the SellTheNews options-chain JSON used by the dashboard."""
+        api_url = f"{self._site_origin()}/api/options/chain"
+        params: dict[str, str] = {"ticker": ticker, "greeks": greeks or "gamma"}
+        if expiration:
+            params["exp"] = expiration
+        try:
+            response = requests.get(
+                f"{api_url}?{urlencode(params)}",
+                headers={"Accept": "application/json"},
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise SellTheNewsUnavailable(str(exc)) from exc
+
+        if response.status_code != 200:
+            raise SellTheNewsUnavailable(f"HTTP {response.status_code}: {response.text[:300]}")
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise SellTheNewsBadResponse("options chain response was not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise SellTheNewsBadResponse("options chain response root must be an object")
+        if data.get("ok") is False:
+            raise SellTheNewsUnavailable(str(data.get("error") or "options chain request failed"))
+        return data
 
 
 def decode_mcp_response(response: requests.Response) -> dict[str, Any]:

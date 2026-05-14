@@ -74,10 +74,12 @@ def create_trader(llm, memory, config=None):
 
         buying_power = account_info.get("buying_power", 0.0)
         cash = account_info.get("cash", 0.0)
+        equity = account_info.get("equity", 0.0)
         daily_change_dollars = account_info.get("daily_change_dollars", 0.0)
         daily_change_percent = account_info.get("daily_change_percent", 0.0)
         account_status_desc = (
             "Account Status:\n"
+            f"- Account Equity / NAV: ${equity:,.2f}\n"
             f"- Buying Power: ${buying_power:,.2f}\n"
             f"- Cash: ${cash:,.2f}\n"
             f"- Daily Change: ${daily_change_dollars:,.2f} ({daily_change_percent:.2f}%)"
@@ -221,7 +223,7 @@ USER MESSAGE:
             structured_llm,
             llm,
             messages,
-            render_trader_proposal,
+            lambda proposal: render_trader_proposal(proposal, language),
             "Trader",
         )
 
@@ -241,7 +243,7 @@ USER MESSAGE:
                 structured_llm,
                 llm,
                 fallback_prompt,
-                render_trader_proposal,
+                lambda proposal: render_trader_proposal(proposal, language),
                 "Trader",
             )
         
@@ -259,7 +261,7 @@ USER MESSAGE:
                 structured_llm,
                 llm,
                 final_prompt,
-                render_trader_proposal,
+                lambda proposal: render_trader_proposal(proposal, language),
                 "Trader",
             )
             

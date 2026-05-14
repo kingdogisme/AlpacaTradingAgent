@@ -74,71 +74,131 @@ class RiskDecision(BaseModel):
     risk_budget: Optional[str] = Field(default=None, description="Maximum risk or exposure budget.")
 
 
-def _rating_line(rating: Optional[AdvisoryRating]) -> list[str]:
-    return ["", f"**Advisory Rating**: {rating.value}"] if rating else []
+ZH_CN_LABELS = {
+    "recommendation": "建议",
+    "action": "操作",
+    "confidence": "信心",
+    "advisory_rating": "顾问评级",
+    "rationale": "理由",
+    "strategic_actions": "执行计划",
+    "reasoning": "判断依据",
+    "entry": "入场",
+    "stop_invalidation": "止损 / 失效",
+    "targets": "目标",
+    "position_sizing": "仓位规模",
+    "risk_rationale": "风险理由",
+    "required_controls": "必要风控",
+    "time_horizon": "时间周期",
+    "thesis": "交易论点",
+    "invalidation": "失效条件",
+    "review_cadence": "复核节奏",
+    "position_plan": "仓位计划",
+    "risk_budget": "风险预算",
+}
 
 
-def render_research_plan(plan: ResearchPlan) -> str:
+EN_LABELS = {
+    "recommendation": "Recommendation",
+    "action": "Action",
+    "confidence": "Confidence",
+    "advisory_rating": "Advisory Rating",
+    "rationale": "Rationale",
+    "strategic_actions": "Strategic Actions",
+    "reasoning": "Reasoning",
+    "entry": "Entry",
+    "stop_invalidation": "Stop / Invalidation",
+    "targets": "Targets",
+    "position_sizing": "Position Sizing",
+    "risk_rationale": "Risk Rationale",
+    "required_controls": "Required Controls",
+    "time_horizon": "Time Horizon",
+    "thesis": "Thesis",
+    "invalidation": "Invalidation",
+    "review_cadence": "Review Cadence",
+    "position_plan": "Position Plan",
+    "risk_budget": "Risk Budget",
+}
+
+
+def _labels(output_language: str | None = None) -> dict[str, str]:
+    language = (output_language or "").strip().lower()
+    if language in {"zh", "zh-cn", "chinese", "中文", "简体中文"}:
+        return ZH_CN_LABELS
+    return EN_LABELS
+
+
+def _field_line(label_key: str, value: str, labels: dict[str, str]) -> str:
+    return f"**{labels[label_key]}**: {value}"
+
+
+def render_research_plan(plan: ResearchPlan, output_language: str | None = None) -> str:
+    labels = _labels(output_language)
     parts = [
-        f"**Recommendation**: {plan.recommendation.value}",
-        f"**Confidence**: {plan.confidence}",
-        *_rating_line(plan.advisory_rating),
+        _field_line("recommendation", plan.recommendation.value, labels),
+        _field_line("confidence", plan.confidence, labels),
+        *_rating_line(plan.advisory_rating, labels),
         "",
-        f"**Rationale**: {plan.rationale}",
+        _field_line("rationale", plan.rationale, labels),
         "",
-        f"**Strategic Actions**: {plan.strategic_actions}",
+        _field_line("strategic_actions", plan.strategic_actions, labels),
     ]
-    _append_horizon_fields(parts, plan)
+    _append_horizon_fields(parts, plan, labels)
     parts.extend(["", f"FINAL TRANSACTION PROPOSAL: **{plan.recommendation.value}**"])
     return "\n".join(parts)
 
 
-def render_trader_proposal(proposal: TraderProposal) -> str:
+def render_trader_proposal(proposal: TraderProposal, output_language: str | None = None) -> str:
+    labels = _labels(output_language)
     parts = [
-        f"**Action**: {proposal.action.value}",
-        f"**Confidence**: {proposal.confidence}",
-        *_rating_line(proposal.advisory_rating),
+        _field_line("action", proposal.action.value, labels),
+        _field_line("confidence", proposal.confidence, labels),
+        *_rating_line(proposal.advisory_rating, labels),
         "",
-        f"**Reasoning**: {proposal.reasoning}",
+        _field_line("reasoning", proposal.reasoning, labels),
     ]
     if proposal.entry_price:
-        parts.extend(["", f"**Entry**: {proposal.entry_price}"])
+        parts.extend(["", _field_line("entry", proposal.entry_price, labels)])
     if proposal.stop_loss:
-        parts.extend(["", f"**Stop / Invalidation**: {proposal.stop_loss}"])
+        parts.extend(["", _field_line("stop_invalidation", proposal.stop_loss, labels)])
     if proposal.targets:
-        parts.extend(["", f"**Targets**: {proposal.targets}"])
+        parts.extend(["", _field_line("targets", proposal.targets, labels)])
     if proposal.position_sizing:
-        parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
-    _append_horizon_fields(parts, proposal)
+        parts.extend(["", _field_line("position_sizing", proposal.position_sizing, labels)])
+    _append_horizon_fields(parts, proposal, labels)
     parts.extend(["", f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value}**"])
     return "\n".join(parts)
 
 
-def render_risk_decision(decision: RiskDecision) -> str:
+def render_risk_decision(decision: RiskDecision, output_language: str | None = None) -> str:
+    labels = _labels(output_language)
     parts = [
-        f"**Action**: {decision.action.value}",
-        f"**Confidence**: {decision.confidence}",
-        *_rating_line(decision.advisory_rating),
+        _field_line("action", decision.action.value, labels),
+        _field_line("confidence", decision.confidence, labels),
+        *_rating_line(decision.advisory_rating, labels),
         "",
-        f"**Risk Rationale**: {decision.risk_rationale}",
+        _field_line("risk_rationale", decision.risk_rationale, labels),
         "",
-        f"**Required Controls**: {decision.required_controls}",
+        _field_line("required_controls", decision.required_controls, labels),
     ]
-    _append_horizon_fields(parts, decision)
+    _append_horizon_fields(parts, decision, labels)
     parts.extend(["", f"FINAL TRANSACTION PROPOSAL: **{decision.action.value}**"])
     return "\n".join(parts)
 
 
-def _append_horizon_fields(parts: list[str], model: Any) -> None:
+def _rating_line(rating: Optional[AdvisoryRating], labels: dict[str, str] | None = None) -> list[str]:
+    return ["", f"**{(labels or EN_LABELS)['advisory_rating']}**: {rating.value}"] if rating else []
+
+
+def _append_horizon_fields(parts: list[str], model: Any, labels: dict[str, str]) -> None:
     optional_fields = [
-        ("time_horizon", "Time Horizon"),
-        ("thesis", "Thesis"),
-        ("invalidation", "Invalidation"),
-        ("review_cadence", "Review Cadence"),
-        ("position_plan", "Position Plan"),
-        ("risk_budget", "Risk Budget"),
+        ("time_horizon", "time_horizon"),
+        ("thesis", "thesis"),
+        ("invalidation", "invalidation"),
+        ("review_cadence", "review_cadence"),
+        ("position_plan", "position_plan"),
+        ("risk_budget", "risk_budget"),
     ]
-    for field_name, label in optional_fields:
+    for field_name, label_key in optional_fields:
         value = getattr(model, field_name, None)
         if value:
-            parts.extend(["", f"**{label}**: {value}"])
+            parts.extend(["", _field_line(label_key, value, labels)])

@@ -116,6 +116,45 @@ class StructuredDecisionTests(unittest.TestCase):
         self.assertIn("FINAL TRANSACTION PROPOSAL: **SELL**", risk)
         self.assertEqual(extract_recommendation(research, "investment"), "BUY")
 
+    def test_renderers_use_chinese_labels_when_requested(self):
+        research = render_research_plan(
+            ResearchPlan(
+                recommendation=ExecutableAction.HOLD,
+                confidence="medium",
+                advisory_rating=AdvisoryRating.HOLD,
+                rationale="等待确认。",
+                strategic_actions="暂不追价。",
+                time_horizon="3-6个月",
+            ),
+            "zh-CN",
+        )
+        trader = render_trader_proposal(
+            TraderProposal(
+                action=ExecutableAction.HOLD,
+                confidence="medium",
+                reasoning="趋势未坏，但入场赔率不足。",
+            ),
+            "zh-CN",
+        )
+        risk = render_risk_decision(
+            RiskDecision(
+                action=ExecutableAction.HOLD,
+                confidence="medium",
+                risk_rationale="无现仓，等待确认更优。",
+                required_controls="突破确认后再分批。",
+            ),
+            "zh-CN",
+        )
+
+        self.assertIn("**建议**: HOLD", research)
+        self.assertIn("**顾问评级**: Hold", research)
+        self.assertIn("**时间周期**: 3-6个月", research)
+        self.assertIn("**操作**: HOLD", trader)
+        self.assertIn("**判断依据**: 趋势未坏，但入场赔率不足。", trader)
+        self.assertIn("**风险理由**: 无现仓，等待确认更优。", risk)
+        self.assertIn("**必要风控**: 突破确认后再分批。", risk)
+        self.assertIn("FINAL TRANSACTION PROPOSAL: **HOLD**", risk)
+
     def test_structured_failure_falls_back_to_plain_text(self):
         content = invoke_structured_or_freetext(
             BrokenStructuredLLM(),

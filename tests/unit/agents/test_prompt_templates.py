@@ -108,6 +108,47 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("Optimize risk-adjusted return", risk_manager_prompt)
         self.assertIn("excessive conservatism", risk_manager_prompt)
 
+    def test_investment_mode_prompts_match_long_only_no_trade_semantics(self):
+        investment_prompt = load_prompt("trading_modes/investment")
+        trader_prompt = load_prompt("trader/trader_context")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+
+        self.assertIn('use HOLD for "do not enter / wait / no trade"', investment_prompt)
+        self.assertIn("reserve SELL for reducing or exiting an existing long position", investment_prompt)
+        self.assertIn('SELL means exit/reduce', trader_prompt)
+        self.assertIn('use HOLD for "no trade / wait / stay in cash" rather than SELL', risk_manager_prompt)
+
+    def test_core_decision_prompts_optimize_risk_adjusted_return(self):
+        research_manager_prompt = load_prompt("managers/research_manager")
+        trader_prompt = load_prompt("trader/trader_context")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+
+        self.assertIn("Optimize for risk-adjusted return", research_manager_prompt)
+        self.assertIn("high-quality confirmed opportunity", research_manager_prompt)
+        self.assertIn("Opportunity Cost", trader_prompt)
+        self.assertIn("excessive conservatism", trader_prompt)
+        self.assertIn("optimizes risk-adjusted return", risk_manager_prompt)
+
+    def test_position_sizing_policy_matches_ten_ticket_portfolio(self):
+        investment_prompt = load_prompt("trading_modes/investment")
+        research_manager_prompt = load_prompt("managers/research_manager")
+        trader_prompt = load_prompt("trader/trader_context")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+
+        for prompt in (
+            investment_prompt,
+            research_manager_prompt,
+            trader_prompt,
+            risk_manager_prompt,
+        ):
+            with self.subTest(prompt=prompt[:40]):
+                self.assertIn("approximately 10-ticket", prompt)
+                self.assertIn("risk-to-invalidation", prompt)
+                self.assertIn("notional exposure", prompt)
+                self.assertIn("1.0%-2.0% NAV", prompt)
+                self.assertIn("2.0%-2.5% NAV", prompt)
+                self.assertIn("3.0% NAV", prompt)
+
     def test_key_agent_templates_accept_language_instruction(self):
         values = DefaultPromptValues(
             {

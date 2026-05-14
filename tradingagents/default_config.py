@@ -171,6 +171,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "sellthenews_social_enabled": True,
     "sellthenews_macro_enabled": True,
     "sellthenews_options_enabled": False,
+    "sellthenews_options_chain_api_enabled": True,
     "sellthenews_options_greeks": "gamma",
     "sellthenews_options_default_expiration": None,
     "sellthenews_options_max_chars": 4500,

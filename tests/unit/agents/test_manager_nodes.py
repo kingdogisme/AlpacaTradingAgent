@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from tradingagents.agents.schemas import ExecutableAction, RiskDecision, TraderProposal
 from tradingagents.agents.managers.research_manager import create_research_manager
 from tradingagents.agents.managers.risk_manager import create_risk_manager
 from tradingagents.agents.trader.trader import create_trader
@@ -23,6 +24,28 @@ class PlainLLM:
 class EmptyMemory:
     def get_memories(self, _current_situation, n_matches=1):
         return []
+
+
+class StructuredLLM:
+    def __init__(self, parsed):
+        self.parsed = parsed
+
+    def bind_tools(self, _tools, **_kwargs):
+        return self
+
+    def invoke(self, _prompt, *args, **kwargs):
+        return self.parsed
+
+
+class DirectStructuredLLM:
+    def __init__(self, parsed):
+        self.parsed = parsed
+
+    def invoke(self, _prompt, *args, **kwargs):
+        return self.parsed
+
+    def with_structured_output(self, _schema):
+        return self
 
 
 def _base_state() -> dict:
@@ -81,13 +104,38 @@ def test_trader_injects_position_context_and_adds_missing_final_line(isolated_co
 
     with patch("tradingagents.agents.trader.trader.AlpacaUtils.get_current_position_state", return_value="NEUTRAL"), patch(
         "tradingagents.agents.trader.trader.AlpacaUtils.get_positions_data", return_value=[]
-    ), patch("tradingagents.agents.trader.trader.AlpacaUtils.get_account_info", return_value={"buying_power": 1000, "cash": 500}):
+    ), patch(
+        "tradingagents.agents.trader.trader.AlpacaUtils.get_account_info",
+        return_value={"equity": 2500, "buying_power": 1000, "cash": 500},
+    ):
         result = node(_base_state())
 
     assert result["trader_investment_plan"].endswith("FINAL TRANSACTION PROPOSAL: **HOLD**")
     assert result["recommended_action"] == "HOLD"
     assert result["current_position"] == "NEUTRAL"
     assert "Account Status" in str(llm.prompts[0])
+    assert "Account Equity / NAV: $2,500.00" in str(llm.prompts[0])
+
+
+def test_trader_structured_output_uses_configured_language(isolated_config):
+    isolated_config["output_language"] = "zh-CN"
+    llm = DirectStructuredLLM(
+        TraderProposal(
+            action=ExecutableAction.HOLD,
+            confidence="medium",
+            reasoning="趋势未坏，但当前缺少确认。",
+        )
+    )
+    node = create_trader(llm, EmptyMemory(), isolated_config)
+
+    with patch("tradingagents.agents.trader.trader.AlpacaUtils.get_current_position_state", return_value="NEUTRAL"), patch(
+        "tradingagents.agents.trader.trader.AlpacaUtils.get_positions_data", return_value=[]
+    ), patch("tradingagents.agents.trader.trader.AlpacaUtils.get_account_info", return_value={"buying_power": 1000, "cash": 500}):
+        result = node(_base_state())
+
+    assert "**操作**: HOLD" in result["trader_investment_plan"]
+    assert "**判断依据**: 趋势未坏，但当前缺少确认。" in result["trader_investment_plan"]
+    assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["trader_investment_plan"]
 
 
 def test_risk_manager_outputs_final_executable_action_and_state(isolated_config):
@@ -96,11 +144,37 @@ def test_risk_manager_outputs_final_executable_action_and_state(isolated_config)
 
     with patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_current_position_state", return_value="LONG"), patch(
         "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_positions_data", return_value=[]
-    ), patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info", return_value={"buying_power": 1000, "cash": 500}):
+    ), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info",
+        return_value={"equity": 2500, "buying_power": 1000, "cash": 500},
+    ):
         result = node(_base_state())
 
     assert result["final_trade_decision"].endswith("FINAL TRANSACTION PROPOSAL: **HOLD**")
     assert result["recommended_action"] == "HOLD"
     assert result["risk_debate_state"]["latest_speaker"] == "Judge"
     assert result["current_position"] == "LONG"
+    assert "Account Equity / NAV: $2,500.00" in str(llm.prompts[0])
 
+
+def test_risk_manager_structured_output_uses_configured_language(isolated_config):
+    isolated_config["output_language"] = "zh-CN"
+    llm = DirectStructuredLLM(
+        RiskDecision(
+            action=ExecutableAction.HOLD,
+            confidence="medium",
+            risk_rationale="没有现仓，等待确认更优。",
+            required_controls="突破确认后再分批建仓。",
+        )
+    )
+    node = create_risk_manager(llm, EmptyMemory(), isolated_config)
+
+    with patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_current_position_state", return_value="NEUTRAL"), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_positions_data", return_value=[]
+    ), patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info", return_value={"buying_power": 1000, "cash": 500}):
+        result = node(_base_state())
+
+    assert "**操作**: HOLD" in result["final_trade_decision"]
+    assert "**风险理由**: 没有现仓，等待确认更优。" in result["final_trade_decision"]
+    assert "**必要风控**: 突破确认后再分批建仓。" in result["final_trade_decision"]
+    assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["final_trade_decision"]
