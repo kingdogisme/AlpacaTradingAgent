@@ -101,6 +101,17 @@ def _reasoning_spec(
 
 
 MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "gpt-5.5": _reasoning_spec(
+        model_id="gpt-5.5",
+        label="GPT-5.5 - flagship current",
+        description="Current flagship for complex financial reasoning and agent workflows.",
+        reasoning_effort_options=["none", "low", "medium", "high", "xhigh"],
+        role_defaults={
+            "quick": {"reasoning_effort": "low", "text_verbosity": "low"},
+            "deep": {"reasoning_effort": "high", "text_verbosity": "medium"},
+        },
+        price_hint="frontier",
+    ),
     "gpt-5.4-pro": _reasoning_spec(
         model_id="gpt-5.4-pro",
         label="GPT-5.4 Pro - strongest, expensive",
@@ -496,7 +507,7 @@ def get_model_options_with_status(provider: str, role: str) -> Dict[str, Any]:
 def get_default_model_for_provider(provider: str, role: str) -> str:
     provider_key = (provider or "openai").lower()
     if provider_key == "openai":
-        return "gpt-5.4-mini" if role == "quick" else "gpt-5.4"
+        return "gpt-5.5"
     preferred_default = PREFERRED_PROVIDER_DEFAULTS.get(provider_key, {}).get((role or "quick").lower())
     if preferred_default:
         return preferred_default
@@ -506,7 +517,7 @@ def get_default_model_for_provider(provider: str, role: str) -> str:
         return non_custom_options[0]["value"]
     if options:
         return options[0]["value"]
-    return "gpt-5.4-mini" if role == "quick" else "gpt-5.4"
+    return "gpt-5.5"
 
 
 def resolve_model_choice(model_choice: str, custom_model: Optional[str] = None) -> Optional[str]:

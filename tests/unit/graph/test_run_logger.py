@@ -119,6 +119,43 @@ def test_run_logger_counts_degraded_tool_warnings(tmp_path, monkeypatch):
     assert payload["summary"]["suspect_tool_events"] == 1
 
 
+def test_run_logger_counts_data_quality_summary(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    logger = RunAuditLogger()
+
+    run_id = logger.start_run("AAPL", "2026-05-20")
+    logger.log_tool_call(
+        "get_alpaca_data",
+        {"symbol": "AAPL"},
+        "stale output",
+        "degraded",
+        0.1,
+        agent_type="MARKET",
+        symbol="AAPL",
+        run_id=run_id,
+        quality_details={
+            "flags": ["stale_source"],
+            "is_suspect": True,
+            "data_quality": {
+                "status": "fail",
+                "source_id": "alpaca_bars",
+                "criticality": "critical",
+                "fallback_from": "yfinance",
+                "flags": ["stale_source", "fallback_used"],
+            },
+        },
+    )
+    logger.finish_run(symbol="AAPL", run_id=run_id, status="completed")
+
+    run_file = next((tmp_path / "eval_results" / "AAPL" / "TradingAgentsStrategy_logs" / "runs").glob("*.json"))
+    payload = json.loads(run_file.read_text(encoding="utf-8"))
+
+    assert payload["summary"]["quality_fail"] == 1
+    assert payload["summary"]["stale_sources"] == ["alpaca_bars"]
+    assert payload["summary"]["fallback_sources"] == ["alpaca_bars"]
+    assert payload["summary"]["critical_failures"] == ["alpaca_bars"]
+
+
 def test_run_logger_exit_snapshot_preserves_latest_outputs(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     logger = RunAuditLogger()

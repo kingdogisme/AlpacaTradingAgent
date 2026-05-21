@@ -12,6 +12,10 @@ This document keeps a Mermaid source view of the current architecture. It is
 not intended to be pixel-identical to the PNG; it is intended to be accurate
 and maintainable.
 
+For the complementary information architecture used by AI agents and LLMs to
+find historical runs, summaries, evidence spans, memory, and retrieval packs,
+see [Agent/LLM-Friendly Architecture](agent-llm-friendly-architecture.md).
+
 ## System View
 
 ```mermaid

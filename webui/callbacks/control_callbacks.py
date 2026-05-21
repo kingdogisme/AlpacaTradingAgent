@@ -589,7 +589,7 @@ def register_control_callbacks(app):
     )
     def update_trading_horizon_info(trading_horizon):
         """Show the selected holding-period profile."""
-        horizon = (trading_horizon or "swing").lower()
+        horizon = (trading_horizon or "position").lower()
         profile = {
             "swing": (
                 "Swing horizon",
@@ -814,7 +814,7 @@ def register_control_callbacks(app):
             )
 
         amount = dollar_amount if dollar_amount and dollar_amount > 0 else 1000
-        horizon = (trading_horizon or "swing").lower()
+        horizon = (trading_horizon or "position").lower()
 
         if horizon in {"position", "trend"} and not trend_execution_enabled:
             return _status_panel(
@@ -1057,9 +1057,9 @@ def register_control_callbacks(app):
         # Store trading configuration
         app_state.trade_enabled = trade_enabled
         app_state.trade_amount = trade_amount if trade_amount and trade_amount > 0 else 1000
-        horizon = (trading_horizon or "swing").lower()
+        horizon = (trading_horizon or "position").lower()
         if horizon not in {"swing", "position", "trend"}:
-            horizon = "swing"
+            horizon = "position"
 
         # Validate market hour configuration if enabled
         if market_hour_enabled:

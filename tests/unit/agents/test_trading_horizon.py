@@ -53,7 +53,7 @@ def _parabolic_ohlcv(days=320):
 
 class TradingHorizonTests(unittest.TestCase):
     def test_default_and_profiles_are_stable(self):
-        self.assertEqual(DEFAULT_CONFIG["trading_horizon"], "swing")
+        self.assertEqual(DEFAULT_CONFIG["trading_horizon"], "position")
         self.assertFalse(DEFAULT_CONFIG["trend_execution_enabled"])
 
         expected = {
@@ -69,10 +69,10 @@ class TradingHorizonTests(unittest.TestCase):
                 self.assertEqual(context["holding_period"], holding)
                 self.assertEqual(context["primary_timeframes"], timeframes)
 
-        self.assertEqual(get_horizon_context({})["horizon"], "swing")
+        self.assertEqual(get_horizon_context(DEFAULT_CONFIG)["horizon"], "position")
 
     def test_webui_storage_defaults_include_swing_horizon(self):
-        self.assertEqual(DEFAULT_SETTINGS["trading_horizon"], "swing")
+        self.assertEqual(DEFAULT_SETTINGS["trading_horizon"], "position")
         self.assertFalse(DEFAULT_SETTINGS["trend_execution_enabled"])
 
     def test_trend_brief_schema_validates_with_mocked_ohlcv(self):

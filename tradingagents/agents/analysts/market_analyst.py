@@ -8,6 +8,7 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_horizon_context,
 )
 from tradingagents.agents.utils.language import language_instruction
+from tradingagents.agents.utils.source_policy import is_point_in_time_mode, point_in_time_source_note
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -69,9 +70,11 @@ def create_market_analyst(llm, toolkit):
         horizon_context = get_horizon_context(toolkit.config)
         horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
         is_trend_horizon = horizon_context["horizon"] in ("position", "trend")
+        point_in_time_mode = is_point_in_time_mode(current_date, toolkit.config)
         sellthenews_options_available = (
             toolkit.has_sellthenews("sellthenews_options_enabled")
             and not is_crypto
+            and not point_in_time_mode
         )
 
         if toolkit.config["online_tools"] and alpaca_available:
@@ -118,6 +121,8 @@ def create_market_analyst(llm, toolkit):
         workflow_intro = (
             "1. **Use the currently available technical tools as your base evidence:**\n"
             + "\n".join(evidence_sources)
+            + "\n"
+            + point_in_time_source_note(current_date, toolkit.config)
             + "\n"
         )
         if technical_brief_available:

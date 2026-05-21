@@ -19,7 +19,10 @@ from .models import (
     MemoryItemRecordV1,
     MemoryPromotionRecordV1,
     MemoryRetrievalRecordV1,
+    QualityIndexRecordV1,
+    RetrievalPackRecordV1,
     RewardRecordV1,
+    RunIndexRecordV1,
     TraceSpanV1,
 )
 
@@ -143,6 +146,10 @@ def _flatten_json_lists(value: Any) -> list[Any]:
         else:
             result.append(item)
     return result
+
+
+def _token_estimate(value: Any) -> int:
+    return max(1, len(json.dumps(value or {}, ensure_ascii=False, default=str)) // 4)
 
 
 class EpisodeLedger:
@@ -321,6 +328,106 @@ class EpisodeLedger:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(run_id, critic_version),
                     FOREIGN KEY(run_id) REFERENCES episodes(run_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS run_index (
+                    index_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL UNIQUE,
+                    symbol TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    horizon TEXT,
+                    status TEXT NOT NULL,
+                    final_action TEXT,
+                    confidence TEXT,
+                    advisory_rating TEXT,
+                    final_signal TEXT,
+                    prompt_version TEXT,
+                    config_hash TEXT,
+                    model_provider TEXT,
+                    quick_model TEXT,
+                    deep_model TEXT,
+                    selected_analysts_json TEXT NOT NULL,
+                    quality_status TEXT NOT NULL,
+                    quality_pass INTEGER NOT NULL,
+                    quality_warn INTEGER NOT NULL,
+                    quality_fail INTEGER NOT NULL,
+                    quality_unknown INTEGER NOT NULL,
+                    critical_failures_json TEXT NOT NULL,
+                    stale_sources_json TEXT NOT NULL,
+                    fallback_sources_json TEXT NOT NULL,
+                    flags_json TEXT NOT NULL,
+                    audit_ref TEXT,
+                    audit_path TEXT,
+                    decision_ref TEXT,
+                    quality_index_ref TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_index_symbol_date ON run_index(symbol, trade_date);
+                CREATE INDEX IF NOT EXISTS idx_run_index_horizon ON run_index(horizon);
+                CREATE INDEX IF NOT EXISTS idx_run_index_prompt ON run_index(prompt_version);
+                CREATE INDEX IF NOT EXISTS idx_run_index_config ON run_index(config_hash);
+                CREATE INDEX IF NOT EXISTS idx_run_index_quality ON run_index(quality_status);
+
+                CREATE TABLE IF NOT EXISTS quality_index (
+                    run_id TEXT NOT NULL,
+                    artifact_ref TEXT NOT NULL,
+                    tool_name TEXT,
+                    agent_type TEXT,
+                    source_id TEXT NOT NULL,
+                    provider TEXT,
+                    dataset_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    freshness TEXT NOT NULL,
+                    accuracy TEXT NOT NULL,
+                    completeness TEXT NOT NULL,
+                    criticality TEXT,
+                    flags_json TEXT NOT NULL,
+                    observed_at TEXT,
+                    source_age_days INTEGER,
+                    fallback_from TEXT,
+                    timestamp TEXT,
+                    inputs_json TEXT NOT NULL,
+                    output_preview TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, artifact_ref),
+                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_quality_index_status ON quality_index(status);
+                CREATE INDEX IF NOT EXISTS idx_quality_index_source ON quality_index(source_id);
+                CREATE INDEX IF NOT EXISTS idx_quality_index_dataset ON quality_index(dataset_type);
+
+                CREATE TABLE IF NOT EXISTS retrieval_packs (
+                    pack_id TEXT PRIMARY KEY,
+                    pack_type TEXT NOT NULL,
+                    policy_version TEXT NOT NULL,
+                    run_id TEXT,
+                    symbol TEXT,
+                    horizon TEXT,
+                    token_budget INTEGER NOT NULL,
+                    source_refs_json TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_retrieval_packs_type ON retrieval_packs(pack_type);
+                CREATE INDEX IF NOT EXISTS idx_retrieval_packs_run ON retrieval_packs(run_id);
+                CREATE INDEX IF NOT EXISTS idx_retrieval_packs_symbol_horizon ON retrieval_packs(symbol, horizon);
+
+                CREATE TABLE IF NOT EXISTS retrieval_pack_items (
+                    pack_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    item_type TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    source_ref TEXT NOT NULL,
+                    token_estimate INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(pack_id, item_id),
+                    FOREIGN KEY(pack_id) REFERENCES retrieval_packs(pack_id)
                 );
                 """
             )
@@ -1010,6 +1117,280 @@ class EpisodeLedger:
             rows = conn.execute(query, params).fetchall()
         return [self._critic_from_row(row) for row in rows]
 
+    def upsert_quality_index(self, records: list[QualityIndexRecordV1]) -> None:
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            for record in records:
+                conn.execute(
+                    """
+                    INSERT INTO quality_index (
+                        run_id, artifact_ref, tool_name, agent_type, source_id,
+                        provider, dataset_type, status, freshness, accuracy,
+                        completeness, criticality, flags_json, observed_at,
+                        source_age_days, fallback_from, timestamp, inputs_json,
+                        output_preview, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id, artifact_ref) DO UPDATE SET
+                        tool_name=excluded.tool_name,
+                        agent_type=excluded.agent_type,
+                        source_id=excluded.source_id,
+                        provider=excluded.provider,
+                        dataset_type=excluded.dataset_type,
+                        status=excluded.status,
+                        freshness=excluded.freshness,
+                        accuracy=excluded.accuracy,
+                        completeness=excluded.completeness,
+                        criticality=excluded.criticality,
+                        flags_json=excluded.flags_json,
+                        observed_at=excluded.observed_at,
+                        source_age_days=excluded.source_age_days,
+                        fallback_from=excluded.fallback_from,
+                        timestamp=excluded.timestamp,
+                        inputs_json=excluded.inputs_json,
+                        output_preview=excluded.output_preview,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        record.run_id,
+                        record.artifact_ref,
+                        record.tool_name,
+                        record.agent_type,
+                        record.source_id,
+                        record.provider,
+                        record.dataset_type,
+                        record.status,
+                        record.freshness,
+                        record.accuracy,
+                        record.completeness,
+                        record.criticality,
+                        _json_dump(record.flags),
+                        record.observed_at,
+                        record.source_age_days,
+                        record.fallback_from,
+                        record.timestamp,
+                        _json_dump(record.inputs),
+                        record.output_preview,
+                        now,
+                        now,
+                    ),
+                )
+
+    def list_quality_index(
+        self,
+        run_id: str,
+        *,
+        statuses: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["run_id=?"]
+        params: list[Any] = [run_id]
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+        query = f"""
+            SELECT * FROM quality_index
+            WHERE {' AND '.join(clauses)}
+            ORDER BY timestamp, artifact_ref
+        """
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._quality_index_from_row(row) for row in rows]
+
+    def upsert_run_index(self, record: RunIndexRecordV1) -> None:
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO run_index (
+                    index_id, run_id, symbol, trade_date, horizon, status,
+                    final_action, confidence, advisory_rating, final_signal,
+                    prompt_version, config_hash, model_provider, quick_model,
+                    deep_model, selected_analysts_json, quality_status,
+                    quality_pass, quality_warn, quality_fail, quality_unknown,
+                    critical_failures_json, stale_sources_json,
+                    fallback_sources_json, flags_json, audit_ref, audit_path,
+                    decision_ref, quality_index_ref, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    index_id=excluded.index_id,
+                    symbol=excluded.symbol,
+                    trade_date=excluded.trade_date,
+                    horizon=excluded.horizon,
+                    status=excluded.status,
+                    final_action=excluded.final_action,
+                    confidence=excluded.confidence,
+                    advisory_rating=excluded.advisory_rating,
+                    final_signal=excluded.final_signal,
+                    prompt_version=excluded.prompt_version,
+                    config_hash=excluded.config_hash,
+                    model_provider=excluded.model_provider,
+                    quick_model=excluded.quick_model,
+                    deep_model=excluded.deep_model,
+                    selected_analysts_json=excluded.selected_analysts_json,
+                    quality_status=excluded.quality_status,
+                    quality_pass=excluded.quality_pass,
+                    quality_warn=excluded.quality_warn,
+                    quality_fail=excluded.quality_fail,
+                    quality_unknown=excluded.quality_unknown,
+                    critical_failures_json=excluded.critical_failures_json,
+                    stale_sources_json=excluded.stale_sources_json,
+                    fallback_sources_json=excluded.fallback_sources_json,
+                    flags_json=excluded.flags_json,
+                    audit_ref=excluded.audit_ref,
+                    audit_path=excluded.audit_path,
+                    decision_ref=excluded.decision_ref,
+                    quality_index_ref=excluded.quality_index_ref,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    record.index_id,
+                    record.run_id,
+                    record.symbol,
+                    record.trade_date,
+                    record.horizon,
+                    record.status,
+                    record.final_action,
+                    record.confidence,
+                    record.advisory_rating,
+                    record.final_signal,
+                    record.prompt_version,
+                    record.config_hash,
+                    record.model_provider,
+                    record.quick_model,
+                    record.deep_model,
+                    _json_dump(record.selected_analysts),
+                    record.quality_status,
+                    record.quality_pass,
+                    record.quality_warn,
+                    record.quality_fail,
+                    record.quality_unknown,
+                    _json_dump(record.critical_failures),
+                    _json_dump(record.stale_sources),
+                    _json_dump(record.fallback_sources),
+                    _json_dump(record.flags),
+                    record.audit_ref,
+                    record.audit_path,
+                    record.decision_ref,
+                    record.quality_index_ref,
+                    now,
+                    now,
+                ),
+            )
+
+    def list_run_index(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        filters = filters or {}
+        clauses: list[str] = []
+        params: list[Any] = []
+        for key in ("run_id", "symbol", "status", "horizon", "prompt_version", "config_hash"):
+            if filters.get(key):
+                clauses.append(f"{key} = ?")
+                params.append(filters[key])
+        if filters.get("experiment_id"):
+            clauses.append(
+                "run_id IN (SELECT run_id FROM experiments WHERE experiment_id = ?)"
+            )
+            params.append(filters["experiment_id"])
+        if filters.get("since"):
+            clauses.append("trade_date >= ?")
+            params.append(filters["since"])
+        if filters.get("until"):
+            clauses.append("trade_date <= ?")
+            params.append(filters["until"])
+        if not filters.get("include_high_leakage"):
+            clauses.append(
+                "run_id NOT IN (SELECT run_id FROM experiments WHERE leakage_risk = 'high')"
+            )
+        query = "SELECT * FROM run_index"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY trade_date DESC, updated_at DESC"
+        if filters.get("limit"):
+            query += " LIMIT ?"
+            params.append(int(filters["limit"]))
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._run_index_from_row(row) for row in rows]
+
+    def upsert_retrieval_pack(self, record: RetrievalPackRecordV1) -> None:
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO retrieval_packs (
+                    pack_id, pack_type, policy_version, run_id, symbol, horizon,
+                    token_budget, source_refs_json, summary_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pack_id) DO UPDATE SET
+                    pack_type=excluded.pack_type,
+                    policy_version=excluded.policy_version,
+                    run_id=excluded.run_id,
+                    symbol=excluded.symbol,
+                    horizon=excluded.horizon,
+                    token_budget=excluded.token_budget,
+                    source_refs_json=excluded.source_refs_json,
+                    summary_json=excluded.summary_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    record.pack_id,
+                    record.pack_type,
+                    record.policy_version,
+                    record.run_id,
+                    record.symbol,
+                    record.horizon,
+                    record.token_budget,
+                    _json_dump(record.source_refs),
+                    _json_dump(record.summary),
+                    now,
+                    now,
+                ),
+            )
+            conn.execute("DELETE FROM retrieval_pack_items WHERE pack_id=?", (record.pack_id,))
+            for item in record.items:
+                conn.execute(
+                    """
+                    INSERT INTO retrieval_pack_items (
+                        pack_id, item_id, item_type, rank, reason, source_ref,
+                        token_estimate, payload_json, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.pack_id,
+                        str(item.get("item_id")),
+                        str(item.get("item_type") or item.get("kind") or "unknown"),
+                        int(item.get("rank") or 0),
+                        str(item.get("reason") or ""),
+                        str(item.get("source_ref") or ""),
+                        int(item.get("token_estimate") or _token_estimate(item.get("payload"))),
+                        _json_dump(item.get("payload") or {}),
+                        now,
+                    ),
+                )
+
+    def load_retrieval_pack(self, pack_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            pack = conn.execute(
+                "SELECT * FROM retrieval_packs WHERE pack_id=?",
+                (pack_id,),
+            ).fetchone()
+            if pack is None:
+                return None
+            items = conn.execute(
+                """
+                SELECT * FROM retrieval_pack_items
+                WHERE pack_id=?
+                ORDER BY rank, item_id
+                """,
+                (pack_id,),
+            ).fetchall()
+        payload = self._retrieval_pack_from_row(pack)
+        payload["items"] = [self._retrieval_pack_item_from_row(row) for row in items]
+        return payload
+
     def resolved_reward_episodes_without_critic(self, critic_version: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -1235,4 +1616,37 @@ class EpisodeLedger:
             item.pop("improvement_candidates_json", None),
             [],
         )
+        return item
+
+    def _quality_index_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["flags"] = _json_load(item.pop("flags_json", None), [])
+        item["inputs"] = _json_load(item.pop("inputs_json", None), {})
+        item.pop("created_at", None)
+        item.pop("updated_at", None)
+        return item
+
+    def _run_index_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["selected_analysts"] = _json_load(item.pop("selected_analysts_json", None), [])
+        item["critical_failures"] = _json_load(item.pop("critical_failures_json", None), [])
+        item["stale_sources"] = _json_load(item.pop("stale_sources_json", None), [])
+        item["fallback_sources"] = _json_load(item.pop("fallback_sources_json", None), [])
+        item["flags"] = _json_load(item.pop("flags_json", None), [])
+        item.pop("created_at", None)
+        item.pop("updated_at", None)
+        return item
+
+    def _retrieval_pack_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["source_refs"] = _json_load(item.pop("source_refs_json", None), [])
+        item["summary"] = _json_load(item.pop("summary_json", None), {})
+        item.pop("created_at", None)
+        item.pop("updated_at", None)
+        return item
+
+    def _retrieval_pack_item_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["payload"] = _json_load(item.pop("payload_json", None), {})
+        item.pop("created_at", None)
         return item

@@ -137,6 +137,11 @@ def format_tool_outputs_content(tool_calls_log, report_type=None):
         status = tool_call.get('status', 'unknown')
         agent_type = tool_call.get('agent_type', 'Unknown Agent')
         symbol = tool_call.get('symbol', 'Unknown Symbol')
+        data_quality = (tool_call.get("quality_details") or {}).get("data_quality") or {}
+        quality_status = data_quality.get("status", "unknown")
+        quality_source = data_quality.get("source_id", "unknown")
+        quality_flags = ", ".join(data_quality.get("flags") or []) or "none"
+        quality_observed = data_quality.get("observed_at") or "unknown"
         
         # Status icon and color
         if status == "success":
@@ -164,6 +169,9 @@ def format_tool_outputs_content(tool_calls_log, report_type=None):
 **⏰ Timestamp:** {timestamp}  
 **⚡ Execution Time:** {execution_time}  
 **📊 Status:** {status_color} {status.title()}  
+**🧪 Data Quality:** {quality_status} ({quality_source})
+**🕒 Observed At:** {quality_observed}
+**🚩 Quality Flags:** {quality_flags}
 
 **📥 Inputs:**
 ```json
@@ -203,4 +211,4 @@ def format_tool_outputs_content(tool_calls_log, report_type=None):
 
 """
     
-    return summary + "\n".join(content_parts) 
+    return summary + "\n".join(content_parts)

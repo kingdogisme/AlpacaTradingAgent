@@ -424,6 +424,7 @@ class TradingAgentsGraph:
             metadata={"debug": self.debug},
         )
         run_id = run_logger.get_active_run_id(symbol=company_name)
+        self.last_run_id = run_id
         self._ledger_start_episode(
             run_id,
             company_name,

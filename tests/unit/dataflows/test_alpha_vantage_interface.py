@@ -56,6 +56,7 @@ def test_alpha_vantage_fundamentals_success(monkeypatch):
     assert "## Alpha Vantage Company Overview" in result
     assert "## Alpha Vantage Earnings" in result
     assert "## Alpha Vantage Insider Transactions" in result
+    assert "freshness-unverified enrichment" in result
     assert [call[0] for call in client.calls] == [
         "COMPANY_OVERVIEW",
         "EARNINGS",

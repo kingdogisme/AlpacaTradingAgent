@@ -84,6 +84,7 @@ class FakeToolkit:
         simfin=True,
         fred=True,
         alpha_vantage=True,
+        sec_edgar=True,
     ):
         self.config = {
             "online_tools": True,
@@ -92,6 +93,9 @@ class FakeToolkit:
             "max_same_tool_call_repeats": 1,
             "social_openai_stock_news_enabled": True,
             "sellthenews_options_enabled": False,
+            "openai_sources_policy": "fallback",
+            "skip_openai_when_non_openai_sufficient": True,
+            "point_in_time_source_policy": "live",
             **(config or {}),
         }
         self._alpaca = alpaca
@@ -101,6 +105,7 @@ class FakeToolkit:
         self._simfin = simfin
         self._fred = fred
         self._alpha_vantage = alpha_vantage
+        self._sec_edgar = sec_edgar
         for name in (
             "get_technical_brief",
             "get_trend_brief",
@@ -118,6 +123,7 @@ class FakeToolkit:
             "get_reddit_news",
             "get_sellthenews_social_sentiment",
             "get_fundamentals_openai",
+            "get_sec_edgar_fundamentals",
             "get_alpha_vantage_fundamentals",
             "get_defillama_fundamentals",
             "get_finnhub_company_fundamentals",
@@ -149,6 +155,13 @@ class FakeToolkit:
             and bool(self.config.get("alpha_vantage_mcp_enabled", True))
             and bool(self.config.get("alpha_vantage_fundamentals_enabled", True))
             and self._alpha_vantage
+        )
+
+    def has_sec_edgar(self):
+        return (
+            bool(self.config.get("online_tools", True))
+            and bool(self.config.get("sec_edgar_enabled", True))
+            and self._sec_edgar
         )
 
     def has_coindesk(self):
@@ -206,6 +219,23 @@ def test_market_analyst_does_not_bind_options_tool_for_crypto():
     assert "get_sellthenews_options_data" not in llm.bound_tool_names[-1]
 
 
+def test_market_analyst_disables_live_options_in_point_in_time_mode():
+    llm = CapturingLLM()
+    node = create_market_analyst(
+        llm,
+        FakeToolkit(
+            config={
+                "sellthenews_options_enabled": True,
+                "point_in_time_source_policy": "auto",
+            }
+        ),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert "get_sellthenews_options_data" not in llm.bound_tool_names[-1]
+
+
 def test_market_analyst_uses_offline_stockstats_without_alpaca_credentials():
     llm = CapturingLLM()
     node = create_market_analyst(llm, FakeToolkit(alpaca=False))
@@ -259,6 +289,27 @@ def test_news_analyst_routes_crypto_to_coindesk_and_stock_to_finnhub():
     assert "get_finnhub_news_recent" not in crypto_llm.bound_tool_names[-1]
 
 
+def test_news_analyst_disables_live_sources_in_point_in_time_mode():
+    llm = CapturingLLM()
+    node = create_news_analyst(
+        llm,
+        FakeToolkit(
+            config={
+                "news_global_openai_enabled": True,
+                "point_in_time_source_policy": "auto",
+            }
+        ),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert "get_sellthenews_stock_news" not in llm.bound_tool_names[-1]
+    assert "get_global_news_openai" not in llm.bound_tool_names[-1]
+    assert "get_google_news" in llm.bound_tool_names[-1]
+    assert "get_finnhub_news_recent" in llm.bound_tool_names[-1]
+    assert any("Point-in-time mode is active" in str(prompt) for prompt in llm.prompts)
+
+
 def test_social_media_analyst_writes_sentiment_report_and_appends_final_proposal():
     llm = CapturingLLM(["Social analysis body.", "FINAL TRANSACTION PROPOSAL: **BUY**"])
     node = create_social_media_analyst(
@@ -272,7 +323,9 @@ def test_social_media_analyst_writes_sentiment_report_and_appends_final_proposal
     assert "FINAL TRANSACTION PROPOSAL: **BUY**" in result["sentiment_report"]
     assert llm.bound_tool_names[-1][0] == "get_sellthenews_social_sentiment"
     assert "get_reddit_stock_info" in llm.bound_tool_names[-1]
-    assert llm.bound_tool_names[-1][-1] == "get_stock_news_openai"
+    assert "get_stock_news_openai" not in llm.bound_tool_names[-1]
+    assert any("SellTheNews WSB sentiment + WSB DD" in str(prompt) for prompt in llm.prompts)
+    assert any("DD as a thesis source rather than a fact source" in str(prompt) for prompt in llm.prompts)
 
 
 def test_social_media_analyst_can_disable_openai_stock_news_explicitly():
@@ -292,6 +345,42 @@ def test_social_media_analyst_can_disable_openai_stock_news_explicitly():
     assert llm.bound_tool_names[-1][0] == "get_sellthenews_social_sentiment"
     assert "get_stock_news_openai" not in llm.bound_tool_names[-1]
     assert "get_reddit_stock_info" in llm.bound_tool_names[-1]
+
+
+def test_social_media_analyst_fallback_binds_openai_when_mcp_missing():
+    llm = CapturingLLM(["Social analysis body.", "FINAL TRANSACTION PROPOSAL: **BUY**"])
+    node = create_social_media_analyst(
+        llm,
+        FakeToolkit(
+            config={
+                "grounded_social_evidence_enabled": False,
+                "sellthenews_enabled": False,
+            }
+        ),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert llm.bound_tool_names[-1] == ["get_reddit_stock_info", "get_stock_news_openai"]
+
+
+def test_social_media_analyst_disables_live_sources_in_point_in_time_mode():
+    llm = CapturingLLM(["Social analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    node = create_social_media_analyst(
+        llm,
+        FakeToolkit(
+            config={
+                "grounded_social_evidence_enabled": False,
+                "point_in_time_source_policy": "auto",
+            }
+        ),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert "get_sellthenews_social_sentiment" not in llm.bound_tool_names[-1]
+    assert "get_stock_news_openai" not in llm.bound_tool_names[-1]
+    assert llm.bound_tool_names[-1] == ["get_reddit_stock_info"]
 
 
 def test_social_media_analyst_injects_grounded_evidence_without_losing_horizon(monkeypatch):
@@ -345,7 +434,7 @@ def test_fundamentals_analyst_includes_finnhub_company_fundamentals_for_stocks()
     llm = CapturingLLM()
     node = create_fundamentals_analyst(
         llm,
-        FakeToolkit(alpha_vantage=False, openai=False, simfin=False, finnhub=True),
+        FakeToolkit(alpha_vantage=False, openai=False, simfin=False, finnhub=True, sec_edgar=False),
     )
 
     node({"trade_date": "2026-01-02", "company_of_interest": "LI", "messages": []})
@@ -357,15 +446,101 @@ def test_fundamentals_analyst_includes_finnhub_company_fundamentals_for_stocks()
     ]
 
 
-def test_fundamentals_analyst_prefers_alpha_vantage_for_stocks():
+def test_fundamentals_analyst_prefers_sec_then_alpha_vantage_for_stocks():
     llm = CapturingLLM(["Fundamentals analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
     node = create_fundamentals_analyst(llm, FakeToolkit())
 
     node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
 
-    assert llm.bound_tool_names[-1][0] == "get_alpha_vantage_fundamentals"
-    assert "get_fundamentals_openai" in llm.bound_tool_names[-1]
+    assert llm.bound_tool_names[-1][0] == "get_sec_edgar_fundamentals"
+    assert llm.bound_tool_names[-1][1] == "get_alpha_vantage_fundamentals"
+    assert "get_fundamentals_openai" not in llm.bound_tool_names[-1]
     assert "get_finnhub_company_insider_transactions" in llm.bound_tool_names[-1]
+
+
+def test_fundamentals_analyst_eager_policy_binds_openai_backstop():
+    llm = CapturingLLM(["Fundamentals analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    node = create_fundamentals_analyst(
+        llm,
+        FakeToolkit(config={"openai_sources_policy": "eager"}),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert "get_fundamentals_openai" in llm.bound_tool_names[-1]
+
+
+def test_fundamentals_analyst_fallback_policy_binds_openai_when_fast_sources_missing():
+    llm = CapturingLLM(["Fundamentals analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    node = create_fundamentals_analyst(
+        llm,
+        FakeToolkit(sec_edgar=False, alpha_vantage=False, finnhub=False, simfin=False, openai=True),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert llm.bound_tool_names[-1] == ["get_fundamentals_openai"]
+
+
+def test_fundamentals_analyst_disabled_policy_never_binds_openai():
+    llm = CapturingLLM(["Fundamentals analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    node = create_fundamentals_analyst(
+        llm,
+        FakeToolkit(
+            config={"openai_sources_policy": "disabled"},
+            sec_edgar=True,
+            alpha_vantage=False,
+            finnhub=False,
+            simfin=False,
+            openai=True,
+        ),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert "get_fundamentals_openai" not in llm.bound_tool_names[-1]
+
+
+def test_fundamentals_analyst_can_disable_sec_edgar():
+    llm = CapturingLLM()
+    node = create_fundamentals_analyst(
+        llm,
+        FakeToolkit(config={"sec_edgar_enabled": False}),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert "get_sec_edgar_fundamentals" not in llm.bound_tool_names[-1]
+    assert llm.bound_tool_names[-1][0] == "get_alpha_vantage_fundamentals"
+
+
+def test_fundamentals_analyst_disables_live_sources_in_point_in_time_mode():
+    llm = CapturingLLM(["Fundamentals analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    node = create_fundamentals_analyst(
+        llm,
+        FakeToolkit(config={"point_in_time_source_policy": "auto"}),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    bound = llm.bound_tool_names[-1]
+    assert "get_sec_edgar_fundamentals" in bound
+    assert "get_alpha_vantage_fundamentals" not in bound
+    assert "get_finnhub_company_fundamentals" not in bound
+    assert "get_fundamentals_openai" not in bound
+    assert "get_finnhub_company_insider_sentiment" in bound
+    assert any("Point-in-time mode is active" in str(prompt) for prompt in llm.prompts)
+
+
+def test_fundamentals_analyst_sec_guidance_marks_official_facts():
+    llm = CapturingLLM()
+    node = create_fundamentals_analyst(llm, FakeToolkit(openai=False, alpha_vantage=False, finnhub=False, simfin=False))
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    prompt_text = str(llm.prompts[-1])
+    assert "SEC EDGAR" in prompt_text
+    assert "official filing facts source" in prompt_text
 
 
 def test_macro_analyst_writes_report_and_appends_final_proposal():
@@ -381,8 +556,129 @@ def test_macro_analyst_writes_report_and_appends_final_proposal():
         "get_macro_analysis",
         "get_economic_indicators",
         "get_yield_curve_analysis",
-        "get_macro_news_openai",
     ]
+
+
+def test_macro_analyst_disables_live_sources_in_point_in_time_mode():
+    llm = CapturingLLM(["Macro analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    node = create_macro_analyst(
+        llm,
+        FakeToolkit(config={"point_in_time_source_policy": "auto"}),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert "get_sellthenews_macro_news" not in llm.bound_tool_names[-1]
+    assert "get_macro_news_openai" not in llm.bound_tool_names[-1]
+    assert llm.bound_tool_names[-1] == [
+        "get_macro_analysis",
+        "get_economic_indicators",
+        "get_yield_curve_analysis",
+    ]
+
+
+def test_macro_analyst_prompt_uses_company_identity(monkeypatch):
+    monkeypatch.setattr(
+        "tradingagents.agents.analysts.macro_analyst._format_company_context",
+        lambda ticker: "FIG: Figma, Inc.; industry=Software",
+    )
+    llm = CapturingLLM()
+    node = create_macro_analyst(llm, FakeToolkit(config={"openai_sources_policy": "eager"}))
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "FIG", "messages": []})
+    rendered_prompt = llm.prompts[0].messages[0].content
+
+    assert "Asset context is FIG: Figma, Inc.; industry=Software." in rendered_prompt
+    assert "Do not infer sector or industry from ticker letters alone" in rendered_prompt
+    assert "ticker_context='FIG: Figma, Inc.; industry=Software'" in rendered_prompt
+
+
+def test_macro_analyst_fallback_binds_openai_when_fast_sources_missing():
+    llm = CapturingLLM(["Macro analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    node = create_macro_analyst(
+        llm,
+        FakeToolkit(config={"sellthenews_enabled": False}, fred=False),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert llm.bound_tool_names[-1] == ["get_macro_news_openai"]
+
+
+def test_news_analyst_fallback_binds_openai_when_fast_sources_missing():
+    llm = CapturingLLM()
+    node = create_news_analyst(
+        llm,
+        FakeToolkit(config={"sellthenews_enabled": False}, finnhub=False, coindesk=False),
+    )
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    assert "get_global_news_openai" in llm.bound_tool_names[-1]
+
+
+def test_news_social_macro_eager_policy_binds_openai_sources():
+    news_llm = CapturingLLM()
+    social_llm = CapturingLLM(["Social analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    macro_llm = CapturingLLM(["Macro analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    toolkit = FakeToolkit(
+        config={
+            "openai_sources_policy": "eager",
+            "news_global_openai_enabled": True,
+            "grounded_social_evidence_enabled": False,
+        }
+    )
+
+    create_news_analyst(news_llm, toolkit)(
+        {"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []}
+    )
+    create_social_media_analyst(social_llm, toolkit)(
+        {"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []}
+    )
+    create_macro_analyst(macro_llm, toolkit)(
+        {"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []}
+    )
+
+    assert "get_global_news_openai" in news_llm.bound_tool_names[-1]
+    assert "get_stock_news_openai" in social_llm.bound_tool_names[-1]
+    assert "get_macro_news_openai" in macro_llm.bound_tool_names[-1]
+
+
+def test_news_social_macro_disabled_policy_never_binds_openai_sources():
+    news_llm = CapturingLLM()
+    social_llm = CapturingLLM(["Social analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    macro_llm = CapturingLLM(["Macro analysis body.", "FINAL TRANSACTION PROPOSAL: **HOLD**"])
+    toolkit = FakeToolkit(
+        config={
+            "openai_sources_policy": "disabled",
+            "news_global_openai_enabled": True,
+            "grounded_social_evidence_enabled": False,
+        }
+    )
+
+    create_news_analyst(news_llm, toolkit)(
+        {"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []}
+    )
+    create_social_media_analyst(social_llm, toolkit)(
+        {"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []}
+    )
+    create_macro_analyst(macro_llm, toolkit)(
+        {"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []}
+    )
+
+    assert "get_global_news_openai" not in news_llm.bound_tool_names[-1]
+    assert "get_stock_news_openai" not in social_llm.bound_tool_names[-1]
+    assert "get_macro_news_openai" not in macro_llm.bound_tool_names[-1]
+
+
+def test_openai_source_skip_is_logged_for_fallback_with_fast_sources(capsys):
+    llm = CapturingLLM()
+    node = create_macro_analyst(llm, FakeToolkit())
+
+    node({"trade_date": "2026-01-02", "company_of_interest": "AAPL", "messages": []})
+
+    captured = capsys.readouterr()
+    assert "openai_source_skipped role=macro reason=non_openai_sources_available policy=fallback" in captured.out
 
 
 def test_sellthenews_tools_are_disabled_when_offline():

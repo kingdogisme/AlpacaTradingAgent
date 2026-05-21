@@ -7,6 +7,13 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_horizon_context,
 )
 from tradingagents.agents.utils.language import language_instruction
+from tradingagents.agents.utils.source_policy import (
+    is_point_in_time_mode,
+    log_openai_source_skip,
+    openai_source_decision_reason,
+    point_in_time_source_note,
+    should_bind_openai_source,
+)
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -48,53 +55,99 @@ def create_fundamentals_analyst(llm, toolkit):
                     display_ticker = ticker.upper().replace("USD", "")
 
             openai_available = toolkit.has_openai_web_search()
+            sec_edgar_available = getattr(toolkit, "has_sec_edgar", lambda: False)()
             alpha_vantage_available = toolkit.has_alpha_vantage()
             finnhub_available = toolkit.has_finnhub()
             simfin_available = toolkit.has_simfin_data()
-
-            if toolkit.config["online_tools"] and openai_available:
-                base_openai_tools = [toolkit.get_fundamentals_openai]
-            else:
-                base_openai_tools = []
+            point_in_time_mode = is_point_in_time_mode(current_date, toolkit.config)
 
             if is_crypto:
-                tools = [toolkit.get_defillama_fundamentals] + base_openai_tools
-                active_sources = ["DeFiLlama"] + (["OpenAI web search"] if base_openai_tools else [])
+                non_openai_tools = [] if point_in_time_mode else [toolkit.get_defillama_fundamentals]
+                openai_bind_available = bool(toolkit.config["online_tools"] and openai_available and not point_in_time_mode)
+                bind_openai = should_bind_openai_source(
+                    toolkit.config,
+                    source_type="fundamentals",
+                    openai_available=openai_bind_available,
+                    non_openai_available=bool(non_openai_tools),
+                )
+                if not bind_openai:
+                    log_openai_source_skip(
+                        "fundamentals",
+                        toolkit.config,
+                        openai_available=bool(toolkit.config["online_tools"] and openai_available),
+                        non_openai_available=bool(non_openai_tools),
+                        point_in_time_mode=point_in_time_mode,
+                    )
+                tools = non_openai_tools + ([toolkit.get_fundamentals_openai] if bind_openai else [])
+                active_sources = (["DeFiLlama"] if non_openai_tools else []) + (["OpenAI web search fallback"] if bind_openai else [])
             else:
-                tools = []
-                if alpha_vantage_available:
-                    tools.append(toolkit.get_alpha_vantage_fundamentals)
-                tools.extend(base_openai_tools)
+                non_openai_tools = []
+                if sec_edgar_available:
+                    non_openai_tools.append(toolkit.get_sec_edgar_fundamentals)
+                if alpha_vantage_available and not point_in_time_mode:
+                    non_openai_tools.append(toolkit.get_alpha_vantage_fundamentals)
                 if finnhub_available:
-                    tools.extend(
+                    if not point_in_time_mode:
+                        non_openai_tools.append(toolkit.get_finnhub_company_fundamentals)
+                    non_openai_tools.extend(
                         [
-                            toolkit.get_finnhub_company_fundamentals,
                             toolkit.get_finnhub_company_insider_sentiment,
                             toolkit.get_finnhub_company_insider_transactions,
                         ]
                     )
                 if simfin_available:
-                    tools.extend(
+                    non_openai_tools.extend(
                         [
                             toolkit.get_simfin_balance_sheet,
                             toolkit.get_simfin_cashflow,
                             toolkit.get_simfin_income_stmt,
                         ]
                     )
+                openai_bind_available = bool(toolkit.config["online_tools"] and openai_available and not point_in_time_mode)
+                bind_openai = should_bind_openai_source(
+                    toolkit.config,
+                    source_type="fundamentals",
+                    openai_available=openai_bind_available,
+                    non_openai_available=bool(non_openai_tools),
+                )
+                if not bind_openai:
+                    log_openai_source_skip(
+                        "fundamentals",
+                        toolkit.config,
+                        openai_available=bool(toolkit.config["online_tools"] and openai_available),
+                        non_openai_available=bool(non_openai_tools),
+                        point_in_time_mode=point_in_time_mode,
+                    )
+                tools = non_openai_tools + ([toolkit.get_fundamentals_openai] if bind_openai else [])
                 active_sources = []
-                if alpha_vantage_available:
+                if sec_edgar_available:
+                    active_sources.append("SEC EDGAR official filings")
+                if alpha_vantage_available and not point_in_time_mode:
                     active_sources.append("Alpha Vantage MCP")
-                if base_openai_tools:
-                    active_sources.append("OpenAI web search")
                 if finnhub_available:
-                    active_sources.append("Finnhub")
+                    active_sources.append("Finnhub insider date-window data" if point_in_time_mode else "Finnhub")
                 if simfin_available:
                     active_sources.append("SimFin")
+                if bind_openai:
+                    active_sources.append("OpenAI web search fallback")
 
             source_guidance = (
                 " Use all available fundamentals tools before concluding. "
                 + (f"Active sources now: {', '.join(active_sources)}." if active_sources else "No external fundamentals source is available; reason from existing context only.")
             )
+            source_guidance += " " + point_in_time_source_note(current_date, toolkit.config)
+            source_guidance += " " + openai_source_decision_reason(
+                toolkit.config,
+                source_type="fundamentals",
+                openai_available=bool(toolkit.config["online_tools"] and openai_available and not point_in_time_mode),
+                non_openai_available=any(tool.name != "get_fundamentals_openai" for tool in tools),
+            )
+            if sec_edgar_available:
+                source_guidance += (
+                    " Treat SEC EDGAR as the official filing facts source for historical financials; "
+                    "use Alpha Vantage/Finnhub for estimates, ratings, peers, and convenience fields, but do not override SEC filing facts with secondary-source values."
+                    " In point-in-time mode, SEC output is filtered to filings/facts available on or before the analysis date."
+                )
             if is_crypto and horizon_context["horizon"] == "position":
                 source_guidance += " For DeFiLlama, use lookback_days=90 when calling the tool."
             elif is_crypto and horizon_context["horizon"] == "trend":

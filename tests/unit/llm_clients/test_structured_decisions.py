@@ -81,7 +81,7 @@ class StructuredDecisionTests(unittest.TestCase):
             ResearchPlan(
                 recommendation=ExecutableAction.BUY,
                 confidence="medium",
-                advisory_rating=AdvisoryRating.OVERWEIGHT,
+                advisory_rating=AdvisoryRating.STRONG_BUY,
                 rationale="Evidence supports upside.",
                 strategic_actions="Enter on confirmation.",
             )
@@ -99,6 +99,8 @@ class StructuredDecisionTests(unittest.TestCase):
                 confidence="low",
                 risk_rationale="Downside exceeds reward.",
                 required_controls="Do not re-enter without reversal.",
+                user_recommendation="Exit the current long and keep it off the buy list.",
+                alpaca_action_plan="SELL: close the existing long position.",
                 time_horizon="3-6 months",
                 thesis="Quarterly trend is broken.",
                 invalidation="Reclaim weekly trend support.",
@@ -108,9 +110,11 @@ class StructuredDecisionTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("**Advisory Rating**: Overweight", research)
+        self.assertIn("**Advisory Rating**: STRONG BUY", research)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **BUY**", research)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **LONG**", trader)
+        self.assertIn("**User Recommendation**: Exit the current long and keep it off the buy list.", risk)
+        self.assertIn("**Alpaca Execution Action**: SELL: close the existing long position.", risk)
         self.assertIn("**Invalidation**: Reclaim weekly trend support.", risk)
         self.assertIn("**Review Cadence**: Quarterly", risk)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **SELL**", risk)
@@ -142,6 +146,8 @@ class StructuredDecisionTests(unittest.TestCase):
                 confidence="medium",
                 risk_rationale="无现仓，等待确认更优。",
                 required_controls="突破确认后再分批。",
+                user_recommendation="观察名单，等待突破确认。",
+                alpaca_action_plan="HOLD：当前不发送订单。",
             ),
             "zh-CN",
         )
@@ -151,9 +157,26 @@ class StructuredDecisionTests(unittest.TestCase):
         self.assertIn("**时间周期**: 3-6个月", research)
         self.assertIn("**操作**: HOLD", trader)
         self.assertIn("**判断依据**: 趋势未坏，但入场赔率不足。", trader)
+        self.assertIn("**给用户的操作建议**: 观察名单，等待突破确认。", risk)
+        self.assertIn("**给 Alpaca 的直接动作**: HOLD：当前不发送订单。", risk)
         self.assertIn("**风险理由**: 无现仓，等待确认更优。", risk)
         self.assertIn("**必要风控**: 突破确认后再分批。", risk)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **HOLD**", risk)
+
+    def test_structured_advisory_strong_sell_remains_metadata_only(self):
+        research = render_research_plan(
+            ResearchPlan(
+                recommendation=ExecutableAction.HOLD,
+                confidence="low",
+                advisory_rating=AdvisoryRating.STRONG_SELL,
+                rationale="Downside risk is elevated, but shorts are disabled.",
+                strategic_actions="Stay in cash unless the thesis repairs.",
+            )
+        )
+
+        self.assertIn("**Advisory Rating**: STRONG SELL", research)
+        self.assertIn("FINAL TRANSACTION PROPOSAL: **HOLD**", research)
+        self.assertEqual(extract_recommendation(research, "investment"), "HOLD")
 
     def test_structured_failure_falls_back_to_plain_text(self):
         content = invoke_structured_or_freetext(

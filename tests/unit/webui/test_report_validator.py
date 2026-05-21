@@ -6,6 +6,7 @@ from webui.utils.report_validator import (
     validate_reports_for_ui,
 )
 from webui.callbacks.report_callbacks import normalize_decision_markdown_sections
+from webui.callbacks.report_callbacks import prepare_report_markdown, render_report_markdown
 
 
 def test_report_completion_rejects_short_table_before_minimum_length():
@@ -58,3 +59,44 @@ def test_decision_markdown_normalization_splits_inline_fields():
     assert "### Confidence\nmedium" in normalized
     assert "### Risk Rationale\nVolatility is elevated." in normalized
     assert "### Final Transaction Proposal\n\n**HOLD**" in normalized
+
+
+def test_final_decision_markdown_normalization_supports_user_and_alpaca_sections():
+    content = (
+        "**操作**: BUY **信心**: medium "
+        "**给用户的操作建议**: starter buy，等待回踩加仓。 "
+        "**给 Alpaca 的直接动作**: BUY open starter 8% NAV。 "
+        "FINAL TRANSACTION PROPOSAL: **BUY**"
+    )
+
+    normalized = prepare_report_markdown(content, "final_trade_decision")
+
+    assert "### 操作\nBUY" in normalized
+    assert "### 给用户的操作建议\nstarter buy，等待回踩加仓。" in normalized
+    assert "### 给 Alpaca 的直接动作\nBUY open starter 8% NAV。" in normalized
+    assert "### Final Transaction Proposal\n**BUY**" in normalized
+
+
+def test_render_report_markdown_uses_dash_markdown_component():
+    component = render_report_markdown(
+        "**User Recommendation**: Starter buy.\nFINAL TRANSACTION PROPOSAL: **BUY**",
+        report_type="final_trade_decision",
+    )
+
+    assert component.__class__.__name__ == "Markdown"
+    assert component.dangerously_allow_html is False
+    assert "### User Recommendation\nStarter buy." in component.children
+
+
+def test_report_markdown_preserves_table_and_final_transaction_proposal():
+    content = (
+        "Summary Table | Metric | Value | | Trend | Bullish | "
+        "**Action**: HOLD FINAL TRANSACTION PROPOSAL: **HOLD**"
+    )
+
+    normalized = prepare_report_markdown(content, "final_trade_decision")
+
+    assert "| Metric | Value |" in normalized
+    assert "| --- | --- |" in normalized
+    assert "### Action\nHOLD" in normalized
+    assert "### Final Transaction Proposal\n**HOLD**" in normalized

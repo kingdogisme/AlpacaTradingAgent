@@ -23,6 +23,9 @@ class SignalProcessor:
         """
         # First try deterministic extraction to avoid unnecessary LLM calls
         content = full_signal.upper()
+        fallback_content = "\n".join(
+            line for line in content.splitlines() if "ADVISORY RATING" not in line
+        )
 
         # Check for trading-mode keywords first (LONG / SHORT / NEUTRAL)
         for action in ["LONG", "SHORT", "NEUTRAL"]:
@@ -37,7 +40,7 @@ class SignalProcessor:
                 return action
 
         # Fallback: simple keyword search in the last 100 characters
-        tail = content[-100:]
+        tail = fallback_content[-100:]
         for action in ["LONG", "SHORT", "NEUTRAL", "BUY", "SELL", "HOLD"]:
             if action in tail:
                 return action

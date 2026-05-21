@@ -22,6 +22,8 @@ from .coindesk_utils import get_news as get_coindesk_news_util
 from .defillama_utils import get_fundamentals as get_defillama_fundamentals_util
 from .earnings_utils import get_earnings_calendar_data, get_earnings_surprises_analysis
 from .macro_utils import get_macro_economic_summary, get_economic_indicators_report, get_treasury_yield_curve
+from .sec_edgar_utils import get_sec_edgar_fundamentals as get_sec_edgar_fundamentals_report
+from .freshness import date_age_days, is_fresh_date, parse_date
 from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -57,6 +59,61 @@ from tradingagents.integrations.alpha_vantage_mcp import (
     AlphaVantageMCPUnavailable,
     looks_unavailable as alpha_vantage_looks_unavailable,
 )
+
+_COMPANY_PROFILE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _company_context_for_ticker(ticker: str) -> Dict[str, Any]:
+    raw = str(ticker or "").strip()
+    symbol = raw.split(":", 1)[0].strip().upper() if ":" in raw else raw.upper()
+    embedded_name = ""
+    embedded_industry = ""
+    if ":" in raw:
+        tail = raw.split(":", 1)[1]
+        embedded_name = tail.split(";", 1)[0].strip()
+        industry_match = re.search(r"\bindustry=([^;]+)", tail, flags=re.IGNORECASE)
+        if industry_match:
+            embedded_industry = industry_match.group(1).strip()
+    if not symbol or "/" in symbol:
+        return {"symbol": symbol, "name": symbol}
+    if symbol in _COMPANY_PROFILE_CACHE:
+        return dict(_COMPANY_PROFILE_CACHE[symbol])
+
+    profile: Dict[str, Any] = {}
+    try:
+        profile = fetch_company_profile_live(symbol) or {}
+    except Exception:
+        profile = {}
+
+    name = str(profile.get("name") or embedded_name or "").strip()
+    if not name or name.upper() == symbol:
+        try:
+            name = str(AlpacaUtils.get_company_name(symbol) or "").strip()
+        except Exception:
+            name = ""
+    if not name or name.upper() == symbol:
+        name = symbol
+
+    context = {
+        "symbol": symbol,
+        "name": name,
+        "industry": profile.get("finnhubIndustry") or embedded_industry or "",
+        "exchange": profile.get("exchange") or "",
+        "country": profile.get("country") or "",
+    }
+    _COMPANY_PROFILE_CACHE[symbol] = context
+    return dict(context)
+
+
+def _format_company_context(ticker: str) -> str:
+    context = _company_context_for_ticker(ticker)
+    details = [
+        f"{context.get('symbol')}: {context.get('name')}",
+        f"industry={context.get('industry')}" if context.get("industry") else "",
+        f"exchange={context.get('exchange')}" if context.get("exchange") else "",
+        f"country={context.get('country')}" if context.get("country") else "",
+    ]
+    return "; ".join(part for part in details if part)
 
 
 def _cap_headline_sections(
@@ -105,6 +162,58 @@ def _sellthenews_block(title: str, body: str, *, max_chars: int = 5000) -> str:
     if len(text) > max_chars:
         text = text[: max_chars - 3].rstrip() + "..."
     return f"## {title}\n\n{text}"
+
+
+def _extract_sellthenews_post_ids(text: str) -> List[str]:
+    seen: set[str] = set()
+    post_ids: List[str] = []
+    for post_id in re.findall(r"^\[([a-z0-9_-]{2,32})\]", str(text or ""), flags=re.MULTILINE):
+        if post_id not in seen:
+            seen.add(post_id)
+            post_ids.append(post_id)
+    return post_ids
+
+
+def _sellthenews_dd_note(reason: str) -> str:
+    return (
+        "## SellTheNews WSB DD analysis\n\n"
+        f"WSB DD analysis unavailable or sparse: {reason}. "
+        "Continue using the other social/news evidence and do not infer DD confirmation."
+    )
+
+
+def _call_sellthenews_dd_for_ticker(
+    client: SellTheNewsClient,
+    ticker: str,
+    config: Dict,
+) -> str:
+    if not _coerce_bool(config.get("sellthenews_dd_enabled", True)):
+        return ""
+
+    max_posts = max(0, int(config.get("sellthenews_dd_max_posts", 3) or 0))
+    if max_posts <= 0:
+        return ""
+
+    search_text = client.call_tool(
+        "search_dd",
+        {"query": ticker, "lang": "en", "limit": max_posts, "offset": 0},
+    )
+    post_ids = _extract_sellthenews_post_ids(search_text)[:max_posts]
+    if not post_ids:
+        return _sellthenews_dd_note("no matching DD posts found")
+
+    parts = [
+        "DD is a thesis source, not a fact source. Treat author claims as hypotheses; "
+        "weigh holes, discussion pushback, and fact-check status before using it."
+    ]
+    for post_id in post_ids:
+        post_text = client.call_tool("get_dd_post", {"postId": post_id, "lang": "en"})
+        parts.append(post_text)
+    return _sellthenews_block(
+        "SellTheNews WSB DD analysis",
+        "\n\n---\n\n".join(part for part in parts if str(part).strip()),
+        max_chars=int(config.get("sellthenews_dd_max_chars", 6500) or 6500),
+    )
 
 
 def _sellthenews_fallback_block(reason: str, fallback: str) -> str:
@@ -438,7 +547,11 @@ def _alpha_vantage_block(title: str, body: str, *, max_chars: int = 3500) -> str
     text = str(body or "").strip()
     if len(text) > max_chars:
         text = text[: max_chars - 3].rstrip() + "..."
-    return f"## {title}\n\n{text}"
+    freshness_note = (
+        "Freshness note: Alpha Vantage is a secondary source. Treat undated fields as "
+        "freshness-unverified enrichment and do not override SEC EDGAR filing facts."
+    )
+    return f"## {title}\n\n{freshness_note}\n\n{text}"
 
 
 def _alpha_vantage_fallback_block(reason: str, fallback: str) -> str:
@@ -580,6 +693,10 @@ def get_alpha_vantage_fundamentals(ticker: str, curr_date: str) -> str:
             reason=f"Alpha Vantage MCP failed: {str(exc)}",
         )
         return _alpha_vantage_fallback_block(str(exc), fallback)
+
+
+def get_sec_edgar_fundamentals(ticker: str, curr_date: str) -> str:
+    return get_sec_edgar_fundamentals_report(ticker, curr_date, get_config())
 
 
 def _uses_responses_for_web_search(model: str) -> bool:
@@ -934,16 +1051,41 @@ def get_finnhub_company_insider_transactions(
     )
 
 
-def _format_latest_metric_series(series: dict, metric_name: str, max_points: int = 5) -> str:
+def _format_latest_metric_series(
+    series: dict,
+    metric_name: str,
+    max_points: int = 5,
+    *,
+    curr_date: str | None = None,
+    max_age_days: int = 540,
+) -> str:
     values = series.get(metric_name, []) if isinstance(series, dict) else []
     if not isinstance(values, list) or not values:
         return ""
 
     parts = []
-    for item in values[:max_points]:
+    dated_items = []
+    stale_candidates = []
+    for item in values:
         if not isinstance(item, dict):
             continue
+        period = parse_date(item.get("period"))
+        if period is None:
+            continue
+        if is_fresh_date(period, as_of=curr_date, max_age_days=max_age_days, future_tolerance_days=1):
+            dated_items.append((period, item))
+        else:
+            stale_candidates.append((period, item))
+
+    for _, item in dated_items[:max_points]:
         parts.append(f"{item.get('period', 'N/A')}: {item.get('v')}")
+    if parts:
+        return "; ".join(parts)
+
+    if stale_candidates:
+        latest_period = max(period for period, _ in stale_candidates)
+        age = date_age_days(latest_period, as_of=curr_date)
+        return f"missing (stale: latest period {latest_period.isoformat()}, age {age} days, max {max_age_days})"
     return "; ".join(parts)
 
 
@@ -1038,11 +1180,16 @@ def get_finnhub_company_fundamentals(
             if metric.get(key) not in (None, "")
         ]
         if metric_lines:
-            sections.append("### Key Metrics\n" + "\n".join(metric_lines))
+            sections.append(
+                "### Key Metrics\n"
+                "Note: Finnhub key metrics are secondary and often undated; do not override SEC EDGAR filing facts.\n"
+                + "\n".join(metric_lines)
+            )
 
     annual = series.get("annual", {}) if isinstance(series, dict) else {}
     quarterly = series.get("quarterly", {}) if isinstance(series, dict) else {}
     trend_lines = []
+    metric_stale_days = int(get_config().get("finnhub_fundamentals_metric_stale_days", 540))
     for name in (
         "salesPerShare",
         "eps",
@@ -1053,7 +1200,13 @@ def get_finnhub_company_fundamentals(
         "currentRatio",
         "totalDebtToEquity",
     ):
-        formatted = _format_latest_metric_series(annual, name, max_points=4)
+        formatted = _format_latest_metric_series(
+            annual,
+            name,
+            max_points=4,
+            curr_date=curr_date,
+            max_age_days=metric_stale_days,
+        )
         if formatted:
             trend_lines.append(f"- Annual {name}: {formatted}")
     for name in (
@@ -1066,7 +1219,13 @@ def get_finnhub_company_fundamentals(
         "peTTM",
         "psTTM",
     ):
-        formatted = _format_latest_metric_series(quarterly, name, max_points=5)
+        formatted = _format_latest_metric_series(
+            quarterly,
+            name,
+            max_points=5,
+            curr_date=curr_date,
+            max_age_days=metric_stale_days,
+        )
         if formatted:
             trend_lines.append(f"- Quarterly {name}: {formatted}")
     if trend_lines:
@@ -2123,6 +2282,13 @@ def get_sellthenews_social_sentiment(ticker: str, curr_date: str) -> str:
         if _has_sellthenews_articles(search) and search.strip() != company_news.strip():
             blocks.append(_sellthenews_block("SellTheNews ticker search context", search, max_chars=2200))
 
+        try:
+            dd_block = _call_sellthenews_dd_for_ticker(client, ticker, config)
+        except (SellTheNewsUnavailable, SellTheNewsBadResponse, KeyError) as dd_exc:
+            dd_block = _sellthenews_dd_note(str(dd_exc))
+        if dd_block:
+            blocks.append(dd_block)
+
         combined = "\n\n".join(blocks)
         if _coerce_bool(config.get("sellthenews_fallback_on_sparse", True)) and (
             looks_sparse(sentiment, min_chars=260)
@@ -2146,18 +2312,30 @@ def get_sellthenews_macro_news(curr_date: str, ticker_context: str | None = None
 
     client = _sellthenews_client(config)
     target = str(ticker_context or "global markets").strip()
+    target_context = _format_company_context(target) if target and target.lower() != "global markets" else target
     try:
         live_news = client.call_tool(
             "get_live_news",
             {"limit": 5, "offset": 0, "marketOnly": True, "lang": "en"},
         )
-        blocks = [_sellthenews_block("Enhanced Macro/Market News Source: SellTheNews", live_news, max_chars=4500)]
+        context_note = (
+            f"Ticker context: {target_context}. Use the company identity, not ticker letters as a sector proxy."
+            if target_context and target_context.lower() != "global markets"
+            else "Ticker context: global markets."
+        )
+        blocks = [
+            _sellthenews_block(
+                "Enhanced Macro/Market News Source: SellTheNews",
+                f"{context_note}\n\n{live_news}",
+                max_chars=4500,
+            )
+        ]
 
         if looks_sparse(live_news, min_chars=320):
             search = client.call_tool(
                 "search_news",
                 {
-                    "query": f"{target} macro economy inflation rates stocks",
+                    "query": f"{target_context or target} macro economy inflation rates stocks",
                     "lang": "en",
                     "limit": 5,
                     "offset": 0,

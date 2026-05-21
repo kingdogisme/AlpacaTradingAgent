@@ -13,11 +13,11 @@ from pydantic import BaseModel, Field
 
 
 class AdvisoryRating(str, Enum):
-    BUY = "Buy"
-    OVERWEIGHT = "Overweight"
-    HOLD = "Hold"
-    UNDERWEIGHT = "Underweight"
-    SELL = "Sell"
+    STRONG_BUY = "STRONG BUY"
+    BUY = "BUY"
+    HOLD = "HOLD"
+    SELL = "SELL"
+    STRONG_SELL = "STRONG SELL"
 
 
 class ExecutableAction(str, Enum):
@@ -32,7 +32,13 @@ class ExecutableAction(str, Enum):
 class ResearchPlan(BaseModel):
     recommendation: ExecutableAction = Field(description="Executable action for the trader.")
     confidence: str = Field(description="Confidence level: high, medium, or low.")
-    advisory_rating: Optional[AdvisoryRating] = Field(default=None, description="Optional 5-tier advisory rating.")
+    advisory_rating: Optional[AdvisoryRating] = Field(
+        default=None,
+        description=(
+            "Optional advisory-only 5-tier rating: STRONG BUY, BUY, HOLD, SELL, or STRONG SELL. "
+            "This is not the executable action."
+        ),
+    )
     rationale: str = Field(description="Evidence-backed rationale from the bull/bear debate.")
     strategic_actions: str = Field(description="Concrete trading instructions and risk considerations.")
     time_horizon: Optional[str] = Field(default=None, description="Expected holding horizon for the plan.")
@@ -51,7 +57,13 @@ class TraderProposal(BaseModel):
     stop_loss: Optional[str] = Field(default=None, description="Stop or invalidation guidance.")
     targets: Optional[str] = Field(default=None, description="Profit targets.")
     position_sizing: Optional[str] = Field(default=None, description="Position sizing guidance.")
-    advisory_rating: Optional[AdvisoryRating] = Field(default=None, description="Optional 5-tier advisory rating.")
+    advisory_rating: Optional[AdvisoryRating] = Field(
+        default=None,
+        description=(
+            "Optional advisory-only 5-tier rating: STRONG BUY, BUY, HOLD, SELL, or STRONG SELL. "
+            "This is not the executable action."
+        ),
+    )
     time_horizon: Optional[str] = Field(default=None, description="Expected holding horizon.")
     thesis: Optional[str] = Field(default=None, description="Core trade or trend thesis.")
     invalidation: Optional[str] = Field(default=None, description="Thesis invalidation conditions.")
@@ -65,7 +77,27 @@ class RiskDecision(BaseModel):
     confidence: str = Field(description="Confidence level: high, medium, or low.")
     risk_rationale: str = Field(description="Risk-adjusted justification.")
     required_controls: str = Field(description="Stops, invalidation, sizing, and risk controls.")
-    advisory_rating: Optional[AdvisoryRating] = Field(default=None, description="Optional 5-tier advisory rating.")
+    user_recommendation: Optional[str] = Field(
+        default=None,
+        description=(
+            "User-facing portfolio guidance that may be more nuanced than the executable Alpaca action. "
+            "Include whether the idea is actionable now, watchlist-only, staged entry, add/trim/exit, and why."
+        ),
+    )
+    alpaca_action_plan: Optional[str] = Field(
+        default=None,
+        description=(
+            "Direct Alpaca execution instruction: exact executable action token, whether to open/add/hold/close, "
+            "starter notional exposure, risk-to-invalidation, and conditions that must be met before order placement."
+        ),
+    )
+    advisory_rating: Optional[AdvisoryRating] = Field(
+        default=None,
+        description=(
+            "Optional advisory-only 5-tier rating: STRONG BUY, BUY, HOLD, SELL, or STRONG SELL. "
+            "This is not the executable action."
+        ),
+    )
     time_horizon: Optional[str] = Field(default=None, description="Expected holding horizon.")
     thesis: Optional[str] = Field(default=None, description="Risk-adjusted thesis.")
     invalidation: Optional[str] = Field(default=None, description="Thesis invalidation conditions.")
@@ -88,6 +120,8 @@ ZH_CN_LABELS = {
     "position_sizing": "仓位规模",
     "risk_rationale": "风险理由",
     "required_controls": "必要风控",
+    "user_recommendation": "给用户的操作建议",
+    "alpaca_action_plan": "给 Alpaca 的直接动作",
     "time_horizon": "时间周期",
     "thesis": "交易论点",
     "invalidation": "失效条件",
@@ -111,6 +145,8 @@ EN_LABELS = {
     "position_sizing": "Position Sizing",
     "risk_rationale": "Risk Rationale",
     "required_controls": "Required Controls",
+    "user_recommendation": "User Recommendation",
+    "alpaca_action_plan": "Alpaca Execution Action",
     "time_horizon": "Time Horizon",
     "thesis": "Thesis",
     "invalidation": "Invalidation",
@@ -175,18 +211,30 @@ def render_risk_decision(decision: RiskDecision, output_language: str | None = N
         _field_line("action", decision.action.value, labels),
         _field_line("confidence", decision.confidence, labels),
         *_rating_line(decision.advisory_rating, labels),
-        "",
-        _field_line("risk_rationale", decision.risk_rationale, labels),
-        "",
-        _field_line("required_controls", decision.required_controls, labels),
     ]
+    if decision.user_recommendation:
+        parts.extend(["", _field_line("user_recommendation", decision.user_recommendation, labels)])
+    if decision.alpaca_action_plan:
+        parts.extend(["", _field_line("alpaca_action_plan", decision.alpaca_action_plan, labels)])
+    parts.extend(
+        [
+            "",
+            _field_line("risk_rationale", decision.risk_rationale, labels),
+            "",
+            _field_line("required_controls", decision.required_controls, labels),
+        ]
+    )
     _append_horizon_fields(parts, decision, labels)
     parts.extend(["", f"FINAL TRANSACTION PROPOSAL: **{decision.action.value}**"])
     return "\n".join(parts)
 
 
 def _rating_line(rating: Optional[AdvisoryRating], labels: dict[str, str] | None = None) -> list[str]:
-    return ["", f"**{(labels or EN_LABELS)['advisory_rating']}**: {rating.value}"] if rating else []
+    if not rating:
+        return []
+    label_set = labels or EN_LABELS
+    value = rating.value.title() if label_set is ZH_CN_LABELS else rating.value
+    return ["", f"**{label_set['advisory_rating']}**: {value}"]
 
 
 def _append_horizon_fields(parts: list[str], model: Any, labels: dict[str, str]) -> None:

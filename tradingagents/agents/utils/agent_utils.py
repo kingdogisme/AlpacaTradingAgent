@@ -14,6 +14,10 @@ import tradingagents.dataflows.interface as interface
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.run_logger import get_run_audit_logger
 from tradingagents.dataflows.config import get_api_key
+from tradingagents.dataflows.data_quality import (
+    evaluate_tool_output,
+    prepend_quality_header,
+)
 import json
 import time
 from functools import wraps
@@ -166,6 +170,28 @@ def _score_output_quality(tool_name: str, output: object) -> dict:
         "output_preview": text[:220],
         "trailing_interactive_followup": trailing_interactive,
     }
+
+
+def _merge_quality_details(
+    base_quality: dict,
+    data_quality: dict,
+) -> dict:
+    merged = dict(base_quality or {})
+    existing_flags = list(merged.get("flags", []) or [])
+    data_flags = list(data_quality.get("flags", []) or [])
+    merged["flags"] = sorted(set(existing_flags + data_flags))
+    merged["is_suspect"] = bool(
+        merged.get("is_suspect", False)
+        or data_quality.get("status") in {"warn", "fail"}
+    )
+    merged["data_quality"] = data_quality
+    return merged
+
+
+def _maybe_prepend_data_quality_header(result: object, data_quality: dict) -> str:
+    if not bool(Toolkit._config.get("data_quality_header_enabled", True)):
+        return str(result or "")
+    return prepend_quality_header(result, data_quality)
 
 
 def _semantic_retry_disabled_tools(config: dict | None = None) -> set[str]:
@@ -352,6 +378,19 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                         quality_flags = ["timeout"]
                         if fallback_result:
                             quality_flags.append("fallback_used")
+                        current_symbol = getattr(app_state, 'analyzing_symbol', None) or getattr(app_state, 'current_symbol', None)
+                        artifact_ref = f"tool_call:{len(app_state.tool_calls_log) + 1}"
+                        base_quality = {"flags": quality_flags, "is_suspect": True}
+                        data_quality = evaluate_tool_output(
+                            tool_name,
+                            input_summary_full,
+                            result_for_llm,
+                            text_quality=base_quality,
+                            artifact_ref=artifact_ref,
+                            config=Toolkit._config,
+                        )
+                        quality_details = _merge_quality_details(base_quality, data_quality)
+                        result_for_llm = _maybe_prepend_data_quality_header(result_for_llm, data_quality)
 
                         tool_call_info = {
                             "timestamp": timestamp,
@@ -361,14 +400,14 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                             "execution_time": f"{elapsed:.2f}s",
                             "status": status,
                             "agent_type": analyst_type,
-                            "symbol": getattr(app_state, 'analyzing_symbol', None) or getattr(app_state, 'current_symbol', None),
+                            "symbol": current_symbol,
                             "error_details": {
                                 "error_type": "TimeoutError",
                                 "timeout_seconds": effective_timeout_seconds,
                                 "actual_time": elapsed
                             },
                             "retry_count": retry_count,
-                            "quality_details": {"flags": quality_flags, "is_suspect": True},
+                            "quality_details": quality_details,
                         }
 
                         app_state.tool_calls_log.append(tool_call_info)
@@ -458,14 +497,31 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                 # Store the complete tool call information including the output
                 # Get current symbol from app_state for filtering
                 current_symbol = getattr(app_state, 'analyzing_symbol', None) or getattr(app_state, 'current_symbol', None)
+                artifact_ref = f"tool_call:{len(app_state.tool_calls_log) + 1}"
+                data_quality = evaluate_tool_output(
+                    tool_name,
+                    input_summary_full,
+                    result,
+                    text_quality=quality_details,
+                    artifact_ref=artifact_ref,
+                    config=Toolkit._config,
+                )
+                quality_details = _merge_quality_details(quality_details, data_quality)
+                result_for_llm = _maybe_prepend_data_quality_header(result, data_quality)
+                status_for_log = (
+                    "degraded"
+                    if data_quality.get("status") == "fail"
+                    and data_quality.get("criticality") == "critical"
+                    else "success"
+                )
                 
                 tool_call_info = {
                     "timestamp": timestamp,
                     "tool_name": tool_name,
                     "inputs": input_summary,
-                    "output": result_summary,
+                    "output": result_for_llm,
                     "execution_time": f"{elapsed:.2f}s",
-                    "status": "success",
+                    "status": status_for_log,
                     "agent_type": analyst_type,  # Add agent type for filtering
                     "symbol": current_symbol,  # Add symbol for filtering
                     "retry_count": retry_count,
@@ -480,8 +536,8 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                 get_run_audit_logger().log_tool_call(
                     tool_name=tool_name,
                     inputs=input_summary_full,
-                    output=result_summary,
-                    status="success",
+                    output=result_for_llm,
+                    status=status_for_log,
                     execution_time_seconds=elapsed,
                     agent_type=analyst_type,
                     symbol=current_symbol,
@@ -489,7 +545,7 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                     retry_count=retry_count,
                 )
                 
-                return result
+                return result_for_llm
                 
             except Exception as e:
                 elapsed = time.time() - start_time
@@ -532,12 +588,26 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                     
                     # Get current symbol from app_state for filtering
                     current_symbol = getattr(app_state, 'analyzing_symbol', None) or getattr(app_state, 'current_symbol', None)
+                    artifact_ref = f"tool_call:{len(app_state.tool_calls_log) + 1}"
+                    error_output = f"ERROR ({error_details['error_type']}): {detailed_error}"
+                    data_quality = evaluate_tool_output(
+                        tool_name,
+                        input_summary_full,
+                        error_output,
+                        text_quality={"flags": ["runtime_error"], "is_suspect": True},
+                        artifact_ref=artifact_ref,
+                        config=Toolkit._config,
+                    )
+                    quality_details = _merge_quality_details(
+                        {"flags": ["runtime_error"], "is_suspect": True},
+                        data_quality,
+                    )
                     
                     tool_call_info = {
                         "timestamp": timestamp,
                         "tool_name": tool_name,
                         "inputs": input_summary,
-                        "output": f"ERROR ({error_details['error_type']}): {detailed_error}",
+                        "output": _maybe_prepend_data_quality_header(error_output, data_quality),
                         "execution_time": f"{elapsed:.2f}s",
                         "status": "error",
                         "agent_type": analyst_type,  # Add agent type for filtering
@@ -558,7 +628,7 @@ def timing_wrapper(analyst_type, timeout_seconds=120, uses_web_search=False):
                         agent_type=analyst_type,
                         symbol=current_symbol,
                         error_details=error_details,
-                        quality_details={"flags": ["runtime_error"], "is_suspect": True},
+                        quality_details=quality_details,
                         retry_count=0,
                     )
                 except Exception as track_error:
@@ -616,6 +686,9 @@ class Toolkit:
             and bool(self.config.get("alpha_vantage_fundamentals_enabled", True))
             and self._has_key("alpha_vantage_api_key", "ALPHA_VANTAGE_API_KEY")
         )
+
+    def has_sec_edgar(self) -> bool:
+        return bool(self.config.get("online_tools", True)) and bool(self.config.get("sec_edgar_enabled", True))
 
     def has_alpaca_credentials(self) -> bool:
         return self._has_key("alpaca_api_key", "ALPACA_API_KEY") and self._has_key(
@@ -1152,6 +1225,19 @@ class Toolkit:
         )
 
         return openai_fundamentals_results
+
+    @staticmethod
+    @tool
+    @timing_wrapper("FUNDAMENTALS")
+    def get_sec_edgar_fundamentals(
+        ticker: Annotated[str, "the company's ticker"],
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+    ):
+        """
+        Retrieve official SEC EDGAR structured filing facts and latest filing metadata.
+        """
+
+        return interface.get_sec_edgar_fundamentals(ticker, curr_date)
 
     @staticmethod
     @tool

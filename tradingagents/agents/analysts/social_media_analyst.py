@@ -7,6 +7,12 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_horizon_context,
 )
 from tradingagents.agents.utils.language import language_instruction
+from tradingagents.agents.utils.source_policy import (
+    is_point_in_time_mode,
+    log_openai_source_skip,
+    point_in_time_source_note,
+    should_bind_openai_source,
+)
 from tradingagents.dataflows.social_evidence import build_grounded_social_evidence
 from tradingagents.prompts import load_prompt, render_prompt
 
@@ -28,12 +34,32 @@ def create_social_media_analyst(llm, toolkit):
         horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
         is_crypto = "/" in ticker or "USD" in ticker.upper() or "USDT" in ticker.upper()
         openai_available = toolkit.has_openai_web_search()
-        sellthenews_available = toolkit.has_sellthenews("sellthenews_social_enabled")
-        openai_stock_news_available = (
+        point_in_time_mode = is_point_in_time_mode(current_date, toolkit.config)
+        sellthenews_available = toolkit.has_sellthenews("sellthenews_social_enabled") and not point_in_time_mode
+        openai_bind_available = (
             toolkit.config["online_tools"]
             and openai_available
             and bool(toolkit.config.get("social_openai_stock_news_enabled", False))
+            and not point_in_time_mode
         )
+        openai_stock_news_available = should_bind_openai_source(
+            toolkit.config,
+            source_type="social",
+            openai_available=openai_bind_available,
+            non_openai_available=bool(sellthenews_available),
+        )
+        if not openai_stock_news_available:
+            log_openai_source_skip(
+                "social",
+                toolkit.config,
+                openai_available=bool(
+                    toolkit.config["online_tools"]
+                    and openai_available
+                    and bool(toolkit.config.get("social_openai_stock_news_enabled", False))
+                ),
+                non_openai_available=bool(sellthenews_available),
+                point_in_time_mode=point_in_time_mode,
+            )
         social_evidence_block = build_grounded_social_evidence(
             ticker,
             current_date,
@@ -52,16 +78,32 @@ def create_social_media_analyst(llm, toolkit):
             tools.insert(0, toolkit.get_sellthenews_social_sentiment)
 
         source_labels = ["Reddit"]
+        sellthenews_dd_available = sellthenews_available and bool(
+            toolkit.config.get("sellthenews_dd_enabled", True)
+        )
         if sellthenews_available:
-            source_labels.insert(0, "SellTheNews WSB sentiment")
+            sellthenews_label = "SellTheNews WSB sentiment"
+            if sellthenews_dd_available:
+                sellthenews_label += " + WSB DD"
+            source_labels.insert(0, sellthenews_label)
         if openai_stock_news_available:
             source_labels.append("OpenAI web-search sentiment (low-priority backstop)")
 
         source_guidance = (
             " Use all currently available social tools before concluding."
             f" Active sources: {', '.join(source_labels)}."
+            + f" {point_in_time_source_note(current_date, toolkit.config)}"
             + " Prefer SellTheNews WSB/company context, Reddit, and grounded samples when they provide enough evidence."
-            + " Treat OpenAI web-search as a low-priority backstop: only call it when those faster sources are sparse, stale, contradictory, or missing company-specific evidence."
+            + (
+                " When SellTheNews WSB DD is present, treat DD as a thesis source rather than a fact source; explicitly weigh thesis, holes, discussion pushback, and fact-check status."
+                if sellthenews_dd_available
+                else ""
+            )
+            + (
+                " Treat OpenAI web-search as a low-priority backstop: only call it when those faster sources are sparse, stale, contradictory, or missing company-specific evidence."
+                if openai_stock_news_available
+                else ""
+            )
             + (" Use `get_reddit_news(curr_date)` for crypto context." if is_crypto else " Use `get_reddit_stock_info(ticker, curr_date)` for stock context.")
             + (
                 " A grounded social/news evidence block is preloaded below; cite its source labels, timestamps, and sample counts."

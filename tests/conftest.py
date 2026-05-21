@@ -29,6 +29,34 @@ _TEST_ENV_DEFAULTS = {
     "ALPHA_VANTAGE_API_KEY": "",
 }
 
+_EXTERNAL_SECRET_ENV_KEYS = {
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "ZHIPU_API_KEY",
+    "OPENROUTER_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "ALPACA_API_KEY",
+    "ALPACA_SECRET_KEY",
+    "FINNHUB_API_KEY",
+    "FRED_API_KEY",
+    "COINDESK_API_KEY",
+    "ALPHA_VANTAGE_API_KEY",
+}
+
+
+def _external_network_enabled(request: pytest.FixtureRequest) -> bool:
+    return (
+        (
+            request.node.get_closest_marker("external") is not None
+            or request.node.get_closest_marker("network") is not None
+        )
+        and os.getenv("RUN_EXTERNAL_TESTS") == "1"
+    )
+
 
 def pytest_configure(config: pytest.Config) -> None:
     for key, value in _TEST_ENV_DEFAULTS.items():
@@ -36,9 +64,19 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True)
-def deterministic_test_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def deterministic_test_env(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> None:
     """Keep tests isolated from local .env files, home dirs, and live service keys."""
+    external_enabled = _external_network_enabled(request)
     for key, value in _TEST_ENV_DEFAULTS.items():
+        if external_enabled and key in _EXTERNAL_SECRET_ENV_KEYS and os.getenv(key):
+            continue
+        if external_enabled and key == "TRADINGAGENTS_DISABLE_NETWORK":
+            monkeypatch.setenv(key, "0")
+            continue
         monkeypatch.setenv(key, value)
 
     monkeypatch.setenv("TRADINGAGENTS_RESULTS_DIR", str(tmp_path / "results"))
@@ -49,15 +87,8 @@ def deterministic_test_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 @pytest.fixture(autouse=True)
 def block_external_network(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Fail fast if deterministic tests accidentally reach the network."""
-    external_allowed = (
-        request.node.get_closest_marker("external") is not None
-        and os.getenv("RUN_EXTERNAL_TESTS") == "1"
-    )
-    network_allowed = (
-        request.node.get_closest_marker("network") is not None
-        and os.getenv("RUN_EXTERNAL_TESTS") == "1"
-    )
-    if external_allowed or network_allowed:
+    if _external_network_enabled(request):
+        yield
         return
 
     original_connect = socket.socket.connect

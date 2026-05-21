@@ -104,8 +104,8 @@ class OpenAIModelRegistryTests(unittest.TestCase):
     @patch("tradingagents.openai_model_registry.discover_models")
     def test_openai_provider_defaults_use_available_local_models_after_switching(self, mock_discover):
         mock_discover.return_value = [("local-a", "local-a"), ("local-b", "local-b")]
-        self.assertEqual(get_default_model_for_provider("openai", "quick"), "gpt-5.4-mini")
-        self.assertEqual(get_default_model_for_provider("openai", "deep"), "gpt-5.4")
+        self.assertEqual(get_default_model_for_provider("openai", "quick"), "gpt-5.5")
+        self.assertEqual(get_default_model_for_provider("openai", "deep"), "gpt-5.5")
         self.assertEqual(get_default_model_for_provider("local_openai", "quick"), "local-a")
 
     @patch("tradingagents.openai_model_registry.discover_models")

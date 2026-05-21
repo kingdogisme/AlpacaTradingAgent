@@ -16,6 +16,12 @@ _FIELD_PATTERNS = {
 }
 
 
+def _without_advisory_rating_lines(text: str) -> str:
+    return "\n".join(
+        line for line in str(text or "").splitlines() if "advisory rating" not in line.lower()
+    )
+
+
 def _clean_field(value: str | None) -> str | None:
     if value is None:
         return None
@@ -71,7 +77,7 @@ def _extract_action(text: str, trading_mode: str | None) -> str | None:
         if match:
             return match.group(1).upper()
 
-    tail = text.upper()[-160:]
+    tail = _without_advisory_rating_lines(text).upper()[-160:]
     for action in _ACTIONS:
         if re.search(rf"\b{action}\b", tail):
             return action
@@ -80,6 +86,7 @@ def _extract_action(text: str, trading_mode: str | None) -> str | None:
 
 def _extract_recommendation(response_content: str, trading_mode: str) -> str | None:
     content = response_content.upper()
+    fallback_content = _without_advisory_rating_lines(response_content).upper()
     actions = ("BUY", "HOLD", "SELL") if trading_mode == "investment" else ("LONG", "NEUTRAL", "SHORT")
     labels = (
         "FINAL TRANSACTION PROPOSAL",
@@ -93,7 +100,7 @@ def _extract_recommendation(response_content: str, trading_mode: str) -> str | N
             if f"{label}: **{action}**" in content:
                 return action
     for action in actions:
-        if f"**{action}**" in content[-100:]:
+        if f"**{action}**" in fallback_content[-100:]:
             return action
     return None
 

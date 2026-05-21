@@ -7,6 +7,7 @@ import dash_bootstrap_components as dbc
 
 from webui.utils.state import app_state
 from webui.config.constants import COLORS
+from webui.components.data_quality_panel import render_data_quality_panel
 
 
 def register_status_callbacks(app):
@@ -92,6 +93,17 @@ def register_status_callbacks(app):
         )
 
     @app.callback(
+        Output("data-quality-panel", "children"),
+        [Input("refresh-interval", "n_intervals"),
+         Input("medium-refresh-interval", "n_intervals")]
+    )
+    def update_data_quality_panel(_fast_intervals, _medium_intervals):
+        """Update the data-quality summary panel from current tool call state."""
+        current_symbol = app_state.current_symbol
+        tool_calls = app_state.get_tool_calls_for_display(symbol_filter=current_symbol)
+        return render_data_quality_panel(tool_calls)
+
+    @app.callback(
         [Output("refresh-interval", "disabled"),
          Output("medium-refresh-interval", "disabled"),
          Output("refresh-status", "children"),
@@ -152,4 +164,4 @@ def register_status_callbacks(app):
             ) if not refresh_disabled else "⏸️ Updates paused until analysis starts"
             status_class = "text-success mt-2" if not refresh_disabled else "text-secondary mt-2"
 
-        return refresh_disabled, medium_refresh_disabled, status_msg, status_class 
+        return refresh_disabled, medium_refresh_disabled, status_msg, status_class

@@ -19,6 +19,7 @@ Look for catalysts that can sustain price movement across multiple days. Identif
 7. **Momentum Factors:** Estimate revisions, revenue trends, and competitive positioning changes with multi-day impact
 
 **ANALYSIS REQUIREMENTS:**
+- When SEC EDGAR is available, treat it as the official source for historical filing facts and cite period/end dates; use secondary sources only for estimates, ratings, peers, and context.
 - Identify fundamental catalysts within the 2-10 day swing window
 - Assess probability and magnitude of potential multi-day price impact
 - Consider both positive and negative fundamental drivers over the swing period

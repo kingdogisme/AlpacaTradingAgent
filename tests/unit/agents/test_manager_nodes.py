@@ -165,6 +165,8 @@ def test_risk_manager_structured_output_uses_configured_language(isolated_config
             confidence="medium",
             risk_rationale="没有现仓，等待确认更优。",
             required_controls="突破确认后再分批建仓。",
+            user_recommendation="保留观察名单，等待突破确认。",
+            alpaca_action_plan="HOLD：当前不发送订单。",
         )
     )
     node = create_risk_manager(llm, EmptyMemory(), isolated_config)
@@ -175,6 +177,8 @@ def test_risk_manager_structured_output_uses_configured_language(isolated_config
         result = node(_base_state())
 
     assert "**操作**: HOLD" in result["final_trade_decision"]
+    assert "**给用户的操作建议**: 保留观察名单，等待突破确认。" in result["final_trade_decision"]
+    assert "**给 Alpaca 的直接动作**: HOLD：当前不发送订单。" in result["final_trade_decision"]
     assert "**风险理由**: 没有现仓，等待确认更优。" in result["final_trade_decision"]
     assert "**必要风控**: 突破确认后再分批建仓。" in result["final_trade_decision"]
     assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["final_trade_decision"]

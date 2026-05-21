@@ -62,6 +62,115 @@ LLMs should handle the messy semantic parts:
 The LLM should not be the sole source of truth for final ranking. It should
 produce structured evidence that a deterministic scorer can consume.
 
+## Maintainability And Observability Principles
+
+Alpha Discovery should be built as a long-running research system, not as a
+one-off scraper. Cron jobs only become useful if each run is reproducible,
+auditable, and easy to debug days later.
+
+Core maintainability principles:
+
+- Every material step must write structured state, not only console text.
+- Every candidate must retain the raw source pointer, extracted evidence,
+  scoring components, promotion gate, risk flags, handoff, and outcome.
+- Every score change must be explainable from persisted fields. If a candidate
+  moves from B to A, the exact confirmation source and component delta should be
+  visible.
+- Every external dependency should fail softly. A broken DD, options, price, or
+  news call should record an unavailable signal and should not corrupt the
+  whole batch.
+- Every cron command should be idempotent enough to rerun safely. Reruns should
+  upsert candidates/signals by stable identifiers instead of duplicating work.
+- Every production cron should have a bounded budget: max candidates,
+  per-ticker cooldown, daily ATA budget, source timeouts, and output truncation.
+- Every parser should have fixture tests. MCP text formats change, so parsing
+  assumptions must be covered by small deterministic tests.
+- Every production-facing default should be conservative. Discovery should
+  prefer missing an A-list promotion over flooding ATA with noisy social names.
+- Official filing facts should be treated as a quality layer, not a discovery
+  source. SEC EDGAR can confirm freshness, revenue direction, margin risk, or
+  balance-sheet risk, but it should not create a ticker by itself and should
+  not be the only independent signal that promotes a social-only idea to A.
+
+Required observability artifacts:
+
+```text
+DiscoveryBatch
+  batch_id, sources, generated_at, config_json, status
+
+OpportunityCandidate
+  ticker, tier, alpha_score, opportunity_type, direction_hint, theme,
+  catalyst, ttl, discovered_at, score_components_json, risk_flags_json,
+  run_reason, rejected_reason
+
+SourceSignal
+  candidate_id, source, raw_artifact_id, source_timestamp, mentions,
+  sentiment, evidence_json, raw_text_ref
+
+Handoff
+  candidate_id, run_id, status, executed_at, ATA final signal/confidence
+
+Outcome
+  candidate_id, horizon_days, raw_return, benchmark_return, alpha_return,
+  MFE, MAE, resolved_at
+```
+
+Operational reports should answer:
+
+- What did this cron run discover, reject, promote, or leave unchanged?
+- Which source produced each candidate?
+- Which confirmation moved the score?
+- Why did an A-list gate fail?
+- Which candidates consumed ATA budget?
+- Which B/C/Rejected shadow candidates later worked?
+- Which source/theme has positive forward alpha by horizon?
+
+The minimum useful CLI observability surface is:
+
+```bash
+python -m cli.main cron-discover --source wsb,dd --max-candidates 25
+python -m cli.main cron-confirm --tier B,C --max-candidates 25
+python -m cli.main basket-list --tier A,B,C,Rejected --status open
+python -m cli.main basket-report --status open
+python -m cli.main basket-eval-report --status open
+python -m cli.main ad-events --limit 100
+python -m cli.main ad-health
+python -m cli.main cron-resolve --as-of YYYY-MM-DD
+```
+
+Current implementation note: Phase 2 includes the append-only
+`discovery_events` table plus `ad-events` and `ad-health` CLI commands. The
+event stream records collector start/end/failure, SellTheNews MCP tool latency,
+candidate scoring, confirmation decisions, dry-run/executed handoffs, and
+batch-level failure states. `ad-health` summarizes the latest batches, open
+basket size by tier, today's handoffs, recent event counts, and recent errors.
+For tonight's cron rollout, every cron invocation should redirect stdout/stderr
+to a dated log file and `ad-health` should run after each discover/confirm/run
+block.
+
+## SEC EDGAR Fundamental Confirmation
+
+SEC EDGAR is the official historical filing source for AD/ATA fundamentals.
+V1 intentionally uses structured APIs only:
+
+- `submissions` for latest 10-K, 10-Q, and 8-K metadata.
+- `companyfacts` for compact XBRL facts such as revenue, gross profit,
+  operating income, net income, cash, debt, operating cash flow, and shares.
+
+Operational contract:
+
+- SEC does not generate candidates. It only enriches existing candidates with
+  `sec_edgar_fundamental_confirmation` source signals.
+- SEC flags include `recent_filing_available`, `filing_stale`,
+  `revenue_acceleration`, `margin_deterioration`, `cash_debt_risk`, and
+  `missing_fields:*`.
+- SEC can add a small score component via `fundamental_confirmation`.
+- SEC alone cannot satisfy the A-list independent confirmation gate for a
+  social-only candidate. A promotion still needs price/volume, options, direct
+  news, live/search news, or another non-summary confirmation.
+- Reports must stay compact and cite period/end date/form/frame/source tag so
+  downstream LLMs do not mix annual, quarterly, and point-in-time facts.
+
 ## AD / ATA Interface
 
 The interface between Alpha Discovery and ATA should be an opportunity basket,
@@ -142,6 +251,9 @@ The first version should focus on high-signal, low-integration-cost sources.
 
 - SellTheNews `get_wsb_analysis`
 - SellTheNews `get_wsb_discussion`
+- SellTheNews `get_dd_list`
+- SellTheNews `get_dd_post`
+- SellTheNews `search_dd`
 - public Reddit samples
 - StockTwits samples
 
@@ -194,6 +306,42 @@ Example output shape:
   "crowding_risk": 0.65
 }
 ```
+
+## WSB DD Workflow
+
+SellTheNews WSB DD is a separate discovery source from daily WSB discussion.
+Daily discussion is better for heat, attention, crowding, and intraday mood. DD
+posts are better for thesis discovery, second-order ideas, explicit holes,
+discussion rebuttals, and fact-checkable claims.
+
+Initial DD extraction procedure:
+
+1. Call `get_dd_list(limit=20)` as a cheap discovery pass.
+2. Filter by basic quality controls such as minimum score, minimum comments, and
+   ticker eligibility.
+3. For each surviving `postId`, call `get_dd_post`.
+4. Extract `post_id`, `reddit_title`, `ai_title`, `tickers`,
+   `ticker_sentiment`, `score`, `comments`, `posted_at`, `thesis`, `evidence`,
+   `holes`, `discussion_summary`, `fact_check_status_counts`, and
+   `source_urls`.
+5. Use `sellthenews_wsb_dd` as the source name and
+   `mcp://sellthenews/dd/{postId}` as the raw artifact id.
+6. Promote to A/B only after reading the full DD post; `get_dd_list` alone never
+   qualifies a candidate for A-list.
+
+Default DD scoring should be quality-first:
+
+- Positive evidence: supported fact-checks, clear catalyst, verifiable source
+  URLs, meaningful discussion depth, and ticker sentiment consistent with the
+  thesis.
+- Negative evidence: unsupported or questionable fact-checks, severe holes,
+  short-dated options decay, low score or low comments, and strong conflict
+  between author thesis and discussion rebuttals.
+
+DD candidates should still enter the shadow basket when rejected or left in
+B/C-list so forward returns can reveal missed opportunities and source bias.
+The default `opportunity_type` should be inferred from the content rather than
+assumed to be `continuation`.
 
 ## LLM Responsibilities
 
@@ -264,10 +412,10 @@ Signals should be filtered by opportunity type:
 Suggested default cooldowns:
 
 ```text
-Full ATA run: same ticker at most twice per trading day
-Full ATA cooldown: 6 hours
-Discovery scan: every 30-60 minutes during active windows
-Run-list rebuild: 3-5 times per trading day
+Full ATA run: same ticker at most 5 times per trading day
+Full ATA cooldown: 24 hours
+Discovery rebuild: 1 primary daily run, plus 1 optional event-driven run
+Confirmation refresh: 1-2 lightweight passes per trading day
 ```
 
 ## Scoring
@@ -372,6 +520,9 @@ Known bias modes:
 - MCP AI summaries are interpreted evidence, not raw market facts.
 - A single convenient MCP can create availability bias: the system may rank what
   is easy to observe rather than what is most important.
+- WSB DD adds author-position bias, persuasive long-form narrative bias,
+  selective data risk, short-dated options time-decay risk, and low-score early
+  post uncertainty.
 
 Mitigations:
 
@@ -401,24 +552,30 @@ offsets because daylight saving time changes.
 Suggested cadence:
 
 ```text
-08:00 ET  premarket discovery
-09:20 ET  pre-open confirmation
-10:15 ET  post-open confirmation
-12:30 ET  midday light refresh
-15:10 ET  power-hour scan
-16:30 ET  post-close discovery
-20:00 ET  evening preparation
+08:15 ET  daily premarket discovery rebuild
+09:25 ET  pre-open confirmation pass
+15:30 ET  optional event-driven discovery only for live-news/volume shocks
+16:30 ET  post-close confirmation pass
+20:00 ET  evening DD/news refresh for next session
 ```
 
-Only a subset of these should trigger full ATA analysis. A healthy initial
+The system should not assume new alpha candidates appear every hour. Frequent
+polling is useful for cheap source state and confirmation refresh, but basket
+rebuilds should be sparse unless a true event source fires. A healthy initial
 target is:
 
 ```text
-Raw discoveries per day: 30-80
-Deduped watchlist per day: 12-25
-Full ATA runs per day: 5-12
-High-conviction shortlist per day: 3-6
+Raw discoveries per day: 10-30
+Deduped watchlist per day: 6-15
+Full ATA runs per day: 1-5
+High-conviction shortlist per day: 1-4
 ```
+
+Full ATA should normally run after the pre-open confirmation pass and after the
+post-close confirmation pass, with a daily budget of 5 candidate runs. Intraday
+ATA runs should still require an event-driven trigger such as direct breaking
+news, unusual price/volume, options pressure, or a material change in a
+candidate's promotion gate.
 
 ## Evaluation Loop
 
@@ -438,11 +595,46 @@ label. A candidate can be useful even if ATA rejects it, and ATA can be
 confident while the market outcome is poor. The discovery ledger should record
 both.
 
+This matters especially when A-list candidates receive repeated HOLD or SELL
+judgments from ATA but later keep rising. That outcome should not be treated as
+a simple Alpha Discovery failure or a simple ATA failure. It can mean several
+different things:
+
+- Alpha Discovery found a real attention/catalyst opportunity, but ATA used the
+  wrong analysis frame or over-weighted valuation/fundamental caution.
+- The candidate was directionally useful for a tradeable move, but did not meet
+  ATA's threshold for a risk-adjusted long recommendation.
+- The move was primarily momentum, positioning, squeeze, or narrative
+  continuation, while ATA was evaluating it as a fundamental investment setup.
+- The evaluation horizon was mismatched: ATA may have rejected a multi-day
+  setup that still produced a 1-day or intraday move.
+- The benchmark or theme adjustment may show the move was broad beta rather
+  than idiosyncratic alpha.
+
+The evaluation system should therefore keep four labels separate:
+
+1. **Discovery quality**: did AD surface a ticker/theme before or during a
+   meaningful market move?
+2. **Routing quality**: was it worth spending ATA budget on that candidate at
+   that time?
+3. **ATA judgment quality**: did ATA correctly assess risk, direction, and
+   setup type given the evidence it saw?
+4. **Trade outcome quality**: did an executable strategy with realistic entry,
+   exit, slippage, and risk limits make money?
+
+For the current system, the best primary objective is routing quality, not raw
+trading PnL. AD should learn which candidates deserved deeper analysis, which
+sources and themes led to forward alpha, and which cases ATA systematically
+misclassified. ATA feedback is a critic signal, while forward returns and
+benchmark/theme-adjusted outcomes are the harder labels.
+
 Useful metrics:
 
 - discovery hit rate
 - forward return after 1d, 2d, 5d, and 10d
+- MFE and MAE after discovery and after ATA handoff
 - benchmark-adjusted alpha
+- theme-adjusted alpha where a clean peer basket exists
 - theme-level hit rate
 - source-level reliability
 - average staleness of accepted candidates
@@ -452,6 +644,12 @@ Useful metrics:
 - missed-winner rate among rejected and B/C-list candidates
 - source contribution by opportunity type
 - ATA handoff precision by analyst set and time of day
+- ATA disagreement rate: A-list candidates that ATA rejected but later produced
+  positive forward alpha
+- false-negative cost: forward alpha missed because ATA returned HOLD/SELL or
+  because the candidate never reached A-list
+- false-positive cost: ATA budget spent on candidates with poor forward alpha
+- horizon fit: whether the signal worked at 1d, 3d, 5d, or 10d
 
 Each candidate should keep enough provenance to evaluate:
 
@@ -467,6 +665,22 @@ Each candidate should keep enough provenance to evaluate:
 - direction hint
 - basket tier history
 - cooldown and rerun decisions
+
+Recommended confusion matrix:
+
+```text
+AD selected + ATA bullish + forward alpha positive  = ideal handoff
+AD selected + ATA bullish + forward alpha negative  = ATA false positive or bad timing
+AD selected + ATA HOLD/SELL + forward alpha positive = ATA false negative or wrong frame
+AD selected + ATA HOLD/SELL + forward alpha negative = useful rejection
+B/C/Rejected + forward alpha positive                = AD promotion miss
+B/C/Rejected + forward alpha negative                = useful filter
+```
+
+This matrix should be computed by opportunity type. A HOLD/SELL on a
+fundamental frame may still be compatible with a volatility or squeeze signal.
+Likewise, a ticker can rise while still being a poor risk-adjusted long if MAE,
+gap risk, liquidity, or catalyst timing made the trade unattractive.
 
 ## Memory-Enhanced Learning Architecture
 
@@ -511,7 +725,8 @@ The early reward target should be routing quality, not final trading PnL alone:
 handoff_reward =
   forward_alpha_after_handoff
 + meaningful_move_capture
-+ ATA_confirmation_quality
++ ATA_confirmation_quality_or_useful_rejection
+- ATA_false_negative_penalty
 - ATA_budget_cost
 - staleness_penalty
 - false_positive_penalty
@@ -521,6 +736,7 @@ batch_reward =
 + ranking_ndcg
 + discovered_winner_bonus
 - missed_obvious_winner_penalty
+- ATA_misclassification_penalty
 - duplicated_attention_penalty
 - excessive_ATA_run_penalty
 ```
@@ -541,13 +757,34 @@ The smallest useful implementation:
 6. Add a runner command that sends A-list tickers into ATA.
 7. Record candidate outcomes after fixed windows.
 
-Potential commands:
+Implemented cron-friendly commands:
 
 ```bash
-python -m cli.main cron-discover --source wsb --top-sectors 10 --per-sector 1
-python -m cli.main cron-run --tier a --max-symbols 6 --analysts market,social,news,macro
-python -m cli.main cron-once --source wsb --run-tier a
+python -m cli.main cron-discover --source wsb,dd --max-candidates 25
+python -m cli.main cron-confirm --tier B,C --max-candidates 25
+python -m cli.main cron-run --tier A --max-symbols 6
+python -m cli.main cron-run --tier A --max-symbols 6 --execute
+python -m cli.main cron-resolve --as-of YYYY-MM-DD
+python -m cli.main basket-list --tier A,B --status open
+python -m cli.main basket-report --status open
+python -m cli.main basket-eval-report --status open
+python -m cli.main ad-events --limit 100
+python -m cli.main ad-health
+python -m cli.main cron-schedule
 ```
+
+Phase 2 keeps scoring deterministic. A-list promotion requires at least one
+independent confirmation source, such as direct company news, ticker-matched
+search/live news, options pressure, or price/volume confirmation. Social-only
+WSB heat remains capped at B-list. Price/volume confirmation checks relative
+volume, 1-day move, gap, and overextension so the system does not blindly chase
+already-exhausted moves.
+
+For the first 24h production regression, run AD in discovery/confirmation and
+`cron-run` dry-run mode only. Enable `cron-run --execute` only after reviewing
+`ad-health`, `ad-events --status error`, `basket-report`, and the dry-run
+candidates. A broken collector should soft-fail and log `collector_failed`
+rather than kill the entire batch.
 
 ## Non-Goals For The First Version
 
@@ -572,3 +809,11 @@ After the MVP has several weeks of outcomes, consider:
 The most pragmatic first learning target is not model weights. It is routing:
 which candidates deserve expensive ATA analysis, at what cadence, and with
 which analyst set.
+
+## Research Article Signals
+
+n8n/Substack research articles are first-class `SourceSignal` inputs, not just notification text. The ingest path classifies every article into a small schema: `single_ticker_dd`, `thematic_dd`, `news_digest`, `portfolio_update`, `macro_note`, or `other`. The classifier extracts primary and secondary tickers, article depth, novelty, conviction, source quality, direction hint, thesis, risks, watch items, and horizon.
+
+Research articles act as confirmation signals by default. Deterministic scoring computes `research_boost = source_quality * depth_score * novelty_score * conviction_score`, capped at `alpha_discovery_research_boost_max` by default. High-quality, trusted `single_ticker_dd` can use a higher cap and may pass `passed_research_dd_gate`, allowing a clearly identified primary ticker to reach tier A from one strong article. Thematic DD can create or strengthen B-tier theme exposure, while secondary tickers are capped lower and cannot independently A-promote. News digests are retained as raw events/enriched context and do not boost all mentioned tickers.
+
+Every applied article writes both records: the raw `n8n_ingest_events` row for replay/debugging, and a `SourceSignal(source="research_article")` attached to the affected candidate. Candidate score components must remain explainable with `research_article_boost`, `research_article_count`, `research_quality_max`, `confirmation_sources`, and `promotion_gate`.

@@ -11,7 +11,7 @@ from tradingagents.agents.utils.agent_trading_modes import (
 
 def test_advisory_rating_does_not_override_executable_action():
     content = """
-**Advisory Rating**: Sell
+**Advisory Rating**: STRONG SELL
 
 Risk controls support a smaller entry.
 
@@ -19,6 +19,16 @@ FINAL TRANSACTION PROPOSAL: **BUY**
 """
 
     assert extract_recommendation(content, "investment") == "BUY"
+
+
+def test_advisory_rating_tail_does_not_become_executable_action():
+    content = """
+Risk controls support staying flat for now.
+
+**Advisory Rating**: **STRONG SELL**
+"""
+
+    assert extract_recommendation(content, "trading") is None
 
 
 def test_ensure_final_transaction_proposal_preserves_existing_analysis():
@@ -46,4 +56,3 @@ def test_position_transition_contract_covers_reversal_and_neutral_paths():
     assert get_position_transition("LONG", "SHORT")["action"] == "REVERSE_TO_SHORT"
     assert get_position_transition("SHORT", "LONG")["action"] == "REVERSE_TO_LONG"
     assert get_position_transition("NEUTRAL", "NEUTRAL")["action"] == "STAY_NEUTRAL"
-

@@ -63,6 +63,18 @@ def _empty_llm_usage_summary() -> Dict[str, Any]:
     }
 
 
+def _empty_data_quality_summary() -> Dict[str, Any]:
+    return {
+        "quality_pass": 0,
+        "quality_warn": 0,
+        "quality_fail": 0,
+        "quality_unknown": 0,
+        "stale_sources": [],
+        "fallback_sources": [],
+        "critical_failures": [],
+    }
+
+
 def _add_llm_usage_summary(summary: Dict[str, Any], payload: Dict[str, Any]) -> None:
     summary["llm_call_events"] += 1
     summary["total_llm_time_seconds"] += float(
@@ -222,6 +234,7 @@ class RunAuditLogger:
                     "total_tool_output_chars": 0,
                     "suspect_tool_events": 0,
                     **_empty_llm_usage_summary(),
+                    **_empty_data_quality_summary(),
                     "llm_usage_by_model": {},
                     "llm_usage_by_role": {},
                 },
@@ -294,6 +307,7 @@ class RunAuditLogger:
                 output = (payload or {}).get("output", "")
                 run_data["summary"]["total_tool_output_chars"] += len(str(output or ""))
                 quality = (payload or {}).get("quality_details", {}) or {}
+                data_quality = quality.get("data_quality", {}) if isinstance(quality, dict) else {}
                 status = str((payload or {}).get("status", "") or "").lower()
                 flags = quality.get("flags", []) or []
                 if bool(quality.get("is_suspect", False)):
@@ -303,6 +317,25 @@ class RunAuditLogger:
                 if status in ("degraded", "timeout") or bool(quality.get("is_suspect", False)) or flags:
                     run_data["summary"]["degraded_tool_events"] += 1
                     run_data["summary"]["warning_events"] += 1
+                if isinstance(data_quality, dict) and data_quality:
+                    quality_status = str(data_quality.get("status") or "unknown").lower()
+                    if quality_status not in ("pass", "warn", "fail", "unknown"):
+                        quality_status = "unknown"
+                    run_data["summary"][f"quality_{quality_status}"] += 1
+
+                    source_id = str(data_quality.get("source_id") or "unknown")
+                    if "stale_source" in (data_quality.get("flags") or []):
+                        stale_sources = set(run_data["summary"].get("stale_sources") or [])
+                        stale_sources.add(source_id)
+                        run_data["summary"]["stale_sources"] = sorted(stale_sources)
+                    if data_quality.get("fallback_from"):
+                        fallback_sources = set(run_data["summary"].get("fallback_sources") or [])
+                        fallback_sources.add(source_id)
+                        run_data["summary"]["fallback_sources"] = sorted(fallback_sources)
+                    if quality_status == "fail" and data_quality.get("criticality") == "critical":
+                        critical_failures = set(run_data["summary"].get("critical_failures") or [])
+                        critical_failures.add(source_id)
+                        run_data["summary"]["critical_failures"] = sorted(critical_failures)
             elif event_type == "llm_call":
                 payload = payload or {}
                 _add_llm_usage_summary(run_data["summary"], payload)

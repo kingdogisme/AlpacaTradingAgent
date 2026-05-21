@@ -333,6 +333,9 @@ class TradingMemoryLog:
             if tag_line.endswith("| pending]"):
                 fields = [f.strip() for f in tag_line[1:-1].split("|")]
                 parsed_tag = self._parse_tag_fields(fields)
+                if not parsed_tag:
+                    new_blocks.append(block)
+                    continue
                 for index, upd in enumerate(normalized_updates):
                     if upd["trade_date"] != parsed_tag["date"] or upd["ticker"] != parsed_tag["ticker"]:
                         continue
@@ -379,6 +382,8 @@ class TradingMemoryLog:
         if len(fields) < 5:
             return None
         parsed_tag = self._parse_tag_fields(fields)
+        if not parsed_tag:
+            return None
         body = "\n".join(lines[1:]).strip()
         decision = self._DECISION_RE.search(body)
         reflection = self._REFLECTION_RE.search(body)
@@ -407,7 +412,7 @@ class TradingMemoryLog:
         value = str(horizon or "swing").strip().lower()
         return value if value in {"swing", "position", "trend"} else "swing"
 
-    def _parse_tag_fields(self, fields: list[str]) -> dict:
+    def _parse_tag_fields(self, fields: list[str]) -> dict | None:
         # New format: [date | ticker | horizon | action | rating | pending]
         if len(fields) >= 6 and fields[2] in {"swing", "position", "trend"}:
             pending = fields[5] == "pending"
@@ -424,6 +429,21 @@ class TradingMemoryLog:
             }
 
         # Backward-compatible legacy format: [date | ticker | action | rating | pending]
+        if len(fields) == 4:
+            pending = fields[3] == "pending"
+            return {
+                "date": fields[0],
+                "ticker": fields[1],
+                "horizon": "swing",
+                "action": fields[2],
+                "rating": "n/a",
+                "pending": pending,
+                "raw": None,
+                "alpha": None,
+                "holding": None,
+            }
+        if len(fields) < 5:
+            return None
         pending = fields[4] == "pending"
         return {
             "date": fields[0],

@@ -7,6 +7,13 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_horizon_context,
 )
 from tradingagents.agents.utils.language import language_instruction
+from tradingagents.agents.utils.source_policy import (
+    is_point_in_time_mode,
+    log_openai_source_skip,
+    openai_sources_policy,
+    point_in_time_source_note,
+    should_bind_openai_source,
+)
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -29,13 +36,38 @@ def create_news_analyst(llm, toolkit):
         openai_available = toolkit.has_openai_web_search()
         finnhub_available = toolkit.has_finnhub()
         coindesk_available = toolkit.has_coindesk()
-        sellthenews_available = toolkit.has_sellthenews("sellthenews_news_enabled")
-
-        global_news_available = (
+        point_in_time_mode = is_point_in_time_mode(current_date, toolkit.config)
+        sellthenews_available = toolkit.has_sellthenews("sellthenews_news_enabled") and not point_in_time_mode
+        fast_news_available = bool(
+            sellthenews_available
+            or ((not is_crypto) and finnhub_available)
+            or (is_crypto and coindesk_available)
+        )
+        policy = openai_sources_policy(toolkit.config)
+        openai_bind_available = bool(
             toolkit.config["online_tools"]
             and openai_available
-            and bool(toolkit.config.get("news_global_openai_enabled", False))
+            and not point_in_time_mode
+            and (
+                bool(toolkit.config.get("news_global_openai_enabled", False))
+                or not fast_news_available
+                or policy == "eager"
+            )
         )
+        global_news_available = should_bind_openai_source(
+            toolkit.config,
+            source_type="news",
+            openai_available=openai_bind_available,
+            non_openai_available=fast_news_available,
+        )
+        if not global_news_available:
+            log_openai_source_skip(
+                "news",
+                toolkit.config,
+                openai_available=bool(toolkit.config["online_tools"] and openai_available),
+                non_openai_available=fast_news_available,
+                point_in_time_mode=point_in_time_mode,
+            )
         tools = []
         if sellthenews_available:
             tools.append(toolkit.get_sellthenews_stock_news)
@@ -75,6 +107,7 @@ def create_news_analyst(llm, toolkit):
         source_guidance = (
             " Use all currently available news tools before concluding."
             f" Active sources: {', '.join(source_labels)}."
+            f" {point_in_time_source_note(current_date, toolkit.config)}"
             " Prefer SellTheNews MCP when available; if its output is sparse or fallback-labeled, cross-check with the remaining sources."
             " For `get_finnhub_news_recent`, pass ticker and curr_date from context."
             " Do not request broad macro/global web searches unless OpenAI global web search is listed as an active source;"

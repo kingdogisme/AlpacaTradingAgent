@@ -1,5 +1,7 @@
 from typing import Optional
+import json
 import datetime
+import re
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -17,22 +19,43 @@ from rich.tree import Tree
 from rich import box
 from rich.align import Align
 from rich.rule import Rule
+from pathlib import Path
 
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.graph.checkpointer import clear_checkpoint
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.run_logger import get_run_audit_logger
-from tradingagents.eval import EpisodeLedger
+from tradingagents.dataflows.data_quality import (
+    find_audit_path,
+    load_audit_payload,
+    open_artifact_from_audit,
+    quality_events_from_audit,
+    summarize_quality_events,
+)
+from tradingagents.eval.indexing import (
+    build_quality_index,
+    build_retrieval_pack,
+    build_run_index,
+    rebuild_run_indexes,
+    utc_now_iso,
+)
+from tradingagents.alpha_discovery import AlphaDiscoveryRepository, AlphaDiscoveryService
+from tradingagents.alpha_discovery.models import Handoff
+from tradingagents.alpha_discovery.reporting import compact_candidate, compact_event, count_values, json_envelope
 from cli.models import AnalystType
 from cli.utils import *
 
 console = Console()
 
 
+def _ad_print(kind: str, payload: dict | list) -> None:
+    console.print_json(json_envelope(kind, payload))
+
+
 def _safe_ledger(config):
     if not config.get("episode_ledger_enabled", True):
         return None
     try:
+        from tradingagents.eval import EpisodeLedger
+
         return EpisodeLedger(config.get("episode_ledger_path"))
     except Exception as exc:
         console.print(f"[yellow][EVAL] Episode ledger unavailable: {exc}[/yellow]")
@@ -77,11 +100,382 @@ def _ledger_fail(ledger, run_id, error_message):
     except Exception as exc:
         console.print(f"[yellow][EVAL] Failed to mark episode failure: {exc}[/yellow]")
 
+
+def _resolve_audit_payload(
+    *,
+    run_id: str | None = None,
+    audit_path: str | None = None,
+) -> tuple[dict, Path]:
+    if audit_path:
+        path = Path(audit_path).expanduser()
+    elif run_id:
+        found = find_audit_path(run_id)
+        if not found:
+            raise typer.BadParameter(f"Could not find audit log for run_id={run_id}")
+        path = found
+    else:
+        raise typer.BadParameter("Provide --run-id or --audit-path")
+    if not path.exists():
+        raise typer.BadParameter(f"Audit path does not exist: {path}")
+    return load_audit_payload(path), path
+
+
+def _quality_summary_from_payload(audit: dict) -> dict:
+    events = quality_events_from_audit(audit)
+    return summarize_quality_events(
+        events,
+        run_id=audit.get("run_id"),
+        symbol=audit.get("symbol"),
+        trade_date=audit.get("trade_date"),
+    )
+
+
+def _index_envelope(records: list[dict], *, summary: dict | None = None) -> dict:
+    return {
+        "generated_at": utc_now_iso(),
+        "summary": summary or {"records": len(records)},
+        "records": records,
+        "artifact_refs": [
+            item.get("audit_ref") or item.get("artifact_ref")
+            for item in records
+            if item.get("audit_ref") or item.get("artifact_ref")
+        ],
+        "recommended_debug_queries": [
+            "python -m cli.main retrieval-pack --type risk_review --run-id <run_id> --format json",
+            "python -m cli.main quality-index --run-id <run_id> --format json",
+        ],
+    }
+
 app = typer.Typer(
     name="TradingAgents",
     help="TradingAgents CLI: Auditable Multi-Agent Trading Research Framework",
     add_completion=True,  # Enable shell completion
 )
+
+
+class _TradingAgentsGraphRunner:
+    def __init__(self, config: dict):
+        self.config = config
+
+    def run(self, ticker: str, trade_date: str, analysts: list[str]):
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+        graph = TradingAgentsGraph(selected_analysts=analysts, config=self.config, debug=False)
+        final_state, final_signal = graph.propagate(ticker, trade_date)
+        run_id = getattr(graph, "last_run_id", None)
+        audit_logger = get_run_audit_logger()
+        run_id = run_id or audit_logger.get_active_run_id(symbol=ticker)
+        if not run_id:
+            audit_path = audit_logger.get_run_file_path(symbol=ticker)
+            if audit_path:
+                run_id = Path(str(audit_path)).stem
+        confidence = None
+        final_text = str(final_state.get("final_trade_decision", "") if isinstance(final_state, dict) else "")
+        confidence_match = re.search(r"confidence\**\s*:\s*([A-Za-z]+)", final_text, flags=re.IGNORECASE)
+        if confidence_match:
+            confidence = confidence_match.group(1)
+        return run_id, final_signal, confidence
+
+
+def _record_ad_handoff_for_ticker(
+    *,
+    ticker: str,
+    run_id: str | None,
+    final_signal: str | None,
+    confidence: str | None,
+    config: dict,
+) -> str | None:
+    if not run_id:
+        return None
+    try:
+        repository = AlphaDiscoveryRepository(config.get("alpha_discovery_db_path"))
+        candidates = repository.list_candidates(
+            tiers=["A", "B", "C", "Rejected"],
+            status="open",
+            limit=1,
+            ticker=ticker,
+        )
+        if not candidates:
+            return None
+        candidate = candidates[0]
+        repository.upsert_handoff(
+            Handoff(
+                candidate_id=candidate["candidate_id"],
+                run_id=run_id,
+                status="completed" if final_signal else "unknown",
+                executed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                ata_final_signal=final_signal,
+                ata_confidence=confidence,
+            )
+        )
+        return candidate["candidate_id"]
+    except Exception as exc:
+        console.print(f"[yellow][AD] Failed to record ticker handoff: {exc}[/yellow]")
+        return None
+
+
+@app.command("cron-discover")
+def cron_discover(
+    source: str = typer.Option("wsb,dd", help="Comma-separated sources: wsb,dd."),
+    max_candidates: int = typer.Option(25, help="Maximum candidates to persist."),
+) -> None:
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    sources = [part.strip().lower() for part in source.split(",") if part.strip()]
+    summary = service.discover(sources=sources, max_candidates=max_candidates)
+    _ad_print(
+        "cron_discover",
+        {
+            "batch_id": summary["batch_id"],
+            "raw_discoveries": summary["raw_discoveries"],
+            "tier_counts": summary["tier_counts"],
+            "top_rejection_reasons": summary["top_rejection_reasons"],
+            "top_candidates": [
+                {
+                    "ticker": candidate.ticker,
+                    "tier": candidate.tier,
+                    "alpha_score": candidate.alpha_score,
+                    "promotion_gate": (candidate.score_components or {}).get("promotion_gate"),
+                    "confirmation_sources": (candidate.score_components or {}).get("confirmation_sources", []),
+                    "risk_flags": candidate.risk_flags,
+                }
+                for candidate in summary.get("candidates", [])[:10]
+            ],
+        },
+    )
+
+
+@app.command("cron-confirm")
+def cron_confirm(
+    tier: str = typer.Option("B,C", help="Comma-separated tiers to re-check for promotion."),
+    max_candidates: int = typer.Option(25, help="Maximum open candidates to re-confirm."),
+) -> None:
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    tiers = [part.strip() for part in tier.split(",") if part.strip()]
+    _ad_print("cron_confirm", service.promote_existing(tiers=tiers, max_candidates=max_candidates))
+
+
+@app.command("cron-run")
+def cron_run(
+    tier: str = typer.Option("A", help="Basket tier to run."),
+    max_symbols: int = typer.Option(6, help="Maximum symbols to inspect or execute."),
+    execute: bool = typer.Option(False, help="Actually call ATA. Default is dry-run."),
+    trade_date: str = typer.Option(
+        datetime.date.today().isoformat(),
+        help="ATA trade date in YYYY-MM-DD format.",
+    ),
+    ticker: str = typer.Option(None, help="Optional ticker filter for manual AD handoff runs."),
+) -> None:
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    runner = _TradingAgentsGraphRunner(DEFAULT_CONFIG.copy()) if execute else None
+    results = service.run_candidates(
+        tier=tier,
+        max_symbols=max_symbols,
+        execute=execute,
+        trade_date=trade_date,
+        graph_runner=runner,
+        ticker=ticker,
+    )
+    _ad_print(
+        "cron_run",
+        {
+            "tier": tier,
+            "execute": execute,
+            "result_count": len(results),
+            "run_status_counts": count_values(results, "run_status"),
+            "candidates": [compact_candidate(row) for row in results],
+        },
+    )
+
+
+@app.command("ata-run")
+def ata_run(
+    ticker: str = typer.Argument(..., help="Ticker to analyze."),
+    trade_date: str = typer.Option(
+        datetime.date.today().isoformat(),
+        help="ATA trade date in YYYY-MM-DD format.",
+    ),
+    horizon: str = typer.Option(
+        "position",
+        help="Trading horizon: swing, position, or trend. Position means 1-3 months.",
+    ),
+    analysts: str = typer.Option(
+        "market,fundamentals,news,social,macro",
+        help="Comma-separated analysts.",
+    ),
+    record_ad_handoff: bool = typer.Option(
+        True,
+        help="Link the run to the latest open AD candidate for this ticker when present.",
+    ),
+) -> None:
+    config = DEFAULT_CONFIG.copy()
+    config["trading_horizon"] = horizon
+    config["trading_mode"] = "investment"
+    selected_analysts = [part.strip() for part in analysts.split(",") if part.strip()]
+    runner = _TradingAgentsGraphRunner(config)
+    run_id, final_signal, confidence = runner.run(ticker.upper(), trade_date, selected_analysts)
+    candidate_id = (
+        _record_ad_handoff_for_ticker(
+            ticker=ticker.upper(),
+            run_id=run_id,
+            final_signal=final_signal,
+            confidence=confidence,
+            config=config,
+        )
+        if record_ad_handoff
+        else None
+    )
+    _ad_print(
+        "ata_run",
+        {
+            "ticker": ticker.upper(),
+            "trade_date": trade_date,
+            "horizon": horizon,
+            "analysts": selected_analysts,
+            "run_id": run_id,
+            "final_signal": final_signal,
+            "confidence": confidence,
+            "ad_candidate_id": candidate_id,
+        },
+    )
+
+
+@app.command("cron-resolve")
+def cron_resolve(
+    as_of: str = typer.Option(..., help="Resolve candidate outcomes as of YYYY-MM-DD."),
+) -> None:
+    from tradingagents.alpha_discovery.outcomes import OutcomeResolver
+
+    repository = AlphaDiscoveryRepository(DEFAULT_CONFIG.get("alpha_discovery_db_path"))
+    outcomes = OutcomeResolver(repository, config=DEFAULT_CONFIG).resolve_open_candidates(as_of=as_of)
+    _ad_print("cron_resolve", [outcome.__dict__ for outcome in outcomes])
+
+
+@app.command("basket-list")
+def basket_list(
+    tier: str = typer.Option("A,B", help="Comma-separated tiers, e.g. A,B,C,Rejected."),
+    status: str = typer.Option("open", help="Candidate status filter."),
+    limit: int = typer.Option(25, help="Maximum rows to print."),
+) -> None:
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    tiers = [part.strip() for part in tier.split(",") if part.strip()]
+    rows = service.list_candidates(tiers=tiers, status=status, limit=limit)
+    _ad_print("basket_list", [compact_candidate(row) for row in rows])
+
+
+@app.command("basket-report")
+def basket_report(
+    status: str = typer.Option("open", help="Candidate status filter."),
+) -> None:
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    _ad_print("basket_report", service.basket_report(status=status))
+
+
+@app.command("basket-eval-report")
+def basket_eval_report(
+    status: str = typer.Option("open", help="Candidate status filter."),
+) -> None:
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    _ad_print("basket_eval_report", service.evaluation_report(status=status))
+
+
+@app.command("ad-events")
+def ad_events(
+    batch_id: str = typer.Option(None, help="Filter by discovery/confirmation batch id."),
+    candidate_id: str = typer.Option(None, help="Filter by candidate id."),
+    event_type: str = typer.Option(None, help="Filter by event type."),
+    status: str = typer.Option(None, help="Filter by event status."),
+    limit: int = typer.Option(100, help="Maximum events to print."),
+) -> None:
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    _ad_print(
+        "ad_events",
+        [
+            compact_event(row)
+            for row in service.list_events(
+                batch_id=batch_id,
+                candidate_id=candidate_id,
+                event_type=event_type,
+                status=status,
+                limit=limit,
+            )
+        ],
+    )
+
+
+@app.command("ad-health")
+def ad_health() -> None:
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    _ad_print("ad_health", service.health_report())
+
+
+@app.command("ad-ingest")
+def ad_ingest(
+    file: str = typer.Option(..., help="JSON file containing external watchlist candidates."),
+    source: str = typer.Option("n8n_watchlist", help="Logical source name for the ingest batch."),
+    max_candidates: int = typer.Option(25, help="Maximum candidates to persist after scoring/dedup."),
+) -> None:
+    payload = json.loads(Path(file).read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        candidates = payload.get("candidates") or payload.get("items") or payload.get("data") or []
+    elif isinstance(payload, list):
+        candidates = payload
+    else:
+        raise typer.BadParameter("JSON payload must be a list or an object containing candidates/items/data.")
+    if not isinstance(candidates, list):
+        raise typer.BadParameter("Resolved candidate payload must be a list.")
+    service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
+    summary = service.ingest_external_candidates(
+        candidates,
+        source=source,
+        max_candidates=max_candidates,
+    )
+    _ad_print(
+        "ad_ingest",
+        {
+            "batch_id": summary["batch_id"],
+            "source": summary["source"],
+            "accepted": summary["accepted"],
+            "skipped": summary["skipped"],
+            "tickers": summary["tickers"],
+            "tier_counts": summary["tier_counts"],
+        },
+    )
+
+
+@app.command("cron-schedule")
+def cron_schedule() -> None:
+    """Print cron-friendly Alpha Discovery windows in America/New_York time."""
+    console.print_json(
+        json.dumps(
+            {
+                "timezone": "America/New_York",
+                "discovery_windows": [
+                    {"time": "08:15", "purpose": "daily premarket discovery rebuild"},
+                    {"time": "15:30", "purpose": "optional late-day discovery only when live-news/volume shock is active"},
+                    {"time": "20:00", "purpose": "evening DD/news refresh for next session"},
+                ],
+                "confirmation_windows": [
+                    {"time": "09:25", "purpose": "pre-open confirmation pass"},
+                    {"time": "16:30", "purpose": "post-close confirmation pass"},
+                ],
+                "full_ata_windows": ["09:30", "16:45"],
+                "default_daily_ata_budget": DEFAULT_CONFIG.get("alpha_discovery_default_ata_daily_budget", 5),
+                "same_ticker_cooldown_hours": DEFAULT_CONFIG.get("alpha_discovery_full_ata_cooldown_hours", 24),
+                "commands": {
+                    "discover": "python -m cli.main cron-discover --source wsb,dd --max-candidates 25",
+                    "confirm": "python -m cli.main cron-confirm --tier B,C --max-candidates 25",
+                    "dry_run": "python -m cli.main cron-run --tier A --max-symbols 6",
+                    "execute": "python -m cli.main cron-run --tier A --max-symbols 6 --execute",
+                    "resolve": "python -m cli.main cron-resolve --as-of YYYY-MM-DD",
+                    "evaluate": "python -m cli.main basket-eval-report --status open",
+                    "events": "python -m cli.main ad-events --limit 100",
+                    "health": "python -m cli.main ad-health",
+                    "ingest": "python -m cli.main ad-ingest --file /path/to/candidates.json --source n8n_watchlist --max-candidates 25",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 # Create a deque to store recent messages with a maximum length
@@ -1161,6 +1555,8 @@ def run_analysis():
                 horizon=final_state.get("trading_horizon", config.get("trading_horizon", "swing")),
             )
             if config.get("checkpoint_enabled", False):
+                from tradingagents.graph.checkpointer import clear_checkpoint
+
                 clear_checkpoint(
                     config["data_cache_dir"],
                     selections["ticker"],
@@ -1196,6 +1592,238 @@ def run_analysis():
         display_complete_report(final_state)
 
         update_display(layout)
+
+
+@app.command("run-index")
+def run_index(
+    run_id: Optional[str] = typer.Option(None, help="Run id to rebuild and show."),
+    symbol: Optional[str] = typer.Option(None, help="Symbol filter."),
+    since: Optional[str] = typer.Option(None, help="Only include trade_date >= YYYY-MM-DD."),
+    until: Optional[str] = typer.Option(None, help="Only include trade_date <= YYYY-MM-DD."),
+    horizon: Optional[str] = typer.Option(None, help="Horizon filter."),
+    prompt_version: Optional[str] = typer.Option(None, help="Prompt version filter."),
+    config_hash: Optional[str] = typer.Option(None, help="Config hash filter."),
+    include_high_leakage: bool = typer.Option(False, help="Include high-leakage historical runs."),
+    format: str = typer.Option("table", help="Output format: table or json."),
+) -> None:
+    """Build and query the agent-readable run index."""
+    ledger = _safe_ledger(DEFAULT_CONFIG)
+    if ledger is None:
+        raise typer.BadParameter("Episode ledger unavailable.")
+    if run_id:
+        build_run_index(ledger, run_id)
+    else:
+        rebuild_run_indexes(ledger, symbol=symbol, since=since, until=until)
+    filters = {
+        "run_id": run_id,
+        "symbol": symbol,
+        "since": since,
+        "until": until,
+        "horizon": horizon,
+        "prompt_version": prompt_version,
+        "config_hash": config_hash,
+        "include_high_leakage": include_high_leakage,
+    }
+    records = ledger.list_run_index(filters)
+    envelope = _index_envelope(
+        records,
+        summary={
+            "records": len(records),
+            "quality_status_distribution": {
+                status: sum(1 for item in records if item.get("quality_status") == status)
+                for status in ("pass", "warn", "fail", "unknown")
+            },
+        },
+    )
+    if format == "json":
+        console.print_json(data=envelope)
+        return
+    if format != "table":
+        raise typer.BadParameter("format must be table or json")
+    table = Table(title="Run Index", box=box.SIMPLE)
+    for column in ("run_id", "symbol", "date", "horizon", "action", "confidence", "quality", "prompt"):
+        table.add_column(column)
+    for item in records:
+        table.add_row(
+            str(item.get("run_id")),
+            str(item.get("symbol")),
+            str(item.get("trade_date")),
+            str(item.get("horizon") or ""),
+            str(item.get("final_action") or ""),
+            str(item.get("confidence") or ""),
+            str(item.get("quality_status") or "unknown"),
+            str(item.get("prompt_version") or ""),
+        )
+    console.print(table)
+
+
+@app.command("quality-index")
+def quality_index(
+    run_id: str = typer.Option(..., help="Run id to rebuild and show."),
+    status: Optional[str] = typer.Option(None, help="Comma-separated statuses to include, e.g. warn,fail."),
+    format: str = typer.Option("table", help="Output format: table, json, or jsonl."),
+) -> None:
+    """Build and query the indexed data-quality events for a run."""
+    ledger = _safe_ledger(DEFAULT_CONFIG)
+    if ledger is None:
+        raise typer.BadParameter("Episode ledger unavailable.")
+    build_quality_index(ledger, run_id)
+    statuses = [part.strip().lower() for part in status.split(",") if part.strip()] if status else None
+    records = ledger.list_quality_index(run_id, statuses=statuses)
+    envelope = _index_envelope(
+        records,
+        summary={
+            "run_id": run_id,
+            "records": len(records),
+            "status_distribution": {
+                value: sum(1 for item in records if item.get("status") == value)
+                for value in ("pass", "warn", "fail", "unknown")
+            },
+        },
+    )
+    if format == "json":
+        console.print_json(data=envelope)
+        return
+    if format == "jsonl":
+        for item in records:
+            console.print(json.dumps(item, sort_keys=True, ensure_ascii=False))
+        return
+    if format != "table":
+        raise typer.BadParameter("format must be table, json, or jsonl")
+    table = Table(title=f"Quality Index: {run_id}", box=box.SIMPLE)
+    for column in ("artifact", "tool", "source", "type", "status", "freshness", "flags"):
+        table.add_column(column)
+    for item in records:
+        table.add_row(
+            str(item.get("artifact_ref")),
+            str(item.get("tool_name") or ""),
+            str(item.get("source_id") or ""),
+            str(item.get("dataset_type") or ""),
+            str(item.get("status") or "unknown"),
+            str(item.get("freshness") or "unknown"),
+            ",".join(item.get("flags") or []) or "-",
+        )
+    console.print(table)
+
+
+@app.command("retrieval-pack")
+def retrieval_pack(
+    pack_type: str = typer.Option(..., "--type", help="Pack type: risk_review, ticker_horizon, prompt_audit."),
+    run_id: Optional[str] = typer.Option(None, help="Run id for risk_review."),
+    symbol: Optional[str] = typer.Option(None, help="Symbol for ticker_horizon."),
+    horizon: Optional[str] = typer.Option(None, help="Horizon for ticker_horizon."),
+    prompt_version: Optional[str] = typer.Option(None, help="Prompt version for prompt_audit."),
+    config_hash: Optional[str] = typer.Option(None, help="Config hash for prompt_audit."),
+    limit: int = typer.Option(5, help="Maximum indexed runs to include."),
+    token_budget: int = typer.Option(4000, help="Approximate token budget."),
+    include_high_leakage: bool = typer.Option(False, help="Include high-leakage historical runs."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    """Build a compact retrieval pack for AI-agent or developer debugging."""
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    ledger = _safe_ledger(DEFAULT_CONFIG)
+    if ledger is None:
+        raise typer.BadParameter("Episode ledger unavailable.")
+    payload = build_retrieval_pack(
+        ledger,
+        pack_type=pack_type,
+        run_id=run_id,
+        symbol=symbol,
+        horizon=horizon,
+        prompt_version=prompt_version,
+        config_hash=config_hash,
+        limit=limit,
+        token_budget=token_budget,
+        include_high_leakage=include_high_leakage,
+    )
+    console.print_json(data=payload)
+
+
+@app.command("quality-summary")
+def quality_summary(
+    run_id: Optional[str] = typer.Option(None, help="Run id to locate under eval_results."),
+    audit_path: Optional[str] = typer.Option(None, help="Path to a run audit JSON file."),
+    format: str = typer.Option("table", help="Output format: table or json."),
+) -> None:
+    """Summarize data quality events for a run audit log."""
+    audit, path = _resolve_audit_payload(run_id=run_id, audit_path=audit_path)
+    summary = _quality_summary_from_payload(audit)
+    summary["audit_path"] = str(path)
+    if format == "json":
+        console.print_json(data=summary)
+        return
+    if format != "table":
+        raise typer.BadParameter("format must be table or json")
+
+    counts = summary["summary"]
+    table = Table(title=f"Data Quality Summary: {summary.get('run_id')}", box=box.SIMPLE)
+    table.add_column("Metric")
+    table.add_column("Value")
+    for key in ("quality_pass", "quality_warn", "quality_fail", "quality_unknown"):
+        table.add_row(key, str(counts.get(key, 0)))
+    table.add_row("stale_sources", ", ".join(counts.get("stale_sources") or []) or "-")
+    table.add_row("fallback_sources", ", ".join(counts.get("fallback_sources") or []) or "-")
+    table.add_row("critical_failures", ", ".join(counts.get("critical_failures") or []) or "-")
+    table.add_row("audit_path", str(path))
+    console.print(table)
+
+    source_table = Table(title="Source Statuses", box=box.SIMPLE)
+    source_table.add_column("Source")
+    source_table.add_column("Provider")
+    source_table.add_column("Type")
+    source_table.add_column("Status")
+    source_table.add_column("Flags")
+    for source in summary.get("source_statuses", []):
+        source_table.add_row(
+            str(source.get("source_id")),
+            str(source.get("provider") or ""),
+            str(source.get("dataset_type") or ""),
+            str(source.get("status") or "unknown"),
+            ",".join(source.get("flags") or []) or "-",
+        )
+    console.print(source_table)
+
+
+@app.command("quality-events")
+def quality_events(
+    run_id: Optional[str] = typer.Option(None, help="Run id to locate under eval_results."),
+    audit_path: Optional[str] = typer.Option(None, help="Path to a run audit JSON file."),
+    status: Optional[str] = typer.Option(None, help="Comma-separated statuses to include, e.g. warn,fail."),
+    format: str = typer.Option("jsonl", help="Output format: jsonl or json."),
+) -> None:
+    """Emit data quality events for developer and AI-agent debugging."""
+    audit, _path = _resolve_audit_payload(run_id=run_id, audit_path=audit_path)
+    events = quality_events_from_audit(audit)
+    if status:
+        allowed = {part.strip().lower() for part in status.split(",") if part.strip()}
+        events = [event for event in events if str(event.get("status")).lower() in allowed]
+    if format == "json":
+        console.print_json(data=events)
+        return
+    if format != "jsonl":
+        raise typer.BadParameter("format must be jsonl or json")
+    for event in events:
+        console.print(json.dumps(event, sort_keys=True, ensure_ascii=False))
+
+
+@app.command("quality-open")
+def quality_open(
+    artifact_ref: str = typer.Option(..., help="Artifact ref such as tool_call:17."),
+    run_id: Optional[str] = typer.Option(None, help="Run id to locate under eval_results."),
+    audit_path: Optional[str] = typer.Option(None, help="Path to a run audit JSON file."),
+    include_output: bool = typer.Option(True, help="Include the raw tool output in the JSON payload."),
+) -> None:
+    """Open a specific quality artifact from a run audit log."""
+    audit, path = _resolve_audit_payload(run_id=run_id, audit_path=audit_path)
+    artifact = open_artifact_from_audit(audit, artifact_ref)
+    if not artifact:
+        raise typer.BadParameter(f"Artifact not found: {artifact_ref}")
+    artifact["audit_path"] = str(path)
+    if not include_output:
+        output = str(artifact.get("output") or "")
+        artifact["output"] = f"<redacted:{len(output)}_chars>"
+    console.print_json(data=artifact)
 
 
 @app.command()

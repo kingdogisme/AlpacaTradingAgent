@@ -11,6 +11,12 @@ FINAL_BUY = """Thesis body.
 
 FINAL TRANSACTION PROPOSAL: **BUY**"""
 
+FINAL_STRONG_BUY = """Thesis body.
+
+**Advisory Rating**: STRONG BUY
+
+FINAL TRANSACTION PROPOSAL: **BUY**"""
+
 
 class TradingMemoryLogTests(unittest.TestCase):
     def test_store_dedupe_and_resolve_equity_outcome(self):
@@ -130,6 +136,44 @@ class TradingMemoryLogTests(unittest.TestCase):
             self.assertFalse(entries[0]["pending"])
             self.assertEqual(entries[0]["horizon"], "swing")
             self.assertIn("Legacy resolved.", entries[0]["reflection"])
+
+    def test_short_legacy_pending_entries_do_not_crash_outcome_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.md"
+            path.write_text(
+                "[2026-01-02 | AAPL | Hold | pending]\n\n"
+                "DECISION:\nShort legacy body.\n\n<!-- ENTRY_END -->\n\n"
+                "[malformed | pending]\n\n"
+                "DECISION:\nMalformed body.\n",
+                encoding="utf-8",
+            )
+            log = TradingMemoryLog({"memory_log_path": str(path)})
+
+            log.update_with_outcome(
+                ticker="AAPL",
+                trade_date="2026-01-02",
+                raw_return=0.015,
+                alpha_return=None,
+                holding_days=5,
+                reflection="Short legacy resolved.",
+            )
+
+            entries = log.load_entries()
+            self.assertEqual(len(entries), 1)
+            self.assertFalse(entries[0]["pending"])
+            self.assertEqual(entries[0]["rating"], "n/a")
+            self.assertIn("Short legacy resolved.", entries[0]["reflection"])
+
+    def test_multiword_advisory_rating_is_stored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.md"
+            log = TradingMemoryLog({"memory_log_path": str(path)})
+
+            log.store_decision("AAPL", "2026-01-02", FINAL_STRONG_BUY)
+
+            entries = log.load_entries()
+            self.assertEqual(entries[0]["action"], "BUY")
+            self.assertEqual(entries[0]["rating"], "STRONG BUY")
 
 
 if __name__ == "__main__":

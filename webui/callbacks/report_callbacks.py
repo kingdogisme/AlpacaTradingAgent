@@ -12,6 +12,24 @@ from webui.utils.report_validator import validate_reports_for_ui
 from webui.utils.prompt_capture import get_agent_prompt
 
 
+MARKDOWN_REPORT_TYPES = {
+    "market_report",
+    "sentiment_report",
+    "news_report",
+    "fundamentals_report",
+    "macro_report",
+    "research_manager_report",
+    "trader_investment_plan",
+    "final_trade_decision",
+    "portfolio_decision",
+    "bull_report",
+    "bear_report",
+    "aggressive_report",
+    "conservative_report",
+    "neutral_report",
+}
+
+
 def _is_table_row(line):
     if not line:
         return False
@@ -156,6 +174,23 @@ def normalize_decision_markdown_sections(content):
         "recommendation": "Recommendation",
         "confidence": "Confidence",
         "advisory rating": "Advisory Rating",
+        "user recommendation": "User Recommendation",
+        "alpaca execution action": "Alpaca Execution Action",
+        "alpaca action plan": "Alpaca Action Plan",
+        "给用户的操作建议": "给用户的操作建议",
+        "给 alpaca 的直接动作": "给 Alpaca 的直接动作",
+        "操作": "操作",
+        "信心": "信心",
+        "顾问评级": "顾问评级",
+        "判断依据": "判断依据",
+        "风险理由": "风险理由",
+        "必要风控": "必要风控",
+        "时间周期": "时间周期",
+        "交易论点": "交易论点",
+        "失效条件": "失效条件",
+        "复核节奏": "复核节奏",
+        "仓位计划": "仓位计划",
+        "风险预算": "风险预算",
         "reasoning": "Reasoning",
         "risk rationale": "Risk Rationale",
         "required controls": "Required Controls",
@@ -200,6 +235,33 @@ def normalize_decision_markdown_sections(content):
     return normalized.strip()
 
 
+def prepare_report_markdown(content, report_type=None):
+    """Normalize stored report text into Markdown suitable for Dash rendering."""
+    if not content:
+        return content
+
+    normalized = str(content).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if report_type == "market_report":
+        normalized = normalize_market_markdown_sections(normalized)
+    if report_type in {"trader_investment_plan", "final_trade_decision", "portfolio_decision"}:
+        normalized = normalize_decision_markdown_sections(normalized)
+    normalized = normalize_markdown_tables(normalized)
+    return normalized
+
+
+def render_report_markdown(content, *, report_type=None, className="enhanced-markdown-content", style=None):
+    """Render report content as Markdown with consistent Web UI settings."""
+    markdown = prepare_report_markdown(content, report_type)
+    return dcc.Markdown(
+        markdown,
+        mathjax=True,
+        highlight_config={"theme": "dark"},
+        dangerously_allow_html=False,
+        className=className,
+        style=style,
+    )
+
+
 def create_symbol_button(symbol, index, is_active=False):
     """Create a symbol button for pagination"""
     return dbc.Button(
@@ -239,17 +301,11 @@ def create_markdown_content(content, default_message="No content available yet."
     if not content or content.strip() == "":
         content = default_message
     elif not is_loading_message:
-        if report_type == "market_report":
-            content = normalize_market_markdown_sections(content)
-        if report_type in {"trader_investment_plan", "final_trade_decision"}:
-            content = normalize_decision_markdown_sections(content)
-        content = normalize_markdown_tables(content)
+        content = prepare_report_markdown(content, report_type)
     
-    markdown_component = dcc.Markdown(
+    markdown_component = render_report_markdown(
         content,
-        mathjax=True,
-        highlight_config={"theme": "dark"},
-        dangerously_allow_html=False,
+        report_type=report_type,
         className='enhanced-markdown-content',
         style={
             "background": "linear-gradient(135deg, #0F172A 0%, #1E293B 100%)",

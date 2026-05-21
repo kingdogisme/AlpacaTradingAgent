@@ -96,6 +96,18 @@ def create_main_content(lang="en"):
 
     return [
         header,
+        dbc.Row(
+            dbc.Col(
+                dbc.Button(
+                    "Research Evidence",
+                    href="/alpha-discovery/research",
+                    color="secondary",
+                    size="sm",
+                    className="mb-3",
+                ),
+                width="auto",
+            )
+        ),
         alpaca_account_card,
         dbc.Row([
             dbc.Col(config_card, md=6),

@@ -10,8 +10,11 @@ from .models import (
     MemoryItemRecordV1,
     MemoryPromotionRecordV1,
     MemoryRetrievalRecordV1,
+    QualityIndexRecordV1,
+    RetrievalPackRecordV1,
     RewardRecordV1,
     RewardStatusRecordV1,
+    RunIndexRecordV1,
     TraceSpanV1,
 )
 from .rewards import RewardResolver
@@ -25,9 +28,12 @@ __all__ = [
     "MemoryItemRecordV1",
     "MemoryPromotionRecordV1",
     "MemoryRetrievalRecordV1",
+    "QualityIndexRecordV1",
+    "RetrievalPackRecordV1",
     "RewardRecordV1",
     "RewardStatusRecordV1",
     "RewardResolver",
+    "RunIndexRecordV1",
     "TraceSpanV1",
     "parse_decision_text",
 ]

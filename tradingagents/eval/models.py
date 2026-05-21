@@ -143,3 +143,73 @@ class CriticRecordV1:
     improvement_candidates: list[str] = field(default_factory=list)
     parser_status: str = "ok"
     created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class RunIndexRecordV1:
+    index_id: str
+    run_id: str
+    symbol: str
+    trade_date: str
+    horizon: str | None
+    status: str
+    final_action: str | None = None
+    confidence: str | None = None
+    advisory_rating: str | None = None
+    final_signal: str | None = None
+    prompt_version: str | None = None
+    config_hash: str | None = None
+    model_provider: str | None = None
+    quick_model: str | None = None
+    deep_model: str | None = None
+    selected_analysts: list[str] = field(default_factory=list)
+    quality_status: str = "unknown"
+    quality_pass: int = 0
+    quality_warn: int = 0
+    quality_fail: int = 0
+    quality_unknown: int = 0
+    critical_failures: list[str] = field(default_factory=list)
+    stale_sources: list[str] = field(default_factory=list)
+    fallback_sources: list[str] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
+    audit_ref: str | None = None
+    audit_path: str | None = None
+    decision_ref: str | None = None
+    quality_index_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class QualityIndexRecordV1:
+    run_id: str
+    artifact_ref: str
+    tool_name: str | None = None
+    agent_type: str | None = None
+    source_id: str = "unknown"
+    provider: str | None = None
+    dataset_type: str = "unknown"
+    status: str = "unknown"
+    freshness: str = "unknown"
+    accuracy: str = "unknown"
+    completeness: str = "unknown"
+    criticality: str | None = None
+    flags: list[str] = field(default_factory=list)
+    observed_at: str | None = None
+    source_age_days: int | None = None
+    fallback_from: str | None = None
+    timestamp: str | None = None
+    inputs: dict[str, Any] = field(default_factory=dict)
+    output_preview: str = ""
+
+
+@dataclass(frozen=True)
+class RetrievalPackRecordV1:
+    pack_id: str
+    pack_type: str
+    policy_version: str
+    run_id: str | None = None
+    symbol: str | None = None
+    horizon: str | None = None
+    token_budget: int = 4000
+    source_refs: list[str] = field(default_factory=list)
+    summary: dict[str, Any] = field(default_factory=dict)
+    items: list[dict[str, Any]] = field(default_factory=list)

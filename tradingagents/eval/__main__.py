@@ -11,6 +11,7 @@ from rich.table import Table
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
+from .benchmarking import compare_existing_runs, load_benchmark_suite
 from .critic import DEFAULT_CRITIC_VERSION, HeuristicCritic, critic_memory_candidate
 from .export import export_jsonl
 from .ledger import EpisodeLedger
@@ -163,6 +164,80 @@ def export(
     )
     if output:
         console.print(f"Exported {count} JSONL record(s) to {output}.")
+
+
+@app.command("compare-prompts")
+def compare_prompts(
+    suite_path: Path = typer.Option(..., help="Benchmark suite JSON path."),
+    baseline_prompt: Optional[str] = typer.Option(None, help="Baseline prompt version."),
+    candidate_prompt: Optional[str] = typer.Option(None, help="Candidate prompt version."),
+    baseline_config_hash: Optional[str] = typer.Option(None, help="Baseline config hash."),
+    candidate_config_hash: Optional[str] = typer.Option(None, help="Candidate config hash."),
+    baseline_experiment: Optional[str] = typer.Option(None, help="Baseline experiment id."),
+    candidate_experiment: Optional[str] = typer.Option(None, help="Candidate experiment id."),
+    include_high_leakage: bool = typer.Option(False, help="Include high-leakage runs."),
+    strict: bool = typer.Option(False, help="Exit non-zero when any suite case is missing."),
+    format: str = typer.Option("table", help="Output format: table or json."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+) -> None:
+    """Compare existing indexed runs for a fixed benchmark suite."""
+    baseline_filter = {
+        "prompt_version": baseline_prompt,
+        "config_hash": baseline_config_hash,
+        "experiment_id": baseline_experiment,
+    }
+    candidate_filter = {
+        "prompt_version": candidate_prompt,
+        "config_hash": candidate_config_hash,
+        "experiment_id": candidate_experiment,
+    }
+    if not any(baseline_filter.values()) or not any(candidate_filter.values()):
+        raise typer.BadParameter("Provide at least one baseline and one candidate filter.")
+    ledger = EpisodeLedger(ledger_path)
+    suite = load_benchmark_suite(suite_path)
+    result = compare_existing_runs(
+        ledger,
+        suite,
+        baseline_filter=baseline_filter,
+        candidate_filter=candidate_filter,
+        include_high_leakage=include_high_leakage,
+    )
+    if format == "json":
+        console.print_json(data=result)
+    elif format == "table":
+        table = Table(title=f"Prompt Regression: {result['suite_id']}")
+        for column in (
+            "case",
+            "status",
+            "baseline",
+            "candidate",
+            "action",
+            "confidence_delta",
+            "quality",
+            "reward_delta",
+        ):
+            table.add_column(column)
+        for diff in result["case_diffs"]:
+            table.add_row(
+                str(diff.get("case_id")),
+                str(diff.get("status")),
+                str(diff.get("baseline_run_id") or ("missing" if diff.get("missing_baseline") else "")),
+                str(diff.get("candidate_run_id") or ("missing" if diff.get("missing_candidate") else "")),
+                f"{diff.get('baseline_action')} -> {diff.get('candidate_action')}"
+                if diff.get("status") == "compared"
+                else "-",
+                _fmt(diff.get("confidence_delta")),
+                f"{diff.get('baseline_quality_status')} -> {diff.get('candidate_quality_status')}"
+                if diff.get("status") == "compared"
+                else "-",
+                _fmt(diff.get("reward_delta")),
+            )
+        console.print(table)
+        console.print_json(data=result["summary"])
+    else:
+        raise typer.BadParameter("format must be table or json")
+    if strict and result["missing_cases"]:
+        raise typer.Exit(1)
 
 
 def _fmt(value: float | None) -> str:

@@ -35,10 +35,10 @@ class FakeToolkit:
         return True
 
     def has_finnhub(self):
-        return True
+        return bool(self.config.get("fake_finnhub_available", True))
 
     def has_coindesk(self):
-        return True
+        return bool(self.config.get("fake_coindesk_available", True))
 
     def has_sellthenews(self, feature_key=None):
         return (
@@ -64,7 +64,13 @@ class CapturingLLM:
 class NewsLatencyControlTests(unittest.TestCase):
     def test_news_analyst_excludes_broad_global_openai_by_default(self):
         config = DEFAULT_CONFIG.copy()
-        config.update({"online_tools": True, "news_global_openai_enabled": False})
+        config.update(
+            {
+                "online_tools": True,
+                "news_global_openai_enabled": False,
+                "point_in_time_source_policy": "live",
+            }
+        )
         llm = CapturingLLM()
         node = create_news_analyst(llm, FakeToolkit(config))
 
@@ -85,7 +91,14 @@ class NewsLatencyControlTests(unittest.TestCase):
 
     def test_news_analyst_can_enable_broad_global_openai_explicitly(self):
         config = DEFAULT_CONFIG.copy()
-        config.update({"online_tools": True, "news_global_openai_enabled": True})
+        config.update(
+            {
+                "online_tools": True,
+                "news_global_openai_enabled": True,
+                "openai_sources_policy": "eager",
+                "point_in_time_source_policy": "live",
+            }
+        )
         llm = CapturingLLM()
         node = create_news_analyst(llm, FakeToolkit(config))
 
@@ -134,7 +147,13 @@ class NewsLatencyControlTests(unittest.TestCase):
 
     def test_social_analyst_keeps_openai_stock_news_as_low_priority_backstop(self):
         config = DEFAULT_CONFIG.copy()
-        config.update({"online_tools": True, "grounded_social_evidence_enabled": False})
+        config.update(
+            {
+                "online_tools": True,
+                "grounded_social_evidence_enabled": False,
+                "point_in_time_source_policy": "live",
+            }
+        )
         llm = CapturingLLM()
         node = create_social_media_analyst(llm, FakeToolkit(config))
 
@@ -150,7 +169,55 @@ class NewsLatencyControlTests(unittest.TestCase):
         self.assertIn("FINAL TRANSACTION PROPOSAL: **HOLD**", result["sentiment_report"])
         self.assertEqual(llm.bound_tool_names[-1][0], "get_sellthenews_social_sentiment")
         self.assertIn("get_reddit_stock_info", llm.bound_tool_names[-1])
-        self.assertEqual(llm.bound_tool_names[-1][-1], "get_stock_news_openai")
+        self.assertNotIn("get_stock_news_openai", llm.bound_tool_names[-1])
+
+    def test_social_analyst_binds_openai_fallback_when_mcp_unavailable(self):
+        config = DEFAULT_CONFIG.copy()
+        config.update(
+            {
+                "online_tools": True,
+                "grounded_social_evidence_enabled": False,
+                "sellthenews_enabled": False,
+                "point_in_time_source_policy": "live",
+            }
+        )
+        llm = CapturingLLM()
+        node = create_social_media_analyst(llm, FakeToolkit(config))
+
+        with patch("tradingagents.agents.analysts.social_media_analyst.capture_agent_prompt"):
+            node(
+                {
+                    "trade_date": "2026-05-03",
+                    "company_of_interest": "LI",
+                    "messages": [],
+                }
+            )
+
+        self.assertEqual(llm.bound_tool_names[-1], ["get_reddit_stock_info", "get_stock_news_openai"])
+
+    def test_news_analyst_binds_openai_fallback_when_fast_sources_unavailable(self):
+        config = DEFAULT_CONFIG.copy()
+        config.update(
+            {
+                "online_tools": True,
+                "sellthenews_enabled": False,
+                "fake_finnhub_available": False,
+                "point_in_time_source_policy": "live",
+            }
+        )
+        llm = CapturingLLM()
+        node = create_news_analyst(llm, FakeToolkit(config))
+
+        with patch("tradingagents.agents.analysts.news_analyst.capture_agent_prompt"):
+            node(
+                {
+                    "trade_date": "2026-05-03",
+                    "company_of_interest": "NVDA",
+                    "messages": [],
+                }
+            )
+
+        self.assertIn("get_global_news_openai", llm.bound_tool_names[-1])
 
     def test_social_analyst_can_disable_openai_stock_news_explicitly(self):
         config = DEFAULT_CONFIG.copy()
@@ -159,6 +226,7 @@ class NewsLatencyControlTests(unittest.TestCase):
                 "online_tools": True,
                 "grounded_social_evidence_enabled": False,
                 "social_openai_stock_news_enabled": False,
+                "point_in_time_source_policy": "live",
             }
         )
         llm = CapturingLLM()

@@ -88,7 +88,7 @@ def register_storage_callbacks(app):
             "analyst_macro": analyst_macro,
             "research_depth": research_depth,
             "allow_shorts": allow_shorts,
-            "trading_horizon": trading_horizon or "swing",
+            "trading_horizon": trading_horizon or "position",
             "loop_enabled": loop_enabled,
             "loop_interval": loop_interval,
             "market_hour_enabled": market_hour_enabled,

@@ -238,6 +238,11 @@ Set `LLM_PROVIDER` in `.env`, the CLI, or the WebUI. Supported providers include
   - Set `ALPACA_USE_PAPER=False` only when intentionally testing live execution
 
 #### Optional APIs
+- **SEC EDGAR** (official structured fundamentals source):
+  - No API key is required, but SEC fair-access guidance requires a descriptive User-Agent.
+  - Set `SEC_EDGAR_USER_AGENT` to an app/contact string before long-running cron use.
+  - Used by the fundamentals analyst for official `submissions` metadata and structured XBRL `companyfacts`; secondary sources should not override SEC filing facts.
+
 - **Alpha Vantage API Key** (optional MCP fundamentals source):
   - Get from [Alpha Vantage](https://www.alphavantage.co/support/#api-key)
   - Used by the fundamentals analyst for company overview, financial statements, earnings, estimates, and insider transactions

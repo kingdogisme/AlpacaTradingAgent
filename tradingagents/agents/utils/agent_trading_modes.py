@@ -47,6 +47,13 @@ DEFAULT_HORIZON_PROFILES = {
 }
 
 
+def _without_advisory_rating_lines(content: str) -> str:
+    """Remove advisory metadata before heuristic executable-action fallback parsing."""
+    return "\n".join(
+        line for line in str(content or "").splitlines() if "ADVISORY RATING" not in line.upper()
+    )
+
+
 def get_horizon_context(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return normalized trading-horizon instructions for prompts and execution gating."""
     cfg = config or {}
@@ -196,6 +203,7 @@ def extract_recommendation(response_content: str, trading_mode: str) -> Optional
         Extracted recommendation or None if not found
     """
     content = response_content.upper()
+    fallback_content = _without_advisory_rating_lines(response_content).upper()
 
     if trading_mode == "investment":
         # Look for BUY/HOLD/SELL patterns
@@ -217,7 +225,7 @@ def extract_recommendation(response_content: str, trading_mode: str) -> Optional
 
         # Fallback - look for standalone actions at end
         for action in TradingModeConfig.INVESTMENT_ACTIONS:
-            if f"**{action}**" in content[-100:]:  # Check last 100 chars
+            if f"**{action}**" in fallback_content[-100:]:  # Check last 100 chars
                 return action
 
     else:  # trading mode
@@ -243,7 +251,7 @@ def extract_recommendation(response_content: str, trading_mode: str) -> Optional
 
         # Fallback - look for standalone actions at end
         for action in TradingModeConfig.TRADING_ACTIONS:
-            if f"**{action}**" in content[-100:]:  # Check last 100 chars
+            if f"**{action}**" in fallback_content[-100:]:  # Check last 100 chars
                 return action
 
     return None

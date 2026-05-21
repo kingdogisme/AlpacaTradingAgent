@@ -24,6 +24,12 @@ should the agent change itself?"
 
 The first phase enables four concrete workflows.
 
+The system is also moving toward an architecture where AI agents are first-class
+readers of history, memory, and evaluation data. See
+[Agent/LLM-Friendly Architecture](agent-llm-friendly-architecture.md) for the
+information hierarchy, retrieval-pack design, and token-budget contracts that
+should guide future history and memory work.
+
 ### 1. Decision Quality Tracking
 
 Every completed run can be evaluated after the holding period. For swing
@@ -338,6 +344,11 @@ Candidate learned decisions:
 
 This is safer and more realistic than attempting direct RL on a closed-source
 LLM.
+
+For an implementation-ready backlog that expands the most valuable next steps
+into concrete data contracts, tests, acceptance criteria, and agent-readable
+debug surfaces, see
+[Future Improvement Roadmap](future-improvement-roadmap.md).
 
 ## Near-Term Infrastructure Backlog
 

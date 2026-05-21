@@ -1,14 +1,22 @@
-import questionary
 from typing import List, Optional, Tuple, Dict
+
+try:
+    import questionary
+except ModuleNotFoundError:  # optional for non-interactive CLI/test paths
+    questionary = None
 from rich import console
 from cli.models import AnalystType
-from tradingagents.openai_model_registry import (
-    get_llm_provider_options,
-    get_model_options_for_provider,
-    get_model_options_with_status,
-)
+from tradingagents.openai_model_registry import get_model_options_with_status
 
 console = console.Console()
+
+
+def _require_questionary():
+    if questionary is None:
+        raise ModuleNotFoundError(
+            "Interactive CLI features require the optional package 'questionary'. "
+            "Install it with `python -m pip install questionary`."
+        )
 
 ANALYST_ORDER = [
     ("Market Analyst", AnalystType.MARKET),
@@ -21,6 +29,7 @@ ANALYST_ORDER = [
 
 def get_ticker() -> str:
     """Prompt the user to enter a ticker symbol."""
+    _require_questionary()
     ticker = questionary.text(
         "Enter the ticker symbol to analyze:",
         validate=lambda x: len(x.strip()) > 0 or "Please enter a valid ticker symbol.",
@@ -41,6 +50,7 @@ def get_ticker() -> str:
 
 def get_analysis_date() -> str:
     """Prompt the user to enter a date in YYYY-MM-DD format."""
+    _require_questionary()
     import re
     from datetime import datetime
 
@@ -74,6 +84,7 @@ def get_analysis_date() -> str:
 
 def select_analysts() -> List[AnalystType]:
     """Select analysts using an interactive checkbox."""
+    _require_questionary()
     choices = questionary.checkbox(
         "Select Your [Analysts Team]:",
         choices=[
@@ -100,6 +111,7 @@ def select_analysts() -> List[AnalystType]:
 
 def select_research_depth() -> int:
     """Select research depth using an interactive selection."""
+    _require_questionary()
 
     # Define research depth options with their corresponding values
     DEPTH_OPTIONS = [
@@ -131,16 +143,17 @@ def select_research_depth() -> int:
 
 
 def select_trading_horizon() -> str:
-    """Select the trading horizon. Swing remains the default behavior."""
+    """Select the trading horizon. Position is the default behavior."""
+    _require_questionary()
     options = [
-        ("Swing - 2-10 trading days (current default)", "swing"),
-        ("Position - 1-3 months trend holding", "position"),
+        ("Swing - 2-10 trading days", "swing"),
+        ("Position - 1-3 months trend holding (current default)", "position"),
         ("Trend - 3-6 months quarterly trend research", "trend"),
     ]
     choice = questionary.select(
         "Select Your [Trading Horizon]:",
         choices=[questionary.Choice(display, value=value) for display, value in options],
-        default="swing",
+        default="position",
         instruction="\n- Use arrow keys to navigate\n- Press Enter to select",
         style=questionary.Style(
             [
@@ -151,10 +164,11 @@ def select_trading_horizon() -> str:
         ),
     ).ask()
 
-    return choice or "swing"
+    return choice or "position"
 
 
 def select_trend_execution_enabled() -> bool:
+    _require_questionary()
     return bool(
         questionary.confirm(
             "Enable trend-horizon execution semantics? This affects prompts and logs only; CLI still does not place orders.",
@@ -165,6 +179,9 @@ def select_trend_execution_enabled() -> bool:
 
 
 def select_llm_provider() -> str:
+    _require_questionary()
+    from tradingagents.openai_model_registry import get_llm_provider_options
+
     provider_options = [
         (option["label"], option["value"])
         for option in get_llm_provider_options()
@@ -188,6 +205,7 @@ def select_llm_provider() -> str:
 
 
 def select_checkpoint_enabled() -> bool:
+    _require_questionary()
     return bool(
         questionary.confirm(
             "Enable checkpoint resume for failed runs?",
@@ -198,6 +216,7 @@ def select_checkpoint_enabled() -> bool:
 
 
 def get_output_language() -> str:
+    _require_questionary()
     language = questionary.text(
         "Output language:",
         default="zh-CN",
@@ -207,6 +226,7 @@ def get_output_language() -> str:
 
 
 def ask_gemini_thinking_config() -> str:
+    _require_questionary()
     choice = questionary.select(
         "Gemini thinking mode:",
         choices=[

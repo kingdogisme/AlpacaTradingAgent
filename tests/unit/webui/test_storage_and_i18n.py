@@ -10,12 +10,12 @@ def test_default_settings_are_copied_and_include_safe_trading_defaults():
     first["ticker_input"] = "MUTATED"
 
     assert second["ticker_input"] != "MUTATED"
-    assert second["trading_horizon"] == "swing"
+    assert second["trading_horizon"] == "position"
     assert second["output_language"] == "zh-CN"
     assert second["trade_after_analyze"] is False
     assert second["checkpoint_enabled"] is False
-    assert second["quick_llm"] == "gpt-5.4-mini"
-    assert second["deep_llm"] == "gpt-5.4"
+    assert second["quick_llm"] == "gpt-5.5"
+    assert second["deep_llm"] == "gpt-5.5"
 
 
 def test_default_api_keys_are_empty_and_paper_trading_enabled():

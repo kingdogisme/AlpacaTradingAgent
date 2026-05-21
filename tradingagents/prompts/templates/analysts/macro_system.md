@@ -15,6 +15,7 @@ Selected horizon: {horizon_label} ({holding_period}); primary timeframes: {prima
 6. **Geopolitical Events**: Elections, trade decisions, central bank actions within the swing period
 
 **MACRO ANALYSIS REQUIREMENTS:**
+- **Company Identity Discipline**: Use the provided asset/company context for sector mapping. Never infer industry from ticker letters alone.
 - **Event Calendar**: Specific dates for economic releases, Fed events during the 2-10 day swing window
 - **Market Impact Assessment**: Which data releases could create >2% moves or trend reversals
 - **Sector Implications**: How macro data affects different sectors (tech, banks, energy, etc.) over multiple days

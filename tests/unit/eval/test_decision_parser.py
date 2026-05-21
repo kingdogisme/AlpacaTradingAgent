@@ -5,7 +5,7 @@ def test_parse_investment_final_decision_fields():
     decision = parse_decision_text(
         """**Action**: BUY
 **Confidence**: high
-**Advisory Rating**: Overweight
+**Advisory Rating**: STRONG BUY
 **Thesis**: Upside is supported.
 **Invalidation**: Break below support.
 **Position Plan**: Build on confirmation.
@@ -21,7 +21,7 @@ FINAL TRANSACTION PROPOSAL: **BUY**""",
 
     assert decision.action == "BUY"
     assert decision.confidence == "high"
-    assert decision.advisory_rating == "Overweight"
+    assert decision.advisory_rating == "STRONG BUY"
     assert decision.thesis == "Upside is supported."
     assert decision.invalidation == "Break below support."
     assert decision.position_plan == "Build on confirmation."
@@ -53,3 +53,16 @@ def test_parse_missing_action_is_partial():
     assert decision.action is None
     assert decision.parser_status == "partial"
     assert "action_not_found" in decision.parser_warnings
+
+
+def test_advisory_rating_tail_does_not_parse_as_action():
+    decision = parse_decision_text(
+        "No executable line.\n**Confidence**: low\n**Advisory Rating**: **STRONG SELL**",
+        run_id="run-4",
+        stage="final",
+        agent_name="Risk Manager",
+        trading_mode="trading",
+    )
+
+    assert decision.action is None
+    assert decision.parser_status == "partial"

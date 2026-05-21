@@ -78,8 +78,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     ),
     # LLM settings
     "llm_provider": os.getenv("LLM_PROVIDER", "openai"),
-    "deep_think_llm": "gpt-5.4",
-    "quick_think_llm": "gpt-5.4-mini",
+    "deep_think_llm": "gpt-5.5",
+    "quick_think_llm": "gpt-5.5",
     "backend_url": None,
     "google_thinking_level": None,
     "openai_reasoning_effort": None,
@@ -107,7 +107,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "max_recur_limit": 200,
     # Trading settings
     "allow_shorts": False,  # False = Investment mode (BUY/HOLD/SELL), True = Trading mode (LONG/NEUTRAL/SHORT)
-    "trading_horizon": "swing",  # swing = 2-10 days, position = 1-3 months, trend = 3-6 months
+    "trading_horizon": "position",  # swing = 2-10 days, position = 1-3 months, trend = 3-6 months
     "trend_execution_enabled": False,  # Trend horizons are research-only unless explicitly enabled
     "horizon_profiles": {
         "swing": {
@@ -155,6 +155,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "max_same_tool_call_repeats": 1,  # Max repeats for the same tool+args signature in a single analyst node
     # Tool settings
     "online_tools": True,
+    "point_in_time_source_policy": os.getenv("TRADINGAGENTS_POINT_IN_TIME_SOURCE_POLICY", "auto"),
     "tool_semantic_retry_enabled": True,  # Retry web-search tool calls once on low-quality interactive/undersized output
     "tool_semantic_retry_max_retries": 1,
     "tool_semantic_retry_backoff_seconds": 0.8,
@@ -162,14 +163,65 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "get_global_news_openai",
         "get_macro_news_openai",
     ],
+    "data_quality_enabled": True,
+    "data_quality_header_enabled": True,
+    "data_quality_soft_gate_enabled": True,
+    "data_quality_cross_check_enabled": True,
+    "data_quality_raw_retention": "full",
     "data_fallback_enabled": False,  # Optional yfinance backup for supported Alpaca data failures
     "web_search_timeout_extension_seconds": 45,  # Extra timeout buffer added by timing wrapper for web-search tools
+    "alpha_discovery_db_path": os.getenv(
+        "TRADINGAGENTS_ALPHA_DISCOVERY_DB_PATH",
+        os.path.join(_TRADINGAGENTS_HOME, "alpha_discovery", "alpha_discovery.sqlite"),
+    ),
+    "alpha_discovery_wsb_top_sectors": 10,
+    "alpha_discovery_wsb_per_sector": 1,
+    "alpha_discovery_dd_list_limit": 20,
+    "alpha_discovery_full_ata_cooldown_hours": 24,
+    "alpha_discovery_max_full_ata_runs_per_day": 5,
+    "alpha_discovery_default_ata_daily_budget": 5,
+    "alpha_discovery_confirmation_enabled": True,
+    "alpha_discovery_news_confirmation_enabled": True,
+    "alpha_discovery_search_news_confirmation_enabled": False,
+    "alpha_discovery_live_news_confirmation_enabled": False,
+    "alpha_discovery_policy_social_confirmation_enabled": False,
+    "alpha_discovery_news_confirmation_max_age_days": int(
+        os.getenv("TRADINGAGENTS_ALPHA_DISCOVERY_NEWS_CONFIRMATION_MAX_AGE_DAYS", "14")
+    ),
+    "alpha_discovery_require_news_confirmation_date": os.getenv(
+        "TRADINGAGENTS_ALPHA_DISCOVERY_REQUIRE_NEWS_CONFIRMATION_DATE",
+        "true",
+    ).strip().lower()
+    in {"1", "true", "yes", "on"},
+    "alpha_discovery_options_confirmation_enabled": False,
+    "alpha_discovery_price_volume_confirmation_enabled": False,
+    "alpha_discovery_price_volume_max_bar_age_days": int(
+        os.getenv("TRADINGAGENTS_ALPHA_DISCOVERY_PRICE_VOLUME_MAX_BAR_AGE_DAYS", "5")
+    ),
+    "alpha_discovery_min_confirmations_for_a": 1,
+    "alpha_discovery_min_confirmations_for_dd_a": 2,
+    "alpha_discovery_soft_fail_collectors": True,
+    "alpha_discovery_research_boost_enabled": os.getenv("TRADINGAGENTS_ALPHA_DISCOVERY_RESEARCH_BOOST_ENABLED", "true"),
+    "alpha_discovery_research_boost_max": float(os.getenv("TRADINGAGENTS_ALPHA_DISCOVERY_RESEARCH_BOOST_MAX", "0.24")),
+    "alpha_discovery_research_single_article_a_gate": os.getenv(
+        "TRADINGAGENTS_ALPHA_DISCOVERY_RESEARCH_SINGLE_ARTICLE_A_GATE",
+        "true",
+    ),
+    "alpha_discovery_research_source_quality_json": os.getenv(
+        "TRADINGAGENTS_ALPHA_DISCOVERY_RESEARCH_SOURCE_QUALITY_JSON",
+        "{}",
+    ),
     "sellthenews_enabled": True,
     "sellthenews_base_url": "https://mcp.sellthenews.org/mcp",
     "sellthenews_timeout_seconds": 8,
     "sellthenews_news_enabled": True,
     "sellthenews_social_enabled": True,
     "sellthenews_macro_enabled": True,
+    "sellthenews_dd_enabled": True,
+    "sellthenews_dd_max_posts": 3,
+    "sellthenews_dd_min_score": 0,
+    "sellthenews_dd_min_comments": 0,
+    "sellthenews_dd_max_chars": 6500,
     "sellthenews_options_enabled": False,
     "sellthenews_options_chain_api_enabled": True,
     "sellthenews_options_greeks": "gamma",
@@ -182,10 +234,33 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "alpha_vantage_mcp_timeout_seconds": 8,
     "alpha_vantage_fundamentals_enabled": True,
     "alpha_vantage_fallback_on_sparse": True,
+    "finnhub_fundamentals_metric_stale_days": int(
+        os.getenv("TRADINGAGENTS_FINNHUB_FUNDAMENTALS_METRIC_STALE_DAYS", "540")
+    ),
+    "sec_edgar_enabled": True,
+    "sec_edgar_user_agent": os.getenv(
+        "SEC_EDGAR_USER_AGENT",
+        "AlpacaTradingAgent SEC-EDGAR research contact@example.com",
+    ),
+    "sec_edgar_cache_ttl_hours": 24,
+    "sec_edgar_mapping_cache_ttl_days": 7,
+    "sec_edgar_timeout_seconds": 12,
+    "sec_edgar_max_quarters": 8,
+    "sec_edgar_metric_stale_days": int(os.getenv("TRADINGAGENTS_SEC_EDGAR_METRIC_STALE_DAYS", "540")),
+    "alpha_discovery_sec_confirmation_enabled": False,
     "news_global_openai_enabled": False,  # News analyst uses fast ticker sources by default; macro handles broad global context
     "global_news_fast_profile": True,  # Keep global-news tool lean even at medium/deep research depth
     "stock_news_fast_profile": True,  # Keep stock-news web-search tool lean at medium/deep depth
     "fundamentals_fast_profile": True,  # Keep fundamentals web-search tool lean at medium/deep depth
+    "openai_sources_policy": os.getenv("TRADINGAGENTS_OPENAI_SOURCES_POLICY", "fallback"),
+    "openai_source_call_budget_per_run": int(os.getenv("TRADINGAGENTS_OPENAI_SOURCE_CALL_BUDGET_PER_RUN", "1")),
+    "openai_source_timeout_seconds": int(os.getenv("TRADINGAGENTS_OPENAI_SOURCE_TIMEOUT_SECONDS", "25")),
+    "skip_openai_when_non_openai_sufficient": os.getenv(
+        "TRADINGAGENTS_SKIP_OPENAI_WHEN_NON_OPENAI_SUFFICIENT",
+        "true",
+    ).strip().lower()
+    in {"1", "true", "yes", "on"},
+    "non_openai_sufficiency_min_chars": int(os.getenv("TRADINGAGENTS_NON_OPENAI_SUFFICIENCY_MIN_CHARS", "1200")),
     "global_news_timeout_seconds": 150,  # Timeout for get_global_news_openai web-search calls
     "global_news_max_output_tokens": 1200,  # Applied to models that support explicit output-token caps
     "global_news_max_events": 8,  # Cap number of events requested from global-news tool

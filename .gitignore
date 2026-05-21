@@ -1,12 +1,15 @@
 env/
 .venv/
 __pycache__/
+*.py[cod]
 .DS_Store
 *.csv
 src/
 eval_results/
 eval_results_mu_e2e/
 eval_data/
+logs/
+tradingagents/dataflows/data_cache/
 *.egg-info/
 .env
 data/

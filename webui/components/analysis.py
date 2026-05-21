@@ -298,8 +298,8 @@ def run_analysis(
         config["backend_url"] = backend_url or None
         config["output_language"] = output_language or "zh-CN"
         config["checkpoint_enabled"] = bool(checkpoint_enabled)
-        horizon = str(trading_horizon or "swing").strip().lower()
-        config["trading_horizon"] = horizon if horizon in {"swing", "position", "trend"} else "swing"
+        horizon = str(trading_horizon or "position").strip().lower()
+        config["trading_horizon"] = horizon if horizon in {"swing", "position", "trend"} else "position"
         config["trend_execution_enabled"] = bool(trend_execution_enabled)
         for key, value in (provider_settings or {}).items():
             if value not in (None, ""):
@@ -407,7 +407,7 @@ def run_analysis(
             trade_date=current_date,
             final_trade_decision=final_state["final_trade_decision"],
             trading_mode=final_state.get("trading_mode", config.get("trading_mode", "investment")),
-            horizon=final_state.get("trading_horizon", config.get("trading_horizon", "swing")),
+            horizon=final_state.get("trading_horizon", config.get("trading_horizon", "position")),
         )
         if config.get("checkpoint_enabled", False):
             clear_checkpoint(config["data_cache_dir"], ticker, current_date)
@@ -513,7 +513,7 @@ def start_analysis(
     output_language="zh-CN",
     checkpoint_enabled=False,
     provider_settings=None,
-    trading_horizon="swing",
+    trading_horizon="position",
     trend_execution_enabled=False,
     progress=None,
 ):
@@ -584,10 +584,10 @@ def start_analysis(
         "swing": "Swing",
         "position": "Position",
         "trend": "Trend",
-    }.get(str(trading_horizon or "swing").lower(), "Swing")
+    }.get(str(trading_horizon or "position").lower(), "Position")
     research_only_text = (
         " (research-only unless trend execution is explicitly enabled)"
-        if str(trading_horizon or "swing").lower() in {"position", "trend"}
+        if str(trading_horizon or "position").lower() in {"position", "trend"}
         and not trend_execution_enabled
         else ""
     )

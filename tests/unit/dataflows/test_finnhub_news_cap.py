@@ -100,6 +100,43 @@ def test_finnhub_company_fundamentals_formats_live_payload(monkeypatch):
     assert "Finnhub Fundamentals for LI" in result
     assert "Li Auto Inc" in result
     assert "peTTM: 20.5" in result
+    assert "secondary and often undated" in result
     assert "Annual eps: 2025-12-31: 0.52" in result
     assert "strongBuy=7" in result
     assert "NIO, XPEV" in result
+
+
+def test_finnhub_company_fundamentals_hides_stale_series(monkeypatch):
+    original_config = config_module.get_config()
+    try:
+        config_module.set_config(
+            {
+                **original_config,
+                "online_tools": True,
+                "finnhub_fundamentals_metric_stale_days": 120,
+            }
+        )
+        monkeypatch.setattr(interface, "fetch_company_profile_live", lambda ticker: {})
+        monkeypatch.setattr(
+            interface,
+            "fetch_basic_financials_live",
+            lambda ticker, metric="all": {
+                "series": {
+                    "quarterly": {
+                        "eps": [
+                            {"period": "2025-01-31", "v": 1.23},
+                        ],
+                    },
+                },
+            },
+        )
+        monkeypatch.setattr(interface, "fetch_company_earnings_live", lambda ticker, limit=8: [])
+        monkeypatch.setattr(interface, "fetch_recommendation_trends_live", lambda ticker: [])
+        monkeypatch.setattr(interface, "fetch_company_peers_live", lambda ticker: [])
+
+        result = interface.get_finnhub_company_fundamentals("LI", "2026-05-12")
+    finally:
+        config_module.set_config(original_config)
+
+    assert "Quarterly eps: missing (stale: latest period 2025-01-31" in result
+    assert "1.23" not in result

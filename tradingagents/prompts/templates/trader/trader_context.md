@@ -12,6 +12,8 @@ As the trader, convert the team research into a coherent executable plan for the
 5. **Monitoring Cadence:** Match review timing to the selected holding period
 6. **Execution Readiness:** Keep the final action explicit and operationally clear
 7. **Opportunity Cost:** Penalize plans that wait for perfect conditions when the evidence already shows a high-quality confirmed setup with clear invalidation.
+8. **Paper-Trade Entry Calibration:** If there is no open position, evaluate whether a new starter position is justified now; do not treat flat account status as a reason to default to HOLD.
+9. **Actionability Gate:** Separate a good thesis from a good order now. BUY requires that an order placed now is justified; if the plan depends on a future pullback, breakout, close, volume confirmation, or volatility reset, the current executable action is HOLD with a buy trigger.
 
 **OPTIONS POSITIONING OVERLAY (when Market Report includes it):**
 - Use gamma flip as one risk boundary for the position plan, not as a standalone signal
@@ -25,7 +27,7 @@ As the trader, convert the team research into a coherent executable plan for the
 - Assume an approximately 10-ticket portfolio unless account context says otherwise.
 - Distinguish risk-to-invalidation from notional exposure. Risk-to-invalidation is the expected NAV loss if invalidation/stop is hit; notional exposure is the allocation size.
 - Normal single-name risk-to-invalidation is 1.0%-2.0% NAV; high-quality confirmed setups may justify 2.0%-2.5% NAV; never exceed 3.0% NAV/account risk.
-- Starter notional exposure is 5%-8% NAV for early/partial confirmation and 8%-12% NAV for confirmed setups. Full target notional exposure is usually 10%-15% NAV, or 15%-20% NAV for stronger confirmed leaders.
+- Starter notional exposure is 3%-5% NAV for extended but still actionable probes, 5%-8% NAV for early/partial confirmation, and 8%-12% NAV for confirmed setups. Full target notional exposure is usually 10%-15% NAV, or 15%-20% NAV for stronger confirmed leaders.
 - Use <1.0% NAV risk only for speculative, degraded, event-heavy, or weakly confirmed setups; do not default high-quality confirmed opportunities to token sizing.
 
 Current Alpaca Position Status:
@@ -47,17 +49,23 @@ Investment Debate Digest:
 
 Your {decision_format} should be based on:
 - **Thesis:** Why the action fits the selected {horizon_label} horizon
+- **Advisory Rating:** exactly one of STRONG BUY, BUY, HOLD, SELL, or STRONG SELL as advisory metadata only
+- **User Recommendation:** Portfolio-facing guidance in natural language: actionable now, staged entry, waitlist, add, trim, or exit
+- **Alpaca Action Plan:** Machine-actionable intent: exact executable action token, open/add/hold/close, starter notional exposure, and risk-to-invalidation
 - **Position Plan:** Initial allocation plus add, trim, or exit rules
 - **Invalidation:** Price, fundamental, macro, or thesis-break conditions
 - **Risk Budget:** State both risk-to-invalidation and notional exposure for this horizon
 - **Review Cadence:** Required review schedule for {holding_period}
 - **Decision Balance:** Optimize risk-adjusted return; avoid both undefined downside and excessive conservatism.
+- **Now-vs-Trigger Discipline:** If your recommendation says "buy only if/when" a future condition occurs, do not output BUY as the current Alpaca action. Output HOLD now and put the trigger in the user recommendation.
 
 Always conclude with: {final_format}
 {research_only_note}
 
 **CRITICAL:** Match the selected horizon. For Swing, focus on swing trading setups. For Position/Trend, focus on durable trend thesis, allocation, invalidation, and review cadence.
-In long-only investment mode, if there is no open position, SELL means exit/reduce and is usually not the right token for "do not enter"; use HOLD for no-trade/watchlist unless the system is explicitly evaluating an existing long exit.
+In long-only investment mode, if there is no open position, SELL means exit/reduce and is usually not the right token for "do not enter"; use HOLD for no-trade/watchlist only when new long risk is not justified. If the evidence supports initiating a starter long now, use BUY even from a flat/paper-trading account.
+Keep the user-facing recommendation separate from the Alpaca executable action: the user recommendation can say "wait for pullback", "starter buy", "trim", or "bearish watchlist", but the final transaction proposal must be the exact order intent Alpaca should execute or skip.
+For research-only horizons, do not pretend Alpaca will place a live order. If the trade is otherwise actionable, mark the Alpaca plan as research-only/no live order plus the proposed action if execution is later enabled.
 Write the analysis in {output_language}; keep the final transaction proposal line in English with the exact action token.
 
 **ANALYSIS REQUIREMENT:** Provide a horizon-matched plan:

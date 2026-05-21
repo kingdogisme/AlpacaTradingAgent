@@ -113,10 +113,15 @@ class PromptTemplateTests(unittest.TestCase):
         trader_prompt = load_prompt("trader/trader_context")
         risk_manager_prompt = load_prompt("managers/risk_manager")
 
+        self.assertIn("BUY is the only Alpaca action that can open a new long position", investment_prompt)
+        self.assertIn("HOLD sends no order to Alpaca", investment_prompt)
+        self.assertIn("do not use SELL to express bearishness when there is no position", investment_prompt)
+        self.assertIn("Treat no open position as the normal paper-trading starting point", investment_prompt)
         self.assertIn('use HOLD for "do not enter / wait / no trade"', investment_prompt)
         self.assertIn("reserve SELL for reducing or exiting an existing long position", investment_prompt)
         self.assertIn('SELL means exit/reduce', trader_prompt)
-        self.assertIn('use HOLD for "no trade / wait / stay in cash" rather than SELL', risk_manager_prompt)
+        self.assertIn("use HOLD for no-trade/watchlist only when new long risk is not justified", trader_prompt)
+        self.assertIn("do not default to HOLD solely because the account is flat", risk_manager_prompt)
 
     def test_core_decision_prompts_optimize_risk_adjusted_return(self):
         research_manager_prompt = load_prompt("managers/research_manager")
@@ -128,6 +133,70 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("Opportunity Cost", trader_prompt)
         self.assertIn("excessive conservatism", trader_prompt)
         self.assertIn("optimizes risk-adjusted return", risk_manager_prompt)
+
+    def test_decision_prompts_require_current_actionability_before_buy(self):
+        investment_prompt = load_prompt("trading_modes/investment")
+        research_manager_prompt = load_prompt("managers/research_manager")
+        trader_prompt = load_prompt("trader/trader_context")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+        position_prompt = load_prompt("horizons/position")
+        trend_prompt = load_prompt("horizons/trend")
+        trader_horizon_prompt = load_prompt("horizons/agent_context_trader")
+        risk_horizon_prompt = load_prompt("horizons/agent_context_risk_mgmt")
+
+        self.assertIn("BUY actionability gate", investment_prompt)
+        self.assertIn("Strong thesis but poor immediate entry quality is not a BUY", investment_prompt)
+        self.assertIn("Separate thesis quality from current actionability", research_manager_prompt)
+        self.assertIn("Actionability Gate", trader_prompt)
+        self.assertIn("Now-vs-Trigger Discipline", trader_prompt)
+        self.assertIn("Do not output BUY merely because the multi-month thesis is intact", risk_manager_prompt)
+        self.assertIn("pre-order condition that is not currently satisfied", risk_manager_prompt)
+        self.assertIn('do not treat "daily/weekly trend is not broken" as enough for BUY', position_prompt)
+        self.assertIn('do not treat "quarterly thesis is intact" as enough for BUY', trend_prompt)
+        self.assertIn("Do not call a future conditional entry a current BUY", trader_horizon_prompt)
+        self.assertIn("current executable action is HOLD", risk_horizon_prompt)
+
+    def test_advisory_rating_prompt_contract_is_metadata_only(self):
+        research_manager_prompt = load_prompt("managers/research_manager")
+        trader_prompt = load_prompt("trader/trader_context")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+        signal_prompt = load_prompt("graph/signal_extraction_system")
+
+        for prompt in (research_manager_prompt, trader_prompt, risk_manager_prompt):
+            with self.subTest(prompt=prompt[:40]):
+                self.assertIn("STRONG BUY, BUY, HOLD, SELL, or STRONG SELL", prompt)
+                self.assertIn("advisory metadata only", prompt)
+
+        self.assertIn("Ignore Advisory Rating metadata", signal_prompt)
+
+    def test_position_trend_prompts_support_paper_trade_entry(self):
+        position_prompt = load_prompt("horizons/position")
+        trend_prompt = load_prompt("horizons/trend")
+        trader_horizon_prompt = load_prompt("horizons/agent_context_trader")
+        risk_horizon_prompt = load_prompt("horizons/agent_context_risk_mgmt")
+        research_manager_prompt = load_prompt("managers/research_manager")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+
+        self.assertIn("paper-trading/no-position evaluation", position_prompt)
+        self.assertIn("HOLD should mean the setup is not yet worth new risk", position_prompt)
+        self.assertIn("BUY can mean staged participation", trend_prompt)
+        self.assertIn("Do not use HOLD solely because there is no existing position", trader_horizon_prompt)
+        self.assertIn("Do not downgrade to HOLD solely because the account is flat", risk_horizon_prompt)
+        self.assertIn("Do not choose HOLD solely because there is no current position", research_manager_prompt)
+        self.assertIn("Use BUY when a new starter long is justified now", risk_manager_prompt)
+
+    def test_final_report_separates_user_guidance_from_alpaca_action(self):
+        trader_prompt = load_prompt("trader/trader_context")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+
+        self.assertIn("User Recommendation", trader_prompt)
+        self.assertIn("Alpaca Action Plan", trader_prompt)
+        self.assertIn("Keep the user-facing recommendation separate", trader_prompt)
+        self.assertIn("User Recommendation: actionable portfolio guidance", risk_manager_prompt)
+        self.assertIn("Alpaca Execution Action: exact executable action token", risk_manager_prompt)
+        self.assertIn("SELL/STRONG SELL advisory views map to executable HOLD", risk_manager_prompt)
+        self.assertIn("research-only/no live order", trader_prompt)
+        self.assertIn("research-only/no live order", risk_manager_prompt)
 
     def test_position_sizing_policy_matches_ten_ticket_portfolio(self):
         investment_prompt = load_prompt("trading_modes/investment")

@@ -39,6 +39,11 @@ def _set_sellthenews_config(original_config, **overrides):
             "sellthenews_news_enabled": True,
             "sellthenews_social_enabled": True,
             "sellthenews_macro_enabled": True,
+            "sellthenews_dd_enabled": True,
+            "sellthenews_dd_max_posts": 3,
+            "sellthenews_dd_min_score": 0,
+            "sellthenews_dd_min_comments": 0,
+            "sellthenews_dd_max_chars": 6500,
             "sellthenews_options_enabled": False,
             "sellthenews_options_chain_api_enabled": False,
             "sellthenews_options_greeks": "gamma",
@@ -159,6 +164,14 @@ def test_sellthenews_social_sentiment_success(monkeypatch):
                 "get_wsb_analysis": "Retail positioning and sentiment " * 40,
                 "get_stock_news": "NVDA discussion catalyst " * 20,
                 "search_news": "Total articles: 12\n- NVDA searched catalyst",
+                "search_dd": (
+                    '=== DD Search Results: "NVDA" ===\n'
+                    "Showing 1 of 1\n\n"
+                    "[1abc] NVDA AI thesis\n"
+                    "  Tickers: NVDA\n"
+                    "  score=42 | comments=12 | 2026-05-13 10:00:00 ET\n"
+                ),
+                "get_dd_post": "=== DD Post: NVDA AI thesis ===\n--- Fact Check ---\n1. [SUPPORTED] claim\n",
             }
         )
         monkeypatch.setattr(interface, "_sellthenews_client", lambda _config: client)
@@ -170,7 +183,14 @@ def test_sellthenews_social_sentiment_success(monkeypatch):
     assert "## Enhanced Social Sentiment Source: SellTheNews WSB" in result
     assert "## SellTheNews company-news context" in result
     assert "## SellTheNews ticker search context" in result
-    assert [call[0] for call in client.calls] == ["get_wsb_analysis", "get_stock_news", "search_news"]
+    assert "## SellTheNews WSB DD analysis" in result
+    assert [call[0] for call in client.calls] == [
+        "get_wsb_analysis",
+        "get_stock_news",
+        "search_news",
+        "search_dd",
+        "get_dd_post",
+    ]
 
 
 def test_sellthenews_social_uses_search_when_company_news_is_sparse(monkeypatch):
@@ -182,6 +202,7 @@ def test_sellthenews_social_uses_search_when_company_news_is_sparse(monkeypatch)
                 "get_wsb_analysis": "Retail positioning and sentiment " * 40,
                 "get_stock_news": "Total articles: 0",
                 "search_news": "Total articles: 8\n- LI delivery catalyst\n- LI product-cycle update",
+                "search_dd": "=== DD Search Results: \"LI\" ===\nShowing 0 of 0\n",
             }
         )
         monkeypatch.setattr(interface, "_sellthenews_client", lambda _config: client)
@@ -193,13 +214,91 @@ def test_sellthenews_social_uses_search_when_company_news_is_sparse(monkeypatch)
     assert "## Enhanced Social Sentiment Source: SellTheNews WSB" in result
     assert "## SellTheNews company-news context" in result
     assert "Total articles: 8" in result
+    assert "WSB DD analysis unavailable or sparse: no matching DD posts found" in result
     assert "LI delivery catalyst" in result
     assert "## SellTheNews fallback" not in result
     assert [call[0] for call in client.calls] == [
         "get_wsb_analysis",
         "get_stock_news",
         "search_news",
+        "search_dd",
     ]
+
+
+def test_sellthenews_social_dd_error_does_not_fail_social_output(monkeypatch):
+    original_config = config_module.get_config()
+    try:
+        _set_sellthenews_config(original_config)
+        client = FakeSellTheNewsClient(
+            {
+                "get_wsb_analysis": "Retail positioning and sentiment " * 40,
+                "get_stock_news": "SKM company catalyst " * 20,
+                "search_news": "Total articles: 3\n- SKM searched catalyst",
+                "search_dd": "[1abc] SKM Anthropic thesis\n  Tickers: SKM\n  score=7 | comments=8 | 2026-05-13 10:00:00 ET",
+                "get_dd_post": SellTheNewsUnavailable("timeout"),
+            }
+        )
+        monkeypatch.setattr(interface, "_sellthenews_client", lambda _config: client)
+
+        result = interface.get_sellthenews_social_sentiment("SKM", "2026-05-12")
+    finally:
+        config_module.set_config(original_config)
+
+    assert "## Enhanced Social Sentiment Source: SellTheNews WSB" in result
+    assert "SKM company catalyst" in result
+    assert "WSB DD analysis unavailable or sparse: timeout" in result
+    assert [call[0] for call in client.calls] == [
+        "get_wsb_analysis",
+        "get_stock_news",
+        "search_news",
+        "search_dd",
+        "get_dd_post",
+    ]
+
+
+def test_sellthenews_social_dd_disabled_does_not_call_dd_tools(monkeypatch):
+    original_config = config_module.get_config()
+    try:
+        _set_sellthenews_config(original_config, sellthenews_dd_enabled=False)
+        client = FakeSellTheNewsClient(
+            {
+                "get_wsb_analysis": "Retail positioning and sentiment " * 40,
+                "get_stock_news": "NVDA discussion catalyst " * 20,
+                "search_news": "Total articles: 12\n- NVDA searched catalyst",
+            }
+        )
+        monkeypatch.setattr(interface, "_sellthenews_client", lambda _config: client)
+
+        result = interface.get_sellthenews_social_sentiment("NVDA", "2026-05-12")
+    finally:
+        config_module.set_config(original_config)
+
+    assert "SellTheNews WSB DD analysis" not in result
+    assert [call[0] for call in client.calls] == ["get_wsb_analysis", "get_stock_news", "search_news"]
+
+
+def test_sellthenews_social_dd_block_is_truncated(monkeypatch):
+    original_config = config_module.get_config()
+    try:
+        _set_sellthenews_config(original_config, sellthenews_dd_max_chars=120)
+        client = FakeSellTheNewsClient(
+            {
+                "get_wsb_analysis": "Retail positioning and sentiment " * 40,
+                "get_stock_news": "NVDA discussion catalyst " * 20,
+                "search_news": "Total articles: 12\n- NVDA searched catalyst",
+                "search_dd": "[1abc] NVDA AI thesis\n  Tickers: NVDA\n  score=42 | comments=12 | 2026-05-13 10:00:00 ET",
+                "get_dd_post": "Long DD body " * 80,
+            }
+        )
+        monkeypatch.setattr(interface, "_sellthenews_client", lambda _config: client)
+
+        result = interface.get_sellthenews_social_sentiment("NVDA", "2026-05-12")
+    finally:
+        config_module.set_config(original_config)
+
+    dd_block = result.split("## SellTheNews WSB DD analysis", 1)[1]
+    assert len(dd_block.split("\n\n## ", 1)[0]) < 180
+    assert "..." in dd_block
 
 
 def test_sellthenews_stock_news_search_first_for_small_caps(monkeypatch):
@@ -250,6 +349,34 @@ def test_sellthenews_macro_news_success(monkeypatch):
             {"limit": 5, "offset": 0, "marketOnly": True, "lang": "en"},
         )
     ]
+
+
+def test_sellthenews_macro_news_includes_company_identity(monkeypatch):
+    original_config = config_module.get_config()
+    try:
+        _set_sellthenews_config(original_config)
+        client = FakeSellTheNewsClient({"get_live_news": "market regime update " * 40})
+        monkeypatch.setattr(interface, "_sellthenews_client", lambda _config: client)
+        monkeypatch.setattr(
+            interface,
+            "fetch_company_profile_live",
+            lambda ticker: {
+                "name": "Figma, Inc.",
+                "ticker": ticker,
+                "finnhubIndustry": "Software",
+                "exchange": "NYSE",
+                "country": "US",
+            },
+        )
+        interface._COMPANY_PROFILE_CACHE.clear()
+
+        result = interface.get_sellthenews_macro_news("2026-05-17", "FIG")
+    finally:
+        config_module.set_config(original_config)
+        interface._COMPANY_PROFILE_CACHE.clear()
+
+    assert "Ticker context: FIG: Figma, Inc.; industry=Software" in result
+    assert "not ticker letters as a sector proxy" in result
 
 
 def test_sellthenews_options_data_success(monkeypatch):

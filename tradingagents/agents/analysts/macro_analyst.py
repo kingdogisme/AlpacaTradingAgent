@@ -7,6 +7,13 @@ from tradingagents.agents.utils.agent_trading_modes import (
     get_horizon_context,
 )
 from tradingagents.agents.utils.language import language_instruction
+from tradingagents.agents.utils.source_policy import (
+    is_point_in_time_mode,
+    log_openai_source_skip,
+    point_in_time_source_note,
+    should_bind_openai_source,
+)
+from tradingagents.dataflows.interface import _format_company_context
 from tradingagents.prompts import load_prompt, render_prompt
 
 # Import prompt capture utility
@@ -26,11 +33,15 @@ def create_macro_analyst(llm, toolkit):
         try:
             current_date = state["trade_date"]
             ticker = state.get("company_of_interest", "MARKET")
+            company_context = _format_company_context(ticker)
             horizon_context = get_horizon_context(toolkit.config)
             horizon_agent_context = get_agent_horizon_context("analyst", horizon_context)
             fred_available = toolkit.has_fred()
             openai_available = toolkit.has_openai_web_search()
-            sellthenews_available = toolkit.has_sellthenews("sellthenews_macro_enabled")
+            point_in_time_mode = is_point_in_time_mode(current_date, toolkit.config)
+            sellthenews_available = toolkit.has_sellthenews("sellthenews_macro_enabled") and not point_in_time_mode
+            fast_macro_available = bool(sellthenews_available or fred_available)
+            openai_bind_available = bool(toolkit.config["online_tools"] and openai_available and not point_in_time_mode)
             
             # print(f"[MACRO] Analyzing macro environment on {current_date}")
             
@@ -45,28 +56,43 @@ def create_macro_analyst(llm, toolkit):
                         toolkit.get_yield_curve_analysis,
                     ]
                 )
-            if toolkit.config["online_tools"] and openai_available:
+            macro_news_available = should_bind_openai_source(
+                toolkit.config,
+                source_type="macro",
+                openai_available=openai_bind_available,
+                non_openai_available=fast_macro_available,
+            )
+            if macro_news_available:
                 tools.append(toolkit.get_macro_news_openai)
+            else:
+                log_openai_source_skip(
+                    "macro",
+                    toolkit.config,
+                    openai_available=bool(toolkit.config["online_tools"] and openai_available),
+                    non_openai_available=fast_macro_available,
+                    point_in_time_mode=point_in_time_mode,
+                )
 
             active_sources = []
             if sellthenews_available:
                 active_sources.append("SellTheNews live market/macro news")
             if fred_available:
                 active_sources.append("FRED macro data")
-            macro_news_available = toolkit.config["online_tools"] and openai_available
             if macro_news_available:
                 active_sources.append("OpenAI macro web search")
 
             source_guidance = (
                 " Combine all currently available macro tools before concluding."
                 f" Active sources: {', '.join(active_sources) if active_sources else 'none'}."
+                f" {point_in_time_source_note(current_date, toolkit.config)}"
                 + (
-                    " Prefer SellTheNews macro news for live market catalysts; if it is sparse or fallback-labeled, cross-check with FRED and OpenAI macro sources."
+                    " Prefer SellTheNews macro news for live market catalysts; if it is sparse or fallback-labeled, cross-check with FRED"
+                    + (" and OpenAI macro sources." if macro_news_available else ".")
                     if sellthenews_available
                     else ""
                 )
                 + (
-                    f" Use `get_macro_news_openai(curr_date, ticker_context='{ticker}')` for relevance."
+                    f" Use `get_macro_news_openai(curr_date, ticker_context='{company_context}')` for relevance."
                     if macro_news_available
                     else ""
                 )
@@ -82,7 +108,8 @@ def create_macro_analyst(llm, toolkit):
                 source_guidance=source_guidance,
             )
             asset_context = (
-                f"Asset context is {ticker}. "
+                f"Asset context is {company_context}. "
+                "Do not infer sector or industry from ticker letters alone; if company identity conflicts with a ticker acronym, trust the company context/profile. "
                 "Focus on macroeconomic conditions that affect overall market sentiment and sector rotation. "
                 "If tools fail due to missing API keys, provide a general macro analysis based on current market knowledge."
             )

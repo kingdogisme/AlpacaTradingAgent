@@ -26,6 +26,7 @@ def create_status_panel(lang="en"):
                     html.Div(id="reports-text", children=t(lang, "status.reports", count=0)),
                 ], width=4),
             ], className="mt-3"),
+            html.Div(id="data-quality-panel"),
             html.Div(id="refresh-status", children=t(lang, "status.paused"), className="text-secondary mt-2")
         ]),
         className="mb-4"
