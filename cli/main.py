@@ -37,6 +37,11 @@ from tradingagents.eval.indexing import (
     rebuild_run_indexes,
     utc_now_iso,
 )
+from tradingagents.eval.quality_v2 import (
+    build_source_reliability,
+    quality_index_with_reconciliation,
+    reconcile_quality,
+)
 from tradingagents.alpha_discovery import AlphaDiscoveryRepository, AlphaDiscoveryService
 from tradingagents.alpha_discovery.models import Handoff
 from tradingagents.alpha_discovery.reporting import compact_candidate, compact_event, count_values, json_envelope
@@ -337,6 +342,27 @@ def ata_run(
             "ad_candidate_id": candidate_id,
         },
     )
+
+
+@app.command("trade-monitor")
+def trade_monitor(
+    once: bool = typer.Option(False, "--once", help="Run one monitor pass and exit."),
+    interval_seconds: int = typer.Option(60, help="Polling interval when not using --once."),
+    symbol: Optional[str] = typer.Option(None, help="Optional single symbol filter."),
+    db_path: Optional[str] = typer.Option(None, help="Optional trade lifecycle SQLite path."),
+) -> None:
+    from tradingagents.trade_lifecycle import TradeMonitorService, TradePlanRepository
+
+    config = DEFAULT_CONFIG.copy()
+    if db_path:
+        config["trade_lifecycle_db_path"] = db_path
+    repository = TradePlanRepository(config.get("trade_lifecycle_db_path"))
+    service = TradeMonitorService(config=config, repository=repository)
+    symbols = [symbol.upper()] if symbol else None
+    if once or interval_seconds <= 0:
+        _ad_print("trade_monitor", service.run_once(symbols=symbols))
+        return
+    service.run_forever(interval_seconds=interval_seconds, symbols=symbols)
 
 
 @app.command("cron-resolve")
@@ -1661,12 +1687,18 @@ def run_index(
 def quality_index(
     run_id: str = typer.Option(..., help="Run id to rebuild and show."),
     status: Optional[str] = typer.Option(None, help="Comma-separated statuses to include, e.g. warn,fail."),
+    include_reconciliation: bool = typer.Option(False, help="Include Quality V2 observations and reconciliation in JSON output."),
     format: str = typer.Option("table", help="Output format: table, json, or jsonl."),
 ) -> None:
     """Build and query the indexed data-quality events for a run."""
     ledger = _safe_ledger(DEFAULT_CONFIG)
     if ledger is None:
         raise typer.BadParameter("Episode ledger unavailable.")
+    if include_reconciliation:
+        if format != "json":
+            raise typer.BadParameter("--include-reconciliation requires --format json")
+        console.print_json(data=quality_index_with_reconciliation(ledger, run_id))
+        return
     build_quality_index(ledger, run_id)
     statuses = [part.strip().lower() for part in status.split(",") if part.strip()] if status else None
     records = ledger.list_quality_index(run_id, statuses=statuses)
@@ -1702,6 +1734,86 @@ def quality_index(
             str(item.get("status") or "unknown"),
             str(item.get("freshness") or "unknown"),
             ",".join(item.get("flags") or []) or "-",
+        )
+    console.print(table)
+
+
+@app.command("quality-reconcile")
+def quality_reconcile(
+    run_id: str = typer.Option(..., help="Run id to reconcile."),
+    format: str = typer.Option("table", help="Output format: table or json."),
+) -> None:
+    """Build lightweight cross-source data-quality reconciliation for a run."""
+    ledger = _safe_ledger(DEFAULT_CONFIG)
+    if ledger is None:
+        raise typer.BadParameter("Episode ledger unavailable.")
+    payload = reconcile_quality(ledger, run_id)
+    if format == "json":
+        console.print_json(data=payload)
+        return
+    if format != "table":
+        raise typer.BadParameter("format must be table or json")
+    table = Table(title=f"Quality Reconciliation: {run_id}", box=box.SIMPLE)
+    for column in ("check", "status", "severity", "primary", "comparison", "delta_pct", "flags"):
+        table.add_column(column)
+    for item in payload.get("reconciliation_checks", []):
+        table.add_row(
+            str(item.get("check_type")),
+            str(item.get("status")),
+            str(item.get("severity")),
+            str(item.get("primary_source") or ""),
+            str(item.get("comparison_source") or ""),
+            "" if item.get("delta_pct") is None else f"{float(item['delta_pct']):.4f}",
+            ",".join(item.get("flags") or []) or "-",
+        )
+    console.print(table)
+
+
+@app.command("source-reliability")
+def source_reliability(
+    window_days: int = typer.Option(30, help="Reliability window in days."),
+    source_id: Optional[str] = typer.Option(None, help="Source id filter."),
+    dataset_type: Optional[str] = typer.Option(None, help="Dataset type filter."),
+    format: str = typer.Option("table", help="Output format: table or json."),
+) -> None:
+    """Aggregate source reliability from quality index and reconciliation records."""
+    ledger = _safe_ledger(DEFAULT_CONFIG)
+    if ledger is None:
+        raise typer.BadParameter("Episode ledger unavailable.")
+    build_source_reliability(ledger, windows=(window_days,))
+    records = ledger.list_source_reliability(
+        window_days=window_days,
+        source_id=source_id,
+        dataset_type=dataset_type,
+    )
+    payload = {
+        "generated_at": utc_now_iso(),
+        "summary": {"records": len(records), "window_days": window_days},
+        "source_reliability": records,
+        "artifact_refs": [],
+        "recommended_debug_queries": [
+            "python -m cli.main quality-reconcile --run-id <run_id> --format json"
+        ],
+    }
+    if format == "json":
+        console.print_json(data=payload)
+        return
+    if format != "table":
+        raise typer.BadParameter("format must be table or json")
+    table = Table(title=f"Source Reliability: {window_days}d", box=box.SIMPLE)
+    for column in ("source", "type", "pass", "warn", "fail", "unknown", "fallback", "stale", "pass_rate"):
+        table.add_column(column)
+    for item in records:
+        table.add_row(
+            str(item.get("source_id")),
+            str(item.get("dataset_type")),
+            str(item.get("quality_pass")),
+            str(item.get("quality_warn")),
+            str(item.get("quality_fail")),
+            str(item.get("quality_unknown")),
+            str(item.get("fallback_count")),
+            str(item.get("stale_count")),
+            f"{float(item.get('pass_rate') or 0.0):.4f}",
         )
     console.print(table)
 

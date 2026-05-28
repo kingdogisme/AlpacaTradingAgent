@@ -15,6 +15,12 @@ from ..utils.agent_trading_modes import (
 from ..utils.language import output_language
 from ..utils.memory import TradingMemoryLog
 from ..utils.structured import bind_structured, invoke_structured_or_freetext
+from tradingagents.portfolio import (
+    build_decision_policy_context,
+    build_portfolio_policy_context,
+    build_sizing_guidance_context,
+    build_theme_basket_context,
+)
 from tradingagents.prompts import render_prompt
 
 # Import prompt capture utility
@@ -41,6 +47,10 @@ def create_research_manager(llm, memory, config=None):
         final_format = trading_context["final_format"]
         ticker = state.get("company_of_interest", "")
         language = output_language(config)
+        portfolio_policy_context = build_portfolio_policy_context(config)
+        decision_policy_context = build_decision_policy_context(config, horizon_context["horizon"])
+        sizing_guidance_context = build_sizing_guidance_context(config)
+        theme_basket_context = build_theme_basket_context(ticker, [], {}, config)
 
         context_bundle = get_agent_context_bundle(
             state,
@@ -80,6 +90,10 @@ def create_research_manager(llm, memory, config=None):
             claim_matrix=claim_matrix,
             all_reports_text=all_reports_text,
             debate_digest=debate_digest,
+            portfolio_policy_context=portfolio_policy_context,
+            decision_policy_context=decision_policy_context,
+            theme_basket_context=theme_basket_context,
+            sizing_guidance_context=sizing_guidance_context,
             past_memory_str=past_memory_str,
             decision_memory_str=decision_memory_str,
             history=history,

@@ -19,10 +19,13 @@ from .models import (
     MemoryItemRecordV1,
     MemoryPromotionRecordV1,
     MemoryRetrievalRecordV1,
+    QualityObservationRecordV1,
     QualityIndexRecordV1,
+    QualityReconciliationRecordV1,
     RetrievalPackRecordV1,
     RewardRecordV1,
     RunIndexRecordV1,
+    SourceReliabilityRecordV1,
     TraceSpanV1,
 )
 
@@ -41,6 +44,7 @@ MEMORY_ITEM_TYPES = {
     "semantic_candidate",
     "procedural_candidate",
     "asset_profile_candidate",
+    "data_quality_candidate",
 }
 
 
@@ -273,11 +277,21 @@ class EpisodeLedger:
                     content TEXT NOT NULL,
                     source TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    symbol TEXT,
+                    horizon TEXT,
+                    state TEXT,
+                    created_by TEXT,
+                    promotion_score REAL NOT NULL DEFAULT 0,
+                    last_evaluated_at TEXT,
+                    source_run_id TEXT,
+                    source_ref TEXT,
                     evidence_json TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_items_type_status ON memory_items(memory_type, status);
+                CREATE INDEX IF NOT EXISTS idx_memory_items_symbol_horizon ON memory_items(symbol, horizon);
+                CREATE INDEX IF NOT EXISTS idx_memory_items_state ON memory_items(state);
 
                 CREATE TABLE IF NOT EXISTS memory_links (
                     memory_item_id TEXT NOT NULL,
@@ -429,6 +443,62 @@ class EpisodeLedger:
                     PRIMARY KEY(pack_id, item_id),
                     FOREIGN KEY(pack_id) REFERENCES retrieval_packs(pack_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS quality_observations (
+                    run_id TEXT NOT NULL,
+                    artifact_ref TEXT NOT NULL,
+                    symbol TEXT,
+                    source_id TEXT NOT NULL,
+                    dataset_type TEXT NOT NULL,
+                    observation_type TEXT NOT NULL,
+                    observed_at TEXT,
+                    value_num REAL,
+                    unit TEXT,
+                    extraction_status TEXT NOT NULL,
+                    flags_json TEXT NOT NULL,
+                    source_ref TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, artifact_ref, observation_type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_quality_observations_run ON quality_observations(run_id);
+                CREATE INDEX IF NOT EXISTS idx_quality_observations_symbol ON quality_observations(symbol, dataset_type);
+
+                CREATE TABLE IF NOT EXISTS quality_reconciliation (
+                    reconciliation_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    symbol TEXT,
+                    dataset_type TEXT NOT NULL,
+                    check_type TEXT NOT NULL,
+                    primary_source TEXT,
+                    comparison_source TEXT,
+                    status TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    delta_pct REAL,
+                    flags_json TEXT NOT NULL,
+                    source_refs_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_quality_reconciliation_run ON quality_reconciliation(run_id);
+                CREATE INDEX IF NOT EXISTS idx_quality_reconciliation_status ON quality_reconciliation(status);
+
+                CREATE TABLE IF NOT EXISTS source_reliability (
+                    source_id TEXT NOT NULL,
+                    dataset_type TEXT NOT NULL,
+                    window_days INTEGER NOT NULL,
+                    quality_pass INTEGER NOT NULL,
+                    quality_warn INTEGER NOT NULL,
+                    quality_fail INTEGER NOT NULL,
+                    quality_unknown INTEGER NOT NULL,
+                    fallback_count INTEGER NOT NULL,
+                    stale_count INTEGER NOT NULL,
+                    critical_fail_count INTEGER NOT NULL,
+                    pass_rate REAL NOT NULL,
+                    fallback_rate REAL NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(source_id, dataset_type, window_days)
+                );
                 """
             )
             reward_columns = {
@@ -439,6 +509,24 @@ class EpisodeLedger:
                     "ALTER TABLE rewards ADD COLUMN reward_status TEXT NOT NULL DEFAULT 'resolved'"
                 )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rewards_status ON rewards(reward_status)")
+            memory_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()
+            }
+            memory_migrations = {
+                "symbol": "ALTER TABLE memory_items ADD COLUMN symbol TEXT",
+                "horizon": "ALTER TABLE memory_items ADD COLUMN horizon TEXT",
+                "state": "ALTER TABLE memory_items ADD COLUMN state TEXT",
+                "created_by": "ALTER TABLE memory_items ADD COLUMN created_by TEXT",
+                "promotion_score": "ALTER TABLE memory_items ADD COLUMN promotion_score REAL NOT NULL DEFAULT 0",
+                "last_evaluated_at": "ALTER TABLE memory_items ADD COLUMN last_evaluated_at TEXT",
+                "source_run_id": "ALTER TABLE memory_items ADD COLUMN source_run_id TEXT",
+                "source_ref": "ALTER TABLE memory_items ADD COLUMN source_ref TEXT",
+            }
+            for column, statement in memory_migrations.items():
+                if column not in memory_columns:
+                    conn.execute(statement)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_symbol_horizon ON memory_items(symbol, horizon)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_state ON memory_items(state)")
 
     def start_episode(
         self,
@@ -963,19 +1051,39 @@ class EpisodeLedger:
         if record.memory_type not in MEMORY_ITEM_TYPES:
             raise ValueError(f"Unsupported memory_type: {record.memory_type}")
         now = record.created_at or _utc_now_iso()
+        state = record.state or record.status or "candidate"
+        evidence = record.evidence_json or {}
+        metadata = record.metadata_json or {}
+        symbol = record.symbol or evidence.get("symbol") or metadata.get("symbol")
+        horizon = record.horizon or evidence.get("horizon") or metadata.get("horizon")
+        created_by = record.created_by or record.source
+        source_run_id = record.source_run_id or evidence.get("run_id")
+        source_ref = record.source_ref or evidence.get("source_ref") or (
+            f"episode:{source_run_id}" if source_run_id else None
+        )
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO memory_items (
                     memory_item_id, memory_type, content, source, status,
+                    symbol, horizon, state, created_by, promotion_score,
+                    last_evaluated_at, source_run_id, source_ref,
                     evidence_json, metadata_json, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(memory_item_id) DO UPDATE SET
                     memory_type=excluded.memory_type,
                     content=excluded.content,
                     source=excluded.source,
                     status=excluded.status,
+                    symbol=excluded.symbol,
+                    horizon=excluded.horizon,
+                    state=excluded.state,
+                    created_by=excluded.created_by,
+                    promotion_score=excluded.promotion_score,
+                    last_evaluated_at=excluded.last_evaluated_at,
+                    source_run_id=excluded.source_run_id,
+                    source_ref=excluded.source_ref,
                     evidence_json=excluded.evidence_json,
                     metadata_json=excluded.metadata_json
                 """,
@@ -984,13 +1092,21 @@ class EpisodeLedger:
                     record.memory_type,
                     record.content,
                     record.source,
-                    record.status,
-                    _json_dump(record.evidence_json),
-                    _json_dump(record.metadata_json),
+                    state,
+                    symbol,
+                    horizon,
+                    state,
+                    created_by,
+                    record.promotion_score,
+                    record.last_evaluated_at,
+                    source_run_id,
+                    source_ref,
+                    _json_dump(evidence),
+                    _json_dump(metadata),
                     now,
                 ),
             )
-            self._add_memory_links_from_evidence(conn, record.memory_item_id, record.evidence_json)
+            self._add_memory_links_from_evidence(conn, record.memory_item_id, evidence)
 
     def record_memory_retrieval(
         self,
@@ -1058,13 +1174,38 @@ class EpisodeLedger:
                 "UPDATE memory_items SET status=? WHERE memory_item_id=?",
                 (record.to_status, record.memory_item_id),
             )
+            conn.execute(
+                "UPDATE memory_items SET state=?, last_evaluated_at=? WHERE memory_item_id=?",
+                (record.to_status, now, record.memory_item_id),
+            )
 
-    def list_memory_items(self, *, run_id: str | None = None) -> list[dict[str, Any]]:
+    def list_memory_items(
+        self,
+        *,
+        run_id: str | None = None,
+        symbol: str | None = None,
+        horizon: str | None = None,
+        state: str | None = None,
+        memory_type: str | None = None,
+    ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
         if run_id:
-            clauses.append("json_extract(evidence_json, '$.run_id') = ?")
+            clauses.append("(source_run_id = ? OR json_extract(evidence_json, '$.run_id') = ?)")
             params.append(run_id)
+            params.append(run_id)
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        if horizon:
+            clauses.append("horizon = ?")
+            params.append(horizon)
+        if state:
+            clauses.append("(state = ? OR status = ?)")
+            params.extend([state, state])
+        if memory_type:
+            clauses.append("memory_type = ?")
+            params.append(memory_type)
         query = "SELECT * FROM memory_items"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
@@ -1072,6 +1213,14 @@ class EpisodeLedger:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._memory_item_from_row(row) for row in rows]
+
+    def load_memory_item(self, memory_item_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM memory_items WHERE memory_item_id=?",
+                (memory_item_id,),
+            ).fetchone()
+        return self._memory_item_from_row(row) if row else None
 
     def add_critic_record(self, record: CriticRecordV1) -> None:
         now = record.created_at or _utc_now_iso()
@@ -1175,6 +1324,10 @@ class EpisodeLedger:
                         now,
                     ),
                 )
+
+    def clear_quality_index(self, run_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM quality_index WHERE run_id=?", (run_id,))
 
     def list_quality_index(
         self,
@@ -1391,6 +1544,193 @@ class EpisodeLedger:
         payload["items"] = [self._retrieval_pack_item_from_row(row) for row in items]
         return payload
 
+    def clear_quality_observations(self, run_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM quality_observations WHERE run_id=?", (run_id,))
+
+    def upsert_quality_observations(self, records: list[QualityObservationRecordV1]) -> None:
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            for record in records:
+                conn.execute(
+                    """
+                    INSERT INTO quality_observations (
+                        run_id, artifact_ref, symbol, source_id, dataset_type,
+                        observation_type, observed_at, value_num, unit,
+                        extraction_status, flags_json, source_ref, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id, artifact_ref, observation_type) DO UPDATE SET
+                        symbol=excluded.symbol,
+                        source_id=excluded.source_id,
+                        dataset_type=excluded.dataset_type,
+                        observed_at=excluded.observed_at,
+                        value_num=excluded.value_num,
+                        unit=excluded.unit,
+                        extraction_status=excluded.extraction_status,
+                        flags_json=excluded.flags_json,
+                        source_ref=excluded.source_ref,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        record.run_id,
+                        record.artifact_ref,
+                        record.symbol,
+                        record.source_id,
+                        record.dataset_type,
+                        record.observation_type,
+                        record.observed_at,
+                        record.value_num,
+                        record.unit,
+                        record.extraction_status,
+                        _json_dump(record.flags),
+                        record.source_ref,
+                        now,
+                        now,
+                    ),
+                )
+
+    def list_quality_observations(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM quality_observations
+                WHERE run_id=?
+                ORDER BY artifact_ref, observation_type
+                """,
+                (run_id,),
+            ).fetchall()
+        return [self._quality_observation_from_row(row) for row in rows]
+
+    def clear_quality_reconciliation(self, run_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM quality_reconciliation WHERE run_id=?", (run_id,))
+
+    def upsert_quality_reconciliation(
+        self,
+        records: list[QualityReconciliationRecordV1],
+    ) -> None:
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            for record in records:
+                conn.execute(
+                    """
+                    INSERT INTO quality_reconciliation (
+                        reconciliation_id, run_id, symbol, dataset_type, check_type,
+                        primary_source, comparison_source, status, severity,
+                        delta_pct, flags_json, source_refs_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(reconciliation_id) DO UPDATE SET
+                        symbol=excluded.symbol,
+                        dataset_type=excluded.dataset_type,
+                        check_type=excluded.check_type,
+                        primary_source=excluded.primary_source,
+                        comparison_source=excluded.comparison_source,
+                        status=excluded.status,
+                        severity=excluded.severity,
+                        delta_pct=excluded.delta_pct,
+                        flags_json=excluded.flags_json,
+                        source_refs_json=excluded.source_refs_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        record.reconciliation_id,
+                        record.run_id,
+                        record.symbol,
+                        record.dataset_type,
+                        record.check_type,
+                        record.primary_source,
+                        record.comparison_source,
+                        record.status,
+                        record.severity,
+                        record.delta_pct,
+                        _json_dump(record.flags),
+                        _json_dump(record.source_refs),
+                        now,
+                        now,
+                    ),
+                )
+
+    def list_quality_reconciliation(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM quality_reconciliation
+                WHERE run_id=?
+                ORDER BY check_type, reconciliation_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [self._quality_reconciliation_from_row(row) for row in rows]
+
+    def upsert_source_reliability(self, records: list[SourceReliabilityRecordV1]) -> None:
+        with self._connect() as conn:
+            for record in records:
+                conn.execute(
+                    """
+                    INSERT INTO source_reliability (
+                        source_id, dataset_type, window_days, quality_pass,
+                        quality_warn, quality_fail, quality_unknown,
+                        fallback_count, stale_count, critical_fail_count,
+                        pass_rate, fallback_rate, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id, dataset_type, window_days) DO UPDATE SET
+                        quality_pass=excluded.quality_pass,
+                        quality_warn=excluded.quality_warn,
+                        quality_fail=excluded.quality_fail,
+                        quality_unknown=excluded.quality_unknown,
+                        fallback_count=excluded.fallback_count,
+                        stale_count=excluded.stale_count,
+                        critical_fail_count=excluded.critical_fail_count,
+                        pass_rate=excluded.pass_rate,
+                        fallback_rate=excluded.fallback_rate,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        record.source_id,
+                        record.dataset_type,
+                        record.window_days,
+                        record.quality_pass,
+                        record.quality_warn,
+                        record.quality_fail,
+                        record.quality_unknown,
+                        record.fallback_count,
+                        record.stale_count,
+                        record.critical_fail_count,
+                        record.pass_rate,
+                        record.fallback_rate,
+                        record.updated_at or _utc_now_iso(),
+                    ),
+                )
+
+    def list_source_reliability(
+        self,
+        *,
+        window_days: int | None = None,
+        source_id: str | None = None,
+        dataset_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if window_days:
+            clauses.append("window_days=?")
+            params.append(window_days)
+        if source_id:
+            clauses.append("source_id=?")
+            params.append(source_id)
+        if dataset_type:
+            clauses.append("dataset_type=?")
+            params.append(dataset_type)
+        query = "SELECT * FROM source_reliability"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY source_id, dataset_type, window_days"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
     def resolved_reward_episodes_without_critic(self, critic_version: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -1605,6 +1945,8 @@ class EpisodeLedger:
         item = dict(row)
         item["evidence_json"] = _json_load(item.get("evidence_json"), {})
         item["metadata_json"] = _json_load(item.get("metadata_json"), {})
+        if not item.get("state"):
+            item["state"] = item.get("status") or "candidate"
         return item
 
     def _critic_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -1649,4 +1991,19 @@ class EpisodeLedger:
         item = dict(row)
         item["payload"] = _json_load(item.pop("payload_json", None), {})
         item.pop("created_at", None)
+        return item
+
+    def _quality_observation_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["flags"] = _json_load(item.pop("flags_json", None), [])
+        item.pop("created_at", None)
+        item.pop("updated_at", None)
+        return item
+
+    def _quality_reconciliation_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["flags"] = _json_load(item.pop("flags_json", None), [])
+        item["source_refs"] = _json_load(item.pop("source_refs_json", None), [])
+        item.pop("created_at", None)
+        item.pop("updated_at", None)
         return item

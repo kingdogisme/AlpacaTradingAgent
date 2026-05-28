@@ -10,8 +10,10 @@ from tradingagents.agents.risk_mgmt.neutral_debator import create_neutral_debato
 class PlainLLM:
     def __init__(self, content: str):
         self.content = content
+        self.last_prompt = None
 
     def invoke(self, _prompt):
+        self.last_prompt = _prompt
         return type("Message", (), {"content": self.content})()
 
 
@@ -44,6 +46,8 @@ def _state() -> dict:
         "risk_debate_state": {
             "history": "",
             "latest_speaker": "Risky",
+            "phase": "opening",
+            "rebuttal_rounds_completed": 0,
             "risky_history": "",
             "safe_history": "",
             "neutral_history": "",
@@ -97,4 +101,28 @@ def test_risk_debators_update_speaker_specific_state(isolated_config):
     assert len(risk_state["risky_messages"]) == 1
     assert len(risk_state["safe_messages"]) == 1
     assert len(risk_state["neutral_messages"]) == 1
+    assert risk_state["phase"] == "rebuttal"
+    assert risk_state["rebuttal_rounds_completed"] == 1
 
+
+def test_risk_opening_and_rebuttal_prompts_include_phase(isolated_config):
+    state = _state()
+    llm = PlainLLM("Aggressive opening.")
+    risky = create_risky_debator(llm, isolated_config)
+
+    opening_state = risky(state)["risk_debate_state"]
+    assert "Debate phase: opening" in llm.last_prompt
+    assert "standalone opening statement only" in llm.last_prompt
+
+    state["risk_debate_state"] = {
+        **opening_state,
+        "phase": "rebuttal",
+        "current_safe_response": "Safe Analyst: opening caution.",
+        "current_neutral_response": "Neutral Analyst: opening balance.",
+    }
+    llm.content = "Aggressive rebuttal."
+    risky(state)
+
+    assert "Debate phase: rebuttal" in llm.last_prompt
+    assert "Safe Analyst: opening caution." in llm.last_prompt
+    assert "Neutral Analyst: opening balance." in llm.last_prompt

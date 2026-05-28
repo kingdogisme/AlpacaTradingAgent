@@ -8,8 +8,8 @@ from tradingagents.graph.checkpointer import clear_checkpoint
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.run_logger import get_run_audit_logger
 from tradingagents.eval import EpisodeLedger
-from tradingagents.dataflows.alpaca_utils import AlpacaUtils
 from tradingagents.agents.utils.agent_trading_modes import extract_recommendation
+from tradingagents.trade_lifecycle import TradeMonitorService, persist_approved_plan
 from webui.utils.state import app_state
 from webui.utils.charts import create_chart
 
@@ -131,10 +131,20 @@ def _persist_partial_run_state(run_logger, run_id, symbol, current_state):
         print(f"[STATE] Failed to persist partial run state for {symbol}: {exc}")
 
 
-def execute_trade_after_analysis(ticker, allow_shorts, trade_amount):
-    """Execute trade based on analysis results"""
+def execute_trade_after_analysis(
+    ticker,
+    allow_shorts,
+    trade_amount,
+    *,
+    config=None,
+    final_state=None,
+    run_id=None,
+    audit_path=None,
+    persist_plan=True,
+):
+    """Trigger a risk-approved conditional plan through monitor + validator."""
     try:
-        print(f"[TRADE] Starting trade execution for {ticker}")
+        print(f"[TRADE] Starting conditional trade monitor pass for {ticker}")
 
         # Get the current state for this symbol
         state = app_state.get_state(ticker)
@@ -147,84 +157,42 @@ def execute_trade_after_analysis(ticker, allow_shorts, trade_amount):
             print(f"[TRADE] Analysis status: {state.get('analysis_complete', 'Unknown')}")
             return
 
-        print(f"[TRADE] Analysis complete for {ticker}, checking for recommended action")
+        cfg = (config or DEFAULT_CONFIG.copy()).copy()
+        cfg["allow_shorts"] = allow_shorts
+        cfg["trade_amount"] = trade_amount
+        cfg["trade_lifecycle_default_notional"] = trade_amount if trade_amount and trade_amount > 0 else 1000
+        final_state = final_state or (state.get("analysis_results") or {}).get("full_state")
+        if final_state and persist_plan:
+            plan = persist_approved_plan(
+                final_state,
+                config=cfg,
+                source_run_id=run_id,
+                audit_path=audit_path,
+            )
+            if plan:
+                state["conditional_trade_plan"] = plan.model_dump(mode="json")
+                final_state["conditional_trade_plan"] = state["conditional_trade_plan"]
 
-        # Get the recommended action
-        recommended_action = state.get("recommended_action")
-        print(f"[TRADE] Direct recommended_action: {recommended_action}")
+        monitor_result = TradeMonitorService(cfg).run_once(symbols=[ticker])
+        state["trading_results"] = monitor_result
 
-        if not recommended_action:
-            # Try to extract from final trade decision
-            final_decision = state["current_reports"].get("final_trade_decision")
-            print(f"[TRADE] Final decision available: {bool(final_decision)}")
-            if final_decision:
-                trading_mode = "trading" if allow_shorts else "investment"
-                print(f"[TRADE] Extracting recommendation using mode: {trading_mode}")
-                recommended_action = extract_recommendation(final_decision, trading_mode)
-                print(f"[TRADE] Extracted recommendation: {recommended_action}")
-
-        if not recommended_action:
-            print(f"[TRADE] No recommended action found for {ticker}, skipping trade execution")
-            print(f"[TRADE] Available reports: {list(state['current_reports'].keys())}")
-            return
-
-        print(f"[TRADE] Executing trade for {ticker}: {recommended_action} with ${trade_amount}")
-
-        # Get current position
-        current_position = AlpacaUtils.get_current_position_state(ticker)
-        print(f"[TRADE] Current position for {ticker}: {current_position}")
-
-        # Execute the trading action
-        result = AlpacaUtils.execute_trading_action(
-            symbol=ticker,
-            current_position=current_position,
-            signal=recommended_action,
-            dollar_amount=trade_amount,
-            allow_shorts=allow_shorts
+        executed = any(
+            item.get("order_result", {}).get("success")
+            for item in monitor_result.get("processed", [])
         )
-
-        # Check individual action results and provide detailed feedback
-        successful_actions = []
-        failed_actions = []
-
-        for action_result in result.get("actions", []):
-            if "result" in action_result:
-                action_info = action_result["result"]
-                if action_info.get("success"):
-                    successful_actions.append(f"{action_result['action']}: {action_info.get('message', 'Success')}")
-                else:
-                    failed_actions.append(f"{action_result['action']} failed: {action_info.get('error', 'Unknown error')}")
-            else:
-                successful_actions.append(f"{action_result['action']}: {action_result.get('message', 'Action completed')}")
-
-        # Print results based on overall success
-        if result.get("success"):
-            print(f"[TRADE] Successfully executed trading actions for {ticker}")
-            for success in successful_actions:
-                print(f"[TRADE] {success}")
-
-            # Store trading results in state for UI display
-            state["trading_results"] = result
-
-            # Signal that a trade occurred to trigger Alpaca data refresh
+        if executed:
+            print(f"[TRADE] Conditional plan executed through validator for {ticker}")
             app_state.signal_trade_occurred()
         else:
-            print(f"[TRADE] Trading execution failed for {ticker}")
-            for success in successful_actions:
-                print(f"[TRADE] {success}")
-            for failure in failed_actions:
-                print(f"[TRADE] {failure}")
-
-            # Store error information
-            state["trading_results"] = {"error": "One or more trading actions failed", "details": failed_actions}
+            print(f"[TRADE] No validated paper order executed for {ticker}: {monitor_result}")
 
     except Exception as e:
-        print(f"[TRADE] Error executing trade for {ticker}: {e}")
+        print(f"[TRADE] Error running conditional trade monitor for {ticker}: {e}")
         import traceback
         traceback.print_exc()
         state = app_state.get_state(ticker)
         if state:
-            state["trading_results"] = {"error": f"Trading execution error: {str(e)}"}
+            state["trading_results"] = {"error": f"Conditional trade monitor error: {str(e)}"}
 
 
 def run_analysis(
@@ -395,6 +363,23 @@ def run_analysis(
             symbol=ticker,
         )
         audit_path = run_logger.get_run_file_path(run_id=run_id, symbol=ticker)
+        trade_amount_for_plan = getattr(app_state, 'trade_amount', 1000)
+        plan_config = config.copy()
+        plan_config["trade_lifecycle_default_notional"] = (
+            trade_amount_for_plan if trade_amount_for_plan and trade_amount_for_plan > 0 else 1000
+        )
+        try:
+            plan = persist_approved_plan(
+                final_state,
+                config=plan_config,
+                source_run_id=run_id,
+                audit_path=audit_path,
+            )
+            if plan:
+                final_state["conditional_trade_plan"] = plan.model_dump(mode="json")
+                current_state["conditional_trade_plan"] = final_state["conditional_trade_plan"]
+        except Exception as exc:
+            print(f"[TRADE_PLAN] Failed to persist conditional trade plan: {exc}")
         run_logger.finish_run(
             symbol=ticker,
             status="completed",
@@ -462,7 +447,16 @@ def run_analysis(
             }
         elif trade_enabled:
             print(f"[TRADE] Trading enabled for {ticker}, executing trade with ${trade_amount}")
-            execute_trade_after_analysis(ticker, allow_shorts, trade_amount)
+            execute_trade_after_analysis(
+                ticker,
+                allow_shorts,
+                trade_amount,
+                config=plan_config,
+                final_state=final_state,
+                run_id=run_id,
+                audit_path=audit_path,
+                persist_plan=False,
+            )
         else:
             print(f"[TRADE] Trading disabled for {ticker}, skipping trade execution")
 

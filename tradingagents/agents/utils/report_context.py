@@ -101,6 +101,14 @@ ROLE_WEIGHTS: Dict[str, Dict[str, float]] = {
 }
 
 
+ROLE_ALIASES: Dict[str, str] = {
+    "researchers/bull_researcher": "bull_researcher",
+    "researchers/bear_researcher": "bear_researcher",
+    "managers/research_manager": "research_manager",
+    "managers/risk_manager": "risk_manager",
+}
+
+
 OPTION_POSITIONING_TERMS = (
     "gamma",
     "gex",
@@ -256,6 +264,16 @@ def _classify_signal(point: str) -> str:
     return "Mixed"
 
 
+def normalize_agent_role(agent_role: str | None) -> str:
+    """Normalize path-like agent identifiers to ROLE_WEIGHTS keys."""
+    role = str(agent_role or "").strip()
+    if not role:
+        return "default"
+    role = ROLE_ALIASES.get(role, role)
+    role = role.rsplit("/", 1)[-1]
+    return role if role in ROLE_WEIGHTS else "default"
+
+
 def _render_decision_claim_matrix(
     context: Dict[str, Any],
     config: Dict[str, Any] | None = None,
@@ -263,6 +281,13 @@ def _render_decision_claim_matrix(
     cfg = _get_context_config(config)
     max_points = int(cfg["report_context_compact_points_per_report"])
     point_chars = int(cfg["report_context_compact_point_chars"])
+    ledger = context.get("evidence_ledger")
+    if isinstance(ledger, list) and ledger:
+        return _render_decision_claim_matrix_from_ledger(
+            ledger,
+            max_points=max_points,
+            point_chars=point_chars,
+        )
 
     lines: List[str] = []
     lines.append("Decision Claim Matrix (compressed):")
@@ -286,6 +311,92 @@ def _render_decision_claim_matrix(
         dominant = max(signal_votes, key=signal_votes.get)
         joined_points = " | ".join(rendered_points)
         lines.append(f"- {report_meta['label']} [{dominant}]: {joined_points}")
+
+    return "\n".join(lines).strip()
+
+
+def _quality_flags_for_claim(claim: str) -> List[str]:
+    lower = claim.lower()
+    flags: List[str] = []
+    if "[data_quality]" in lower:
+        flags.append("data_quality_header")
+    for marker in (
+        "stale_source",
+        "source_unavailable",
+        "missing_observed_timestamp",
+        "fallback_used",
+        "timeout",
+    ):
+        if marker in lower:
+            flags.append(marker)
+    return sorted(set(flags))
+
+
+def _build_evidence_ledger(
+    context: Dict[str, Any],
+    config: Dict[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    cfg = _get_context_config(config)
+    max_points = int(cfg["report_context_max_points_per_report"])
+    point_chars = int(cfg["report_context_point_chars"])
+    ledger: List[Dict[str, Any]] = []
+
+    for report_key, _ in REPORT_SPECS:
+        report_meta = context.get("reports", {}).get(report_key)
+        if not report_meta:
+            continue
+        points = report_meta.get("coverage_points", [])[:max_points]
+        for idx, point in enumerate(points, start=1):
+            stance = _classify_signal(point)
+            priority_score = round(
+                _line_priority(point)
+                + ROLE_WEIGHTS["default"].get(report_key, 1.0)
+                + max(0, max_points - idx) * 0.05,
+                3,
+            )
+            ledger.append(
+                {
+                    "source_report": report_key,
+                    "section": point.split(":", 1)[0].strip() if ":" in point else "Overview",
+                    "stance": stance,
+                    "claim": _truncate(point, point_chars),
+                    "evidence_ref": f"{report_key.replace('_report', '')}:claim:{idx}",
+                    "priority_score": priority_score,
+                    "quality_flags": _quality_flags_for_claim(point),
+                }
+            )
+
+    ledger.sort(key=lambda item: item.get("priority_score", 0.0), reverse=True)
+    return ledger
+
+
+def _render_decision_claim_matrix_from_ledger(
+    ledger: List[Dict[str, Any]],
+    *,
+    max_points: int,
+    point_chars: int,
+) -> str:
+    lines: List[str] = ["Decision Evidence Ledger (compressed):"]
+    by_report: Dict[str, List[Dict[str, Any]]] = {}
+    for item in ledger:
+        by_report.setdefault(str(item.get("source_report") or "unknown"), []).append(item)
+
+    for report_key, report_label in REPORT_SPECS:
+        entries = by_report.get(report_key, [])[:max_points]
+        if not entries:
+            continue
+        signal_votes = {"Bullish": 0, "Bearish": 0, "Mixed": 0}
+        rendered_points: List[str] = []
+        for entry in entries:
+            stance = str(entry.get("stance") or "Mixed")
+            if stance not in signal_votes:
+                stance = "Mixed"
+            signal_votes[stance] += 1
+            ref = str(entry.get("evidence_ref") or "")
+            claim = _truncate(str(entry.get("claim") or ""), point_chars)
+            rendered_points.append(f"{ref}: {claim}" if ref else claim)
+        dominant = max(signal_votes, key=signal_votes.get)
+        lines.append(f"- {report_label} [{dominant}]: {' | '.join(rendered_points)}")
 
     return "\n".join(lines).strip()
 
@@ -567,6 +678,7 @@ def build_report_context_index(
 
     context["stats"]["total_chunks"] = len(context["chunks"])
     context["global_overview"] = "\n".join(global_overview_lines)
+    context["evidence_ledger"] = _build_evidence_ledger(context, config=config)
 
     return context
 
@@ -587,7 +699,7 @@ def _select_chunks_for_agent(
         return []
 
     query_terms = _extract_terms(objective)
-    role_weights = ROLE_WEIGHTS.get(agent_role, ROLE_WEIGHTS["default"])
+    role_weights = ROLE_WEIGHTS.get(normalize_agent_role(agent_role), ROLE_WEIGHTS["default"])
 
     scored: List[Tuple[float, Dict[str, Any]]] = []
     for chunk in chunks:

@@ -30,6 +30,7 @@ def create_neutral_debator(llm, config=None):
 
         current_risky_response = risk_debate_state.get("current_risky_response", "")
         current_safe_response = risk_debate_state.get("current_safe_response", "")
+        debate_phase = risk_debate_state.get("phase", "rebuttal")
 
         trader_decision = state["trader_investment_plan"]
         
@@ -79,6 +80,7 @@ def create_neutral_debator(llm, config=None):
             current_risky_response=current_risky_response,
             current_safe_response=current_safe_response,
             decision_format=decision_format,
+            debate_phase=debate_phase,
         )
 
         # Capture the COMPLETE prompt that gets sent to the LLM
@@ -102,6 +104,8 @@ def create_neutral_debator(llm, config=None):
             "neutral_history": neutral_history + "\n" + argument,
             "neutral_messages": neutral_messages,
             "latest_speaker": "Neutral",
+            "phase": "rebuttal",
+            "rebuttal_rounds_completed": risk_debate_state.get("rebuttal_rounds_completed", 0) + 1,
             "current_risky_response": risk_debate_state.get(
                 "current_risky_response", ""
             ),

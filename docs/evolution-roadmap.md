@@ -30,6 +30,12 @@ readers of history, memory, and evaluation data. See
 information hierarchy, retrieval-pack design, and token-budget contracts that
 should guide future history and memory work.
 
+The next execution-safety milestone is documented in
+[Conditional Trade Plan v1](conditional-trade-plan-v1.md). That design upgrades
+natural-language final recommendations into risk-approved, monitorable trade
+plans with a dedicated lifecycle database, monitor service, pre-trade
+validation, and paper-only automatic execution.
+
 ### 1. Decision Quality Tracking
 
 Every completed run can be evaluated after the holding period. For swing

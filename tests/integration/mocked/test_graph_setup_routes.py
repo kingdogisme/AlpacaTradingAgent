@@ -87,6 +87,7 @@ def test_parallel_graph_setup_routes_analysts_through_context_builder():
     assert ("Parallel Analysts", "Build Report Context") in workflow.edges
     assert ("Build Report Context", "Bull Researcher") in workflow.edges
     assert ("Trader", "Parallel Risk Round 1") in workflow.edges
+    assert any(start == "Parallel Risk Round 1" and "Risk Judge" in edges for start, edges in workflow.conditional_edges)
 
 
 def test_sequential_graph_setup_routes_selected_analysts_in_order():

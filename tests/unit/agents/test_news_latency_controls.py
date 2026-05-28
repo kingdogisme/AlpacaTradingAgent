@@ -145,6 +145,16 @@ class NewsLatencyControlTests(unittest.TestCase):
             )
         )
 
+    def test_question_headline_does_not_trigger_interactive_followup(self):
+        quality = _score_output_quality(
+            "get_google_news",
+            "### Should investors buy MU stock? (source: Example, date: Tue, 26 May 2026 10:00:00 GMT)\n\n"
+            "Reported market news summary.",
+        )
+
+        self.assertNotIn("interactive_followup", quality["flags"])
+        self.assertFalse(quality["is_suspect"])
+
     def test_social_analyst_keeps_openai_stock_news_as_low_priority_backstop(self):
         config = DEFAULT_CONFIG.copy()
         config.update(

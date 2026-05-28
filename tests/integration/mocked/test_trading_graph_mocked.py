@@ -6,6 +6,7 @@ from unittest.mock import patch
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.trade_lifecycle import TradePlanRepository
 
 
 class FakeLLM:
@@ -84,6 +85,7 @@ class MockedTradingGraphTests(unittest.TestCase):
                             "results_dir": str(tmp_path / "results"),
                             "memory_log_path": str(tmp_path / f"memory-{safe_ticker}.md"),
                             "episode_ledger_path": str(tmp_path / f"eval-{safe_ticker}.sqlite"),
+                            "trade_lifecycle_db_path": str(tmp_path / f"trade-{safe_ticker}.sqlite"),
                             "checkpoint_enabled": True,
                         }
                     )
@@ -119,6 +121,10 @@ class MockedTradingGraphTests(unittest.TestCase):
                     self.assertEqual(episode_rows[0].final_signal, "BUY")
                     ledger_episode = graph.episode_ledger.load_episode(episode_rows[0].run_id)
                     self.assertEqual(ledger_episode["decisions"][-1]["action"], "BUY")
+                    plans = TradePlanRepository(config["trade_lifecycle_db_path"]).list_active_plans([ticker])
+                    self.assertEqual(len(plans), 1)
+                    self.assertEqual(plans[0].source_run_id, episode_rows[0].run_id)
+                    self.assertEqual(state["conditional_trade_plan"]["plan_id"], plans[0].plan_id)
                     self.assertTrue(ledger_episode["audit_path"])
                     self.assertTrue(ledger_episode["experiment"]["config_hash"])
                     graph.episode_ledger.normalize_trace(episode_rows[0].run_id)

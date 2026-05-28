@@ -47,6 +47,9 @@ class ResearchPlan(BaseModel):
     review_cadence: Optional[str] = Field(default=None, description="How often the thesis should be reviewed.")
     position_plan: Optional[str] = Field(default=None, description="Build, add, trim, or exit plan.")
     risk_budget: Optional[str] = Field(default=None, description="Risk or exposure budget for the plan.")
+    factor_scores: Optional[str] = Field(default=None, description="Horizon factor scores and weighted score.")
+    gate_checks: Optional[str] = Field(default=None, description="Deterministic gate pass/fail checks.")
+    sizing_calculation: Optional[str] = Field(default=None, description="Risk-to-invalidation sizing calculation.")
 
 
 class TraderProposal(BaseModel):
@@ -70,6 +73,9 @@ class TraderProposal(BaseModel):
     review_cadence: Optional[str] = Field(default=None, description="Review cadence for maintaining the position.")
     position_plan: Optional[str] = Field(default=None, description="Initial allocation plus add, trim, or exit rules.")
     risk_budget: Optional[str] = Field(default=None, description="Maximum risk or exposure budget.")
+    factor_scores: Optional[str] = Field(default=None, description="Horizon factor scores and weighted score.")
+    gate_checks: Optional[str] = Field(default=None, description="Deterministic gate pass/fail checks.")
+    sizing_calculation: Optional[str] = Field(default=None, description="Risk-to-invalidation sizing calculation.")
 
 
 class RiskDecision(BaseModel):
@@ -104,6 +110,9 @@ class RiskDecision(BaseModel):
     review_cadence: Optional[str] = Field(default=None, description="Required review cadence.")
     position_plan: Optional[str] = Field(default=None, description="Approved build, add, trim, or exit plan.")
     risk_budget: Optional[str] = Field(default=None, description="Maximum risk or exposure budget.")
+    factor_scores: Optional[str] = Field(default=None, description="Horizon factor scores and weighted score.")
+    gate_checks: Optional[str] = Field(default=None, description="Deterministic gate pass/fail checks.")
+    sizing_calculation: Optional[str] = Field(default=None, description="Risk-to-invalidation sizing calculation.")
 
 
 ZH_CN_LABELS = {
@@ -128,6 +137,9 @@ ZH_CN_LABELS = {
     "review_cadence": "复核节奏",
     "position_plan": "仓位计划",
     "risk_budget": "风险预算",
+    "factor_scores": "因子分数",
+    "gate_checks": "Gate 检查",
+    "sizing_calculation": "Sizing 计算",
 }
 
 
@@ -153,6 +165,9 @@ EN_LABELS = {
     "review_cadence": "Review Cadence",
     "position_plan": "Position Plan",
     "risk_budget": "Risk Budget",
+    "factor_scores": "Factor Scores",
+    "gate_checks": "Gate Checks",
+    "sizing_calculation": "Sizing Calculation",
 }
 
 
@@ -245,6 +260,9 @@ def _append_horizon_fields(parts: list[str], model: Any, labels: dict[str, str])
         ("review_cadence", "review_cadence"),
         ("position_plan", "position_plan"),
         ("risk_budget", "risk_budget"),
+        ("factor_scores", "factor_scores"),
+        ("gate_checks", "gate_checks"),
+        ("sizing_calculation", "sizing_calculation"),
     ]
     for field_name, label_key in optional_fields:
         value = getattr(model, field_name, None)

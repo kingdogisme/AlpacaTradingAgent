@@ -30,6 +30,7 @@ from tradingagents.dataflows.config import (
 )
 from tradingagents.dataflows.ticker_utils import TickerUtils
 from tradingagents.dataflows.utils import safe_ticker_component
+from tradingagents.trade_lifecycle import persist_approved_plan
 
 from .checkpointer import clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
@@ -464,12 +465,6 @@ class TradingAgentsGraph:
             if checkpointer_ctx is not None:
                 checkpointer_ctx.__exit__(None, None, None)
 
-        # Store current state for reflection
-        self.curr_state = final_state
-
-        # Log state
-        self._log_state(trade_date, final_state)
-
         # Return decision and processed signal
         try:
             final_signal = self.process_signal(final_state["final_trade_decision"])
@@ -497,6 +492,12 @@ class TradingAgentsGraph:
                 pass
 
             audit_path = get_run_audit_logger().get_run_file_path(run_id=run_id, symbol=company_name)
+            self._persist_conditional_trade_plan(final_state, run_id, audit_path)
+
+            # Store current state for reflection and log it after trade-plan enrichment.
+            self.curr_state = final_state
+            self._log_state(trade_date, final_state)
+
             run_logger.finish_run(
                 symbol=company_name,
                 status="completed",
@@ -529,6 +530,24 @@ class TradingAgentsGraph:
                 error_message=str(e),
             )
             raise
+
+    def _persist_conditional_trade_plan(
+        self,
+        final_state: dict[str, Any],
+        run_id: str | None,
+        audit_path: str | None,
+    ) -> None:
+        try:
+            plan = persist_approved_plan(
+                final_state,
+                config=self.config,
+                source_run_id=run_id,
+                audit_path=audit_path,
+            )
+            if plan:
+                final_state["conditional_trade_plan"] = plan.model_dump(mode="json")
+        except Exception as exc:
+            print(f"[TRADE_PLAN] Warning: failed to persist conditional trade plan: {exc}")
 
     def _ledger_start_episode(
         self,
@@ -619,6 +638,7 @@ class TradingAgentsGraph:
             },
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
+            "conditional_trade_plan": final_state.get("conditional_trade_plan", {}),
         }
 
         # Save to file

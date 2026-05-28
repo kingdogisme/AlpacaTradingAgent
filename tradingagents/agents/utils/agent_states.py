@@ -51,6 +51,8 @@ class RiskDebateState(TypedDict):
     ]  # Individual neutral messages for proper conversation display
     history: Annotated[str, "Conversation history"]  # Conversation history
     latest_speaker: Annotated[str, "Analyst that spoke last"]
+    phase: Annotated[str, "Current debate phase: opening or rebuttal"]
+    rebuttal_rounds_completed: Annotated[int, "Completed full rebuttal cycles"]
     current_risky_response: Annotated[
         str, "Latest response by the risky analyst"
     ]  # Last response
@@ -96,3 +98,7 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
+    conditional_trade_plan: Annotated[
+        Dict[str, Any],
+        "Risk-approved conditional trade plan for monitor/validator execution",
+    ]

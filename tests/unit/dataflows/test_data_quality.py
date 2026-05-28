@@ -40,6 +40,19 @@ def test_quality_header_is_machine_readable():
     assert "artifact_ref: tool_call:2" in header
 
 
+def test_trend_brief_generated_at_counts_as_observed_date():
+    result = evaluate_tool_output(
+        "get_trend_brief",
+        {"symbol": "AAPL", "curr_date": "2026-05-20"},
+        '{"symbol":"AAPL","horizon":"trend","generated_at":"2026-05-20T13:00:00Z","timeframes":[]}',
+        artifact_ref="tool_call:3",
+    )
+
+    assert result["status"] == "pass"
+    assert result["observed_at"] == "2026-05-20"
+    assert "missing_observed_timestamp" not in result["flags"]
+
+
 def test_all_toolkit_tools_have_source_spec():
     module = ast.parse(Path("tradingagents/agents/utils/agent_utils.py").read_text(encoding="utf-8"))
     toolkit = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Toolkit")

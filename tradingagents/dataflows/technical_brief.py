@@ -397,6 +397,64 @@ def _relative_strength(symbol: str, daily_df: pd.DataFrame, curr_date: str) -> R
     )
 
 
+def _realized_vol_percentile(close: pd.Series, window: int = 21, lookback: int = 252) -> float:
+    returns = close.pct_change().dropna()
+    if len(returns) < window + 5:
+        return 50.0
+    realized = returns.rolling(window).std().dropna()
+    if realized.empty:
+        return 50.0
+    sample = realized.tail(min(len(realized), lookback))
+    current = float(sample.iloc[-1])
+    return round(float((sample <= current).sum() / len(sample) * 100), 2)
+
+
+def _risk_overlay_proxies(symbol: str, daily_df: pd.DataFrame, curr_date: str) -> dict:
+    if daily_df.empty or "close" not in daily_df:
+        return {}
+    close = daily_df["close"].dropna()
+    volume = daily_df["volume"].dropna() if "volume" in daily_df else pd.Series(dtype=float)
+    if close.empty:
+        return {}
+    last_close = float(close.iloc[-1])
+    sma_50 = _sma(close, 50)
+    sma_200 = _sma(close, 200)
+    high_52w = float(daily_df["high"].tail(min(len(daily_df), 252)).max()) if "high" in daily_df else last_close
+    dollar_volume = close * volume if not volume.empty else pd.Series(dtype=float)
+    dv_20 = float(dollar_volume.tail(20).mean()) if len(dollar_volume) >= 20 else 0.0
+    dv_120 = float(dollar_volume.tail(120).mean()) if len(dollar_volume) >= 120 else 0.0
+
+    benchmark_metrics: dict[str, float | str] = {"benchmark": _benchmark_for(symbol) or "self"}
+    benchmark = _benchmark_for(symbol)
+    if benchmark:
+        bench_df = _fetch_daily(benchmark, curr_date, 420)
+        if not bench_df.empty:
+            bench_close = bench_df["close"]
+            bench_last = float(bench_close.iloc[-1])
+            bench_high = float(bench_df["high"].tail(min(len(bench_df), 252)).max())
+            benchmark_metrics.update(
+                {
+                    "benchmark_5d_return": _pct_return(bench_close, 5) / 100.0,
+                    "benchmark_21d_return": _pct_return(bench_close, 21) / 100.0,
+                    "benchmark_63d_return": _pct_return(bench_close, 63) / 100.0,
+                    "benchmark_126d_return": _pct_return(bench_close, 126) / 100.0,
+                    "benchmark_drawdown": round((bench_last / bench_high - 1), 4) if bench_high else 0.0,
+                    "benchmark_realized_vol_21d_percentile": _realized_vol_percentile(bench_close, 21),
+                }
+            )
+
+    return {
+        "price_vs_50d": round((last_close / float(sma_50.iloc[-1]) - 1), 4) if not pd.isna(sma_50.iloc[-1]) and sma_50.iloc[-1] else None,
+        "price_vs_200d": round((last_close / float(sma_200.iloc[-1]) - 1), 4) if not pd.isna(sma_200.iloc[-1]) and sma_200.iloc[-1] else None,
+        "drawdown_from_52w_high": round((last_close / high_52w - 1), 4) if high_52w else 0.0,
+        "return_3m": _pct_return(close, 63) / 100.0,
+        "return_6m": _pct_return(close, 126) / 100.0,
+        "return_12m": _pct_return(close, 252) / 100.0,
+        "dollar_volume_20d_to_120d": round(dv_20 / dv_120, 3) if dv_120 else None,
+        **benchmark_metrics,
+    }
+
+
 # ═════════════════════════════════════════════════════════════════════════
 #  Detectors -- each returns a schema model
 # ═════════════════════════════════════════════════════════════════════════
@@ -1016,10 +1074,16 @@ def build_technical_brief(symbol: str, curr_date: str) -> TechnicalBrief:
     return TechnicalBrief(
         symbol=symbol,
         generated_at=datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        observed_at=(
+            daily_df.index[-1].date().isoformat()
+            if daily_df is not None and not daily_df.empty and isinstance(daily_df.index, pd.DatetimeIndex)
+            else None
+        ),
         timeframes=tf_briefs,
         key_levels=levels,
         signal_summary=signal,
         raw_prices=raw_prices,
+        risk_overlays=_risk_overlay_proxies(symbol, daily_df, curr_date) if daily_df is not None else {},
     )
 
 
@@ -1117,13 +1181,26 @@ def build_trend_brief(symbol: str, curr_date: str, horizon: str = "position") ->
         "return_12m_pct": _pct_return(close, 252),
     }
     holding_period = "1-3 months" if horizon_key == "position" else "3-6 months"
+    relative_strength = _relative_strength(symbol, daily_df, curr_date)
+    risk_overlays = _risk_overlay_proxies(symbol, daily_df, curr_date)
+    risk_overlays.update(
+        {
+            "relative_3m": relative_strength.relative_3m / 100.0,
+            "relative_6m": relative_strength.relative_6m / 100.0,
+        }
+    )
     return TrendBrief(
         symbol=symbol,
         horizon=horizon_key,
         generated_at=datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        observed_at=(
+            daily_df.index[-1].date().isoformat()
+            if isinstance(daily_df.index, pd.DatetimeIndex)
+            else None
+        ),
         holding_period=holding_period,
         timeframes=tf_briefs,
-        relative_strength=_relative_strength(symbol, daily_df, curr_date),
+        relative_strength=relative_strength,
         invalidation=TrendInvalidation(
             level=invalidation_level,
             basis=invalidation_basis,
@@ -1142,4 +1219,5 @@ def build_trend_brief(symbol: str, curr_date: str, horizon: str = "position") ->
             ),
         ),
         raw_prices=raw_prices,
+        risk_overlays=risk_overlays,
     )

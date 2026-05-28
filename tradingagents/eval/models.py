@@ -108,6 +108,14 @@ class MemoryItemRecordV1:
     evidence_json: dict[str, Any] = field(default_factory=dict)
     metadata_json: dict[str, Any] = field(default_factory=dict)
     created_at: str | None = None
+    symbol: str | None = None
+    horizon: str | None = None
+    state: str | None = None
+    created_by: str | None = None
+    promotion_score: float = 0.0
+    last_evaluated_at: str | None = None
+    source_run_id: str | None = None
+    source_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -213,3 +221,52 @@ class RetrievalPackRecordV1:
     source_refs: list[str] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
     items: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class QualityObservationRecordV1:
+    run_id: str
+    artifact_ref: str
+    symbol: str | None
+    source_id: str
+    dataset_type: str
+    observation_type: str
+    observed_at: str | None = None
+    value_num: float | None = None
+    unit: str | None = None
+    extraction_status: str = "unknown"
+    flags: list[str] = field(default_factory=list)
+    source_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class QualityReconciliationRecordV1:
+    reconciliation_id: str
+    run_id: str
+    symbol: str | None
+    dataset_type: str
+    check_type: str
+    primary_source: str | None = None
+    comparison_source: str | None = None
+    status: str = "unknown"
+    severity: str = "low"
+    delta_pct: float | None = None
+    flags: list[str] = field(default_factory=list)
+    source_refs: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SourceReliabilityRecordV1:
+    source_id: str
+    dataset_type: str
+    window_days: int
+    quality_pass: int = 0
+    quality_warn: int = 0
+    quality_fail: int = 0
+    quality_unknown: int = 0
+    fallback_count: int = 0
+    stale_count: int = 0
+    critical_fail_count: int = 0
+    pass_rate: float = 0.0
+    fallback_rate: float = 0.0
+    updated_at: str | None = None

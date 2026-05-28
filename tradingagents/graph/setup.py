@@ -440,6 +440,8 @@ class GraphSetup:
                 "safe_messages": list(base.get("safe_messages", [])),
                 "neutral_messages": list(base.get("neutral_messages", [])),
                 "latest_speaker": base.get("latest_speaker", "Risky"),
+                "phase": "opening",
+                "rebuttal_rounds_completed": int(base.get("rebuttal_rounds_completed", 0)),
                 "current_risky_response": base.get("current_risky_response", ""),
                 "current_safe_response": base.get("current_safe_response", ""),
                 "current_neutral_response": base.get("current_neutral_response", ""),
@@ -469,6 +471,8 @@ class GraphSetup:
                 appended_count += 1
 
             merged["count"] = int(base.get("count", 0)) + appended_count
+            merged["phase"] = "rebuttal"
+            merged["latest_speaker"] = "Opening"
             print(
                 f"[RISK_PARALLEL] Merge complete: "
                 f"count={merged['count']}, latest={merged['latest_speaker']}"

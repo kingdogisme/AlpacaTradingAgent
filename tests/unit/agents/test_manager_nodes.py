@@ -73,6 +73,8 @@ def _base_state() -> dict:
         "risk_debate_state": {
             "history": "Risk debate.",
             "latest_speaker": "Neutral",
+            "phase": "rebuttal",
+            "rebuttal_rounds_completed": 1,
             "risky_history": "Risky Analyst: upside.",
             "safe_history": "Safe Analyst: caution.",
             "neutral_history": "Neutral Analyst: balanced.",
@@ -99,6 +101,7 @@ def test_research_manager_preserves_executable_action_over_advisory_rating(isola
 
 
 def test_trader_injects_position_context_and_adds_missing_final_line(isolated_config):
+    isolated_config["decision_policy_enabled"] = False
     llm = PlainLLM("Trader evidence supports staying patient.")
     node = create_trader(llm, EmptyMemory(), isolated_config)
 
@@ -115,9 +118,13 @@ def test_trader_injects_position_context_and_adds_missing_final_line(isolated_co
     assert result["current_position"] == "NEUTRAL"
     assert "Account Status" in str(llm.prompts[0])
     assert "Account Equity / NAV: $2,500.00" in str(llm.prompts[0])
+    assert "Portfolio Policy: TREND_CONCENTRATED" in str(llm.prompts[0])
+    assert "Theme Basket Context for AAPL" in str(llm.prompts[0])
+    assert "Deterministic sizing rule" in str(llm.prompts[0])
 
 
 def test_trader_structured_output_uses_configured_language(isolated_config):
+    isolated_config["decision_policy_enabled"] = False
     isolated_config["output_language"] = "zh-CN"
     llm = DirectStructuredLLM(
         TraderProposal(
@@ -139,6 +146,7 @@ def test_trader_structured_output_uses_configured_language(isolated_config):
 
 
 def test_risk_manager_outputs_final_executable_action_and_state(isolated_config):
+    isolated_config["decision_policy_enabled"] = False
     llm = PlainLLM("Risk review says avoid new exposure.\nFINAL TRANSACTION PROPOSAL: **HOLD**")
     node = create_risk_manager(llm, EmptyMemory(), isolated_config)
 
@@ -155,9 +163,88 @@ def test_risk_manager_outputs_final_executable_action_and_state(isolated_config)
     assert result["risk_debate_state"]["latest_speaker"] == "Judge"
     assert result["current_position"] == "LONG"
     assert "Account Equity / NAV: $2,500.00" in str(llm.prompts[0])
+    assert "Portfolio Policy: TREND_CONCENTRATED" in str(llm.prompts[0])
+    assert "Theme Basket Context for AAPL" in str(llm.prompts[0])
+
+
+def test_risk_manager_validator_downgrades_flat_long_only_sell(isolated_config):
+    isolated_config["decision_policy_enabled"] = False
+    llm = PlainLLM("Risk review is bearish.\nFINAL TRANSACTION PROPOSAL: **SELL**")
+    node = create_risk_manager(llm, EmptyMemory(), isolated_config)
+
+    with patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_current_position_state", return_value="NEUTRAL"), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_positions_data", return_value=[]
+    ), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info",
+        return_value={"equity": 2500, "buying_power": 1000, "cash": 500},
+    ):
+        result = node(_base_state())
+
+    assert result["recommended_action"] == "HOLD"
+    assert result["final_trade_decision"].endswith("Validator Note: long-only flat SELL downgraded to HOLD; final proposal normalized to validated action.")
+    assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["final_trade_decision"]
+    assert "FINAL TRANSACTION PROPOSAL: **SELL**" not in result["final_trade_decision"]
+
+
+def test_risk_manager_validator_defaults_unparseable_action(isolated_config):
+    isolated_config["decision_policy_enabled"] = False
+    llm = PlainLLM("Risk review says maybe wait, but no final line.")
+    node = create_risk_manager(llm, EmptyMemory(), isolated_config)
+
+    with patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_current_position_state", return_value="LONG"), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_positions_data", return_value=[]
+    ), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info",
+        return_value={"equity": 2500, "buying_power": 1000, "cash": 500},
+    ):
+        result = node(_base_state())
+
+    assert result["recommended_action"] == "HOLD"
+    assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["final_trade_decision"]
+
+
+def test_risk_manager_validator_appends_research_only_note(isolated_config):
+    isolated_config["decision_policy_enabled"] = False
+    isolated_config["trading_horizon"] = "position"
+    isolated_config["trend_execution_enabled"] = False
+    llm = PlainLLM("Place order / execute now as live order.\nFINAL TRANSACTION PROPOSAL: **BUY**")
+    node = create_risk_manager(llm, EmptyMemory(), isolated_config)
+
+    with patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_current_position_state", return_value="NEUTRAL"), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_positions_data", return_value=[]
+    ), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info",
+        return_value={"equity": 2500, "buying_power": 1000, "cash": 500},
+    ):
+        result = node(_base_state())
+
+    assert result["recommended_action"] == "BUY"
+    assert "research-only horizon: no live Alpaca order should be placed" in result["final_trade_decision"]
+
+
+def test_risk_manager_decision_policy_downgrades_buy_when_gate_fails(isolated_config):
+    isolated_config["trading_horizon"] = "swing"
+    llm = PlainLLM(
+        "Technical bearish, valuation cheap. No invalidation supplied.\n"
+        "FINAL TRANSACTION PROPOSAL: **BUY**"
+    )
+    node = create_risk_manager(llm, EmptyMemory(), isolated_config)
+
+    with patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_current_position_state", return_value="NEUTRAL"), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_positions_data", return_value=[]
+    ), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info",
+        return_value={"equity": 2500, "buying_power": 1000, "cash": 500},
+    ):
+        result = node(_base_state())
+
+    assert result["recommended_action"] == "HOLD"
+    assert "decision policy gate failed" in result["final_trade_decision"]
+    assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["final_trade_decision"]
 
 
 def test_risk_manager_structured_output_uses_configured_language(isolated_config):
+    isolated_config["decision_policy_enabled"] = False
     isolated_config["output_language"] = "zh-CN"
     llm = DirectStructuredLLM(
         RiskDecision(

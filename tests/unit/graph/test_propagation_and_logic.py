@@ -18,6 +18,8 @@ def test_propagator_initializes_full_agent_state():
     assert state["report_context"] == {}
     assert state["investment_debate_state"]["bull_messages"] == []
     assert state["risk_debate_state"]["latest_speaker"] == "Risky"
+    assert state["risk_debate_state"]["phase"] == "opening"
+    assert state["risk_debate_state"]["rebuttal_rounds_completed"] == 0
     assert state["risk_debate_state"]["neutral_messages"] == []
 
 
@@ -51,12 +53,28 @@ def test_conditional_logic_enforces_debate_round_boundaries():
     ) == "Bull Researcher"
 
     assert logic.should_continue_risk_analysis(
-        {"risk_debate_state": {"count": 3, "latest_speaker": "Neutral"}}
+        {"risk_debate_state": {"count": 6, "latest_speaker": "Neutral", "phase": "rebuttal", "rebuttal_rounds_completed": 1}}
     ) == "Risk Judge"
     assert logic.should_continue_risk_analysis(
-        {"risk_debate_state": {"count": 1, "latest_speaker": "Risky"}}
+        {"risk_debate_state": {"count": 1, "latest_speaker": "Risky", "phase": "rebuttal", "rebuttal_rounds_completed": 1}}
     ) == "Safe Analyst"
     assert logic.should_continue_risk_analysis(
-        {"risk_debate_state": {"count": 1, "latest_speaker": "Safe"}}
+        {"risk_debate_state": {"count": 1, "latest_speaker": "Safe", "phase": "rebuttal", "rebuttal_rounds_completed": 1}}
     ) == "Neutral Analyst"
 
+
+def test_parallel_risk_opening_requires_full_rebuttal_cycle():
+    logic = ConditionalLogic(max_debate_rounds=1, max_risk_discuss_rounds=1)
+
+    assert logic.should_continue_risk_analysis(
+        {"risk_debate_state": {"count": 3, "latest_speaker": "Opening", "phase": "rebuttal", "rebuttal_rounds_completed": 0}}
+    ) == "Risky Analyst"
+    assert logic.should_continue_risk_analysis(
+        {"risk_debate_state": {"count": 4, "latest_speaker": "Risky", "phase": "rebuttal", "rebuttal_rounds_completed": 0}}
+    ) == "Safe Analyst"
+    assert logic.should_continue_risk_analysis(
+        {"risk_debate_state": {"count": 5, "latest_speaker": "Safe", "phase": "rebuttal", "rebuttal_rounds_completed": 0}}
+    ) == "Neutral Analyst"
+    assert logic.should_continue_risk_analysis(
+        {"risk_debate_state": {"count": 6, "latest_speaker": "Neutral", "phase": "rebuttal", "rebuttal_rounds_completed": 1}}
+    ) == "Risk Judge"

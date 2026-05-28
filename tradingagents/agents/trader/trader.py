@@ -19,6 +19,14 @@ from ..utils.report_context import (
 )
 from ..utils.structured import bind_structured, invoke_structured_or_freetext
 from tradingagents.dataflows.alpaca_utils import AlpacaUtils
+from tradingagents.portfolio import (
+    build_decision_policy_context,
+    build_portfolio_policy_context,
+    build_sizing_guidance_context,
+    build_theme_basket_context,
+    evaluate_decision_policy,
+    render_decision_policy_result,
+)
 from tradingagents.prompts import render_prompt
 
 # Import prompt capture utility
@@ -84,6 +92,9 @@ def create_trader(llm, memory, config=None):
             f"- Cash: ${cash:,.2f}\n"
             f"- Daily Change: ${daily_change_dollars:,.2f} ({daily_change_percent:.2f}%)"
         )
+        portfolio_policy_context = build_portfolio_policy_context(config)
+        sizing_guidance_context = build_sizing_guidance_context(config)
+        theme_basket_context = build_theme_basket_context(company_name, positions_data, account_info, config)
         # ---------------------------------------------------------
         # END NEW BLOCK
         # ---------------------------------------------------------
@@ -100,6 +111,7 @@ def create_trader(llm, memory, config=None):
         horizon_context = get_horizon_context(config)
         agent_context = get_agent_specific_context("trader", trading_context)
         horizon_agent_context = get_agent_horizon_context("trader", horizon_context)
+        decision_policy_context = build_decision_policy_context(config, horizon_context["horizon"])
         
         # Get mode-specific terms for the prompt
         actions = trading_context["actions"]
@@ -148,6 +160,10 @@ def create_trader(llm, memory, config=None):
             open_pos_desc=open_pos_desc,
             position_stats_desc=position_stats_desc,
             account_status_desc=account_status_desc,
+            portfolio_policy_context=portfolio_policy_context,
+            decision_policy_context=decision_policy_context,
+            theme_basket_context=theme_basket_context,
+            sizing_guidance_context=sizing_guidance_context,
             claim_matrix=claim_matrix,
             all_reports_text=all_reports_text,
             debate_digest=debate_digest,
@@ -276,6 +292,22 @@ USER MESSAGE:
         extracted_recommendation = extract_recommendation(result.content, trading_mode)
         if not extracted_recommendation:
             extracted_recommendation = "NEUTRAL" if trading_mode == "trading" else "HOLD"
+
+        if (config or {}).get("decision_policy_enabled", True):
+            policy_result = evaluate_decision_policy(
+                config=config,
+                horizon=horizon_context["horizon"],
+                proposed_action=extracted_recommendation,
+                evidence_text=result.content,
+            )
+            if policy_result.validator_note and extracted_recommendation != policy_result.recommended_action:
+                extracted_recommendation = policy_result.recommended_action
+                analysis_content = (
+                    f"{analysis_content.rstrip()}\n\n"
+                    f"Decision Policy Result:\n{render_decision_policy_result(policy_result)}\n\n"
+                    f"Validator Note: {policy_result.validator_note}."
+                )
+                result = AIMessage(content=analysis_content)
         
         final_decision_content = ensure_final_transaction_proposal(
             result.content, extracted_recommendation, trading_mode

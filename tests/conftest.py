@@ -131,6 +131,7 @@ def isolated_config(tmp_path: Path) -> dict[str, Any]:
             "results_dir": str(tmp_path / "results"),
             "data_cache_dir": str(tmp_path / "cache"),
             "memory_log_path": str(tmp_path / "memory" / "trading_memory.md"),
+            "trade_lifecycle_db_path": str(tmp_path / "trade_lifecycle" / "trade_lifecycle.sqlite"),
             "online_tools": False,
             "checkpoint_enabled": False,
             "llm_provider": "local_openai",

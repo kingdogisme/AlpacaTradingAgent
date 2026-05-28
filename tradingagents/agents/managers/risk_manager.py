@@ -8,6 +8,7 @@ from ..utils.agent_trading_modes import (
     get_agent_specific_context,
     get_horizon_context,
     extract_recommendation,
+    validate_recommendation,
 )
 from ..utils.language import output_language
 from ..utils.memory import TradingMemoryLog
@@ -17,6 +18,15 @@ from ..utils.report_context import (
 )
 from ..utils.structured import bind_structured, invoke_structured_or_freetext
 from tradingagents.dataflows.alpaca_utils import AlpacaUtils
+from tradingagents.trade_lifecycle import build_plan_from_final_state
+from tradingagents.portfolio import (
+    build_decision_policy_context,
+    build_portfolio_policy_context,
+    build_sizing_guidance_context,
+    build_theme_basket_context,
+    evaluate_decision_policy,
+    render_decision_policy_result,
+)
 from tradingagents.prompts import render_prompt
 
 # Import prompt capture utility
@@ -26,6 +36,91 @@ except ImportError:
     # Fallback for when webui is not available
     def capture_agent_prompt(report_type, prompt_content, symbol=None):
         pass
+
+
+def validate_risk_decision_text(
+    response_content: str,
+    *,
+    trading_mode: str,
+    current_position: str,
+    horizon_context: dict,
+    config: dict | None = None,
+) -> tuple[str, str]:
+    """Apply deterministic execution-safety corrections after the risk judge."""
+    default_action = "NEUTRAL" if trading_mode == "trading" else "HOLD"
+    parsed_action = extract_recommendation(response_content, trading_mode)
+    notes: list[str] = []
+
+    if not parsed_action or not validate_recommendation(parsed_action, trading_mode):
+        parsed_action = default_action
+        notes.append(f"unparseable or invalid action downgraded to {default_action}")
+
+    if (
+        trading_mode == "investment"
+        and parsed_action == "SELL"
+        and str(current_position or "NEUTRAL").upper() == "NEUTRAL"
+    ):
+        parsed_action = "HOLD"
+        notes.append("long-only flat SELL downgraded to HOLD")
+
+    if (config or {}).get("decision_policy_enabled", True):
+        policy_result = evaluate_decision_policy(
+            config=config,
+            horizon=horizon_context.get("horizon"),
+            proposed_action=parsed_action,
+            evidence_text=response_content,
+        )
+        if policy_result.validator_note:
+            parsed_action = policy_result.recommended_action
+            notes.append(policy_result.validator_note)
+            response_content = (
+                f"{response_content.rstrip()}\n\n"
+                f"Decision Policy Result:\n{render_decision_policy_result(policy_result)}"
+            )
+
+    lowered = str(response_content or "").lower()
+    if horizon_context.get("research_only") and any(
+        phrase in lowered
+        for phrase in (
+            "live order",
+            "place order",
+            "send order",
+            "execute now",
+            "open/add",
+            "open order",
+        )
+    ):
+        notes.append("research-only horizon: no live Alpaca order should be placed")
+
+    final_content = ensure_final_transaction_proposal(
+        response_content,
+        parsed_action,
+        trading_mode,
+    )
+
+    expected_final = f"FINAL TRANSACTION PROPOSAL: **{parsed_action}**"
+    final_lines = [
+        line
+        for line in final_content.splitlines()
+        if "FINAL TRANSACTION PROPOSAL:" in line.upper()
+    ]
+    if len(final_lines) != 1 or final_lines[-1].strip() != expected_final:
+        final_content = "\n".join(
+            line
+            for line in final_content.splitlines()
+            if "FINAL TRANSACTION PROPOSAL:" not in line.upper()
+        ).rstrip()
+        final_content = ensure_final_transaction_proposal(
+            final_content,
+            parsed_action,
+            trading_mode,
+        )
+        notes.append("final proposal normalized to validated action")
+
+    if notes:
+        final_content = f"{final_content.rstrip()}\n\nValidator Note: {'; '.join(notes)}."
+
+    return final_content, parsed_action
 
 
 def create_risk_manager(llm, memory, config=None):
@@ -88,10 +183,6 @@ def create_risk_manager(llm, memory, config=None):
             f"- Cash: ${cash:,.2f}\n"
             f"- Daily Change: ${daily_change_dollars:,.2f} ({daily_change_percent:.2f}%)"
         )
-        # ---------------------------------------------------------
-        # END NEW BLOCK
-        # ---------------------------------------------------------
-
         open_pos_desc = (
             f"We currently have an open {current_position} position in {company_name}."
             if current_position != "NEUTRAL"
@@ -101,6 +192,14 @@ def create_risk_manager(llm, memory, config=None):
         # Get centralized trading mode context
         trading_context = get_trading_mode_context(config, current_position)
         horizon_context = get_horizon_context(config)
+        portfolio_policy_context = build_portfolio_policy_context(config)
+        sizing_guidance_context = build_sizing_guidance_context(config)
+        decision_policy_context = build_decision_policy_context(config, horizon_context["horizon"])
+        theme_basket_context = build_theme_basket_context(company_name, positions_data, account_info, config)
+        # ---------------------------------------------------------
+        # END NEW BLOCK
+        # ---------------------------------------------------------
+
         agent_context = get_agent_specific_context("manager", trading_context)
         horizon_agent_context = get_agent_horizon_context("risk_mgmt", horizon_context)
         
@@ -151,6 +250,10 @@ def create_risk_manager(llm, memory, config=None):
             open_pos_desc=open_pos_desc,
             position_stats_desc=position_stats_desc,
             account_status_desc=account_status_desc,
+            portfolio_policy_context=portfolio_policy_context,
+            decision_policy_context=decision_policy_context,
+            theme_basket_context=theme_basket_context,
+            sizing_guidance_context=sizing_guidance_context,
             trader_plan=trader_plan,
             claim_matrix=claim_matrix,
             all_reports_text=all_reports_text,
@@ -179,9 +282,16 @@ def create_risk_manager(llm, memory, config=None):
         extracted_recommendation = extract_recommendation(response_content, trading_mode)
         if not extracted_recommendation:
             extracted_recommendation = "NEUTRAL" if trading_mode == "trading" else "HOLD"
-        
-        final_decision_content = ensure_final_transaction_proposal(
+
+        prevalidated_decision_content = ensure_final_transaction_proposal(
             response_content, extracted_recommendation, trading_mode
+        )
+        final_decision_content, extracted_recommendation = validate_risk_decision_text(
+            prevalidated_decision_content,
+            trading_mode=trading_mode,
+            current_position=current_position,
+            horizon_context=horizon_context,
+            config=config,
         )
 
         new_risk_debate_state = {
@@ -194,13 +304,15 @@ def create_risk_manager(llm, memory, config=None):
             "safe_messages": risk_debate_state.get("safe_messages", []),
             "neutral_messages": risk_debate_state.get("neutral_messages", []),
             "latest_speaker": "Judge",
+            "phase": risk_debate_state.get("phase", "rebuttal"),
+            "rebuttal_rounds_completed": risk_debate_state.get("rebuttal_rounds_completed", 0),
             "current_risky_response": risk_debate_state["current_risky_response"],
             "current_safe_response": risk_debate_state["current_safe_response"],
             "current_neutral_response": risk_debate_state["current_neutral_response"],
             "count": risk_debate_state["count"],
         }
 
-        return {
+        result_state = {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_decision_content,
             "trading_mode": trading_mode,
@@ -208,5 +320,19 @@ def create_risk_manager(llm, memory, config=None):
             "current_position": current_position,
             "recommended_action": extracted_recommendation,
         }
+        try:
+            plan = build_plan_from_final_state(
+                {
+                    **state,
+                    **result_state,
+                    "company_of_interest": company_name,
+                },
+                config=config,
+            )
+            result_state["conditional_trade_plan"] = plan.model_dump(mode="json") if plan else {}
+        except Exception as exc:
+            print(f"[TRADE_PLAN] Warning: could not build conditional trade plan draft: {exc}")
+            result_state["conditional_trade_plan"] = {}
+        return result_state
 
     return risk_manager_node

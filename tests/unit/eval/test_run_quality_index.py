@@ -97,3 +97,27 @@ def test_missing_audit_path_indexes_unknown_without_exception(tmp_path: Path):
     assert run_row["quality_status"] == "unknown"
     assert run_row["flags"] == ["audit_missing"]
     assert ledger.list_quality_index("run-2") == []
+
+
+def test_quality_index_rebuild_replaces_stale_rows(tmp_path: Path):
+    ledger = EpisodeLedger(tmp_path / "eval.sqlite")
+    audit_path = _audit_file(tmp_path, "run-3")
+    ledger.start_episode("run-3", "AAPL", "2026-05-20", {}, ["market"])
+    ledger.complete_episode("run-3", FINAL_STATE, "BUY", str(audit_path))
+
+    assert len(build_quality_index(ledger, "run-3")) == 1
+    audit_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-3",
+                "symbol": "AAPL",
+                "trade_date": "2026-05-20",
+                "status": "completed",
+                "events": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert build_quality_index(ledger, "run-3") == []
+    assert ledger.list_quality_index("run-3") == []

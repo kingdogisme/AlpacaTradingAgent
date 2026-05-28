@@ -64,18 +64,36 @@ class ConditionalLogic:
 
     def should_continue_risk_analysis(self, state: AgentState) -> str:
         """Determine if risk analysis should continue."""
+        risk_state = state["risk_debate_state"]
+        phase = risk_state.get("phase", "rebuttal")
+        rebuttal_rounds_completed = int(risk_state.get("rebuttal_rounds_completed", 0))
+        latest_speaker = risk_state.get("latest_speaker", "Risky")
+
+        if phase == "opening":
+            return "Risky Analyst"
+
+        if latest_speaker == "Opening":
+            return "Risky Analyst"
+
+        if rebuttal_rounds_completed < 1:
+            if latest_speaker.startswith("Risky"):
+                return "Safe Analyst"
+            if latest_speaker.startswith("Safe"):
+                return "Neutral Analyst"
+            return "Risk Judge"
+
         if (
-            state["risk_debate_state"]["count"] >= 3 * self.max_risk_discuss_rounds
+            risk_state["count"] >= 3 * (self.max_risk_discuss_rounds + 1)
         ):  # 3 rounds of back-and-forth between 3 agents
             return "Risk Judge"
             
         # Check if latest_speaker exists in the state, if not initialize it
-        if "latest_speaker" not in state["risk_debate_state"]:
+        if "latest_speaker" not in risk_state:
             # Default to Risky Analyst as the first speaker
-            state["risk_debate_state"]["latest_speaker"] = "Risky"
+            risk_state["latest_speaker"] = "Risky"
             
-        if state["risk_debate_state"]["latest_speaker"].startswith("Risky"):
+        if risk_state["latest_speaker"].startswith("Risky"):
             return "Safe Analyst"
-        if state["risk_debate_state"]["latest_speaker"].startswith("Safe"):
+        if risk_state["latest_speaker"].startswith("Safe"):
             return "Neutral Analyst"
         return "Risky Analyst"

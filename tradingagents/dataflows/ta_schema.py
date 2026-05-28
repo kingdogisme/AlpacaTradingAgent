@@ -146,6 +146,10 @@ class TimeframeBrief(BaseModel):
 class TechnicalBrief(BaseModel):
     symbol: str
     generated_at: str = Field(description="ISO-8601 timestamp of generation")
+    observed_at: Optional[str] = Field(
+        default=None,
+        description="Latest source bar date represented in the brief",
+    )
     timeframes: List[TimeframeBrief] = Field(
         description="Analysis for each of the 3 timeframes: 1h, 4h, 1d"
     )
@@ -157,6 +161,10 @@ class TechnicalBrief(BaseModel):
     )
     raw_prices: dict = Field(
         description="Snapshot: last_close, prev_close, daily_change_pct"
+    )
+    risk_overlays: dict = Field(
+        default_factory=dict,
+        description="Proxy inputs for crowding and momentum-crash gates",
     )
 
 
@@ -206,9 +214,17 @@ class TrendBrief(BaseModel):
     symbol: str
     horizon: Literal["position", "trend"]
     generated_at: str = Field(description="ISO-8601 timestamp of generation")
+    observed_at: Optional[str] = Field(
+        default=None,
+        description="Latest source bar date represented in the brief",
+    )
     holding_period: str
     timeframes: List[TrendTimeframeBrief]
     relative_strength: RelativeStrengthState
     invalidation: TrendInvalidation
     regime_alignment: RegimeAlignment
     raw_prices: dict
+    risk_overlays: dict = Field(
+        default_factory=dict,
+        description="Proxy inputs for crowding and momentum-crash gates",
+    )

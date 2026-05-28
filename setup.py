@@ -29,6 +29,7 @@ setup(
         "praw>=7.7.0",
         "stockstats>=0.5.4",
         "typer>=0.9.0",
+        "tenacity>=8.0.0",
         "rich>=13.0.0",
         "questionary>=2.0.1",
         "gradio>=4.0.0",

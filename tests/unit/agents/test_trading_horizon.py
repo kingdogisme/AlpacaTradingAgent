@@ -87,10 +87,13 @@ class TradingHorizonTests(unittest.TestCase):
         payload = json.loads(brief.model_dump_json())
         self.assertEqual(payload["horizon"], "trend")
         self.assertEqual(payload["holding_period"], "3-6 months")
+        self.assertEqual(payload["observed_at"], data["timestamp"].iloc[-1].date().isoformat())
         self.assertTrue(payload["timeframes"])
         self.assertIn("relative_strength", payload)
         self.assertIn("invalidation", payload)
         self.assertIn("regime_alignment", payload)
+        self.assertIn("risk_overlays", payload)
+        self.assertIn("benchmark_63d_return", payload["risk_overlays"])
 
     def test_position_trend_brief_uses_trade_invalidation_above_regime_break(self):
         data = _parabolic_ohlcv()

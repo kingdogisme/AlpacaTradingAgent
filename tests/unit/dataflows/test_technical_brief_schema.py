@@ -37,6 +37,8 @@ def test_technical_brief_schema_validates_mocked_ohlcv(monkeypatch):
     assert {item["timeframe"] for item in payload["timeframes"]} == {"1h", "4h", "1d"}
     assert payload["signal_summary"]["confidence"] in {"high", "medium", "low"}
     assert "last_close" in payload["raw_prices"]
+    assert "risk_overlays" in payload
+    assert "price_vs_50d" in payload["risk_overlays"]
 
 
 def test_schema_rejects_invalid_direction_contract():
@@ -65,4 +67,3 @@ def test_schema_rejects_invalid_direction_contract():
         assert "confidence" in str(exc)
     else:
         raise AssertionError("invalid schema payload should fail validation")
-

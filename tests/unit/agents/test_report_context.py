@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from tradingagents.agents.utils.report_context import (
+    ROLE_WEIGHTS,
     build_debate_digest,
     build_report_context_index,
     get_agent_context_bundle,
+    normalize_agent_role,
 )
 
 
@@ -31,6 +33,17 @@ def test_report_context_index_keeps_all_analyst_reports_represented():
     }
     assert context["chunks"]
     assert "Market" in context["global_overview"]
+    assert context["evidence_ledger"]
+    entry = context["evidence_ledger"][0]
+    assert {
+        "source_report",
+        "section",
+        "stance",
+        "claim",
+        "evidence_ref",
+        "priority_score",
+        "quality_flags",
+    }.issubset(entry)
 
 
 def test_agent_context_bundle_includes_claim_matrix_and_selected_chunks():
@@ -41,10 +54,17 @@ def test_agent_context_bundle_includes_claim_matrix_and_selected_chunks():
         objective="Create a risk-aware plan using technical support and earnings catalysts.",
     )
 
-    assert "Decision Claim Matrix" in bundle["decision_claim_matrix"]
+    assert "Decision Evidence Ledger" in bundle["decision_claim_matrix"]
     assert "Cross-Analyst Context Packet" in bundle["analysis_context"]
     assert bundle["selected_chunk_ids"]
     assert state["report_context"]["stats"]["reports_with_content"] == 5
+
+
+def test_agent_role_normalization_hits_specific_weights():
+    assert normalize_agent_role("researchers/bull_researcher") == "bull_researcher"
+    assert normalize_agent_role("managers/risk_manager") == "risk_manager"
+    assert normalize_agent_role("unknown/agent") == "default"
+    assert ROLE_WEIGHTS[normalize_agent_role("managers/risk_manager")]["macro_report"] == 1.35
 
 
 def test_report_context_extracts_options_positioning_points():

@@ -168,6 +168,28 @@ def _has_any(text: str, needles: Iterable[str]) -> bool:
     return any(needle in lower for needle in needles)
 
 
+def _observed_date_from_payload(text: str, tool_name: str) -> str | None:
+    if get_source_spec(tool_name).source_id not in {"technical_brief", "trend_brief"}:
+        return None
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("observed_at", "latest_bar_date", "last_bar_date", "generated_at"):
+        parsed = parse_date(payload.get(key))
+        if parsed is not None:
+            return parsed.isoformat()
+    raw_prices = payload.get("raw_prices")
+    if isinstance(raw_prices, dict):
+        for key in ("observed_at", "latest_bar_date", "last_bar_date"):
+            parsed = parse_date(raw_prices.get(key))
+            if parsed is not None:
+                return parsed.isoformat()
+    return None
+
+
 def evaluate_tool_output(
     tool_name: str,
     inputs: dict[str, Any] | None,
@@ -198,7 +220,8 @@ def evaluate_tool_output(
 
     as_of = _input_date(inputs, ("end_date", "curr_date", "as_of")) or _utc_now_iso()[:10]
     observed = freshest_date_in_text(text)
-    observed_at = observed.isoformat() if observed is not None else None
+    observed_at = observed.isoformat() if observed is not None else _observed_date_from_payload(text, tool_name)
+    observed = parse_date(observed_at) if observed_at is not None else observed
     age_days = date_age_days(observed, as_of=as_of) if observed is not None else None
 
     freshness = "unknown"

@@ -21,6 +21,7 @@ from tradingagents.dataflows.data_quality import (
 import json
 import time
 from functools import wraps
+import re
 
 
 TOOL_MIN_OUTPUT_CHARS = {
@@ -76,7 +77,30 @@ def _is_trailing_interactive_followup(text: str) -> bool:
         .replace("–", "-")
         .replace("—", "-")
     )[-700:]
-    return any(pattern in tail for pattern in INTERACTIVE_FOLLOWUP_PATTERNS)
+    return _has_interactive_followup(tail)
+
+
+def _has_interactive_followup(text: str, *, trailing_interactive: bool = False) -> bool:
+    if trailing_interactive:
+        return True
+    normalized = (
+        str(text or "")
+        .lower()
+        .replace("’", "'")
+        .replace("‘", "'")
+        .replace("‑", "-")
+        .replace("–", "-")
+        .replace("—", "-")
+    )
+    for line in normalized.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        stripped = stripped.lstrip("#").strip()
+        for pattern in INTERACTIVE_FOLLOWUP_PATTERNS:
+            if re.match(rf"^(?:[-*]\s*)?{re.escape(pattern)}\b", stripped):
+                return True
+    return False
 
 
 def _strip_trailing_interactive_followup(text: str) -> str:
@@ -133,7 +157,7 @@ def _score_output_quality(tool_name: str, output: object) -> dict:
     if not text:
         flags.append("empty_output")
 
-    if any(pattern in lower for pattern in INTERACTIVE_FOLLOWUP_PATTERNS):
+    if _has_interactive_followup(text, trailing_interactive=trailing_interactive):
         substantial_output = len(text) >= max(1200, min_chars * 2)
         if not (trailing_interactive and substantial_output):
             flags.append("interactive_followup")

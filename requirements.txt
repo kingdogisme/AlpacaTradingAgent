@@ -20,6 +20,7 @@ tushare
 finnhub-python
 parsel
 requests
+tenacity
 tqdm
 pytz
 redis

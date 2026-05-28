@@ -31,6 +31,7 @@ def build_quality_index(ledger: EpisodeLedger, run_id: str) -> list[dict[str, An
         return []
     audit = _load_episode_audit(episode)
     if not audit:
+        ledger.clear_quality_index(run_id)
         return []
 
     records = [
@@ -57,6 +58,7 @@ def build_quality_index(ledger: EpisodeLedger, run_id: str) -> list[dict[str, An
         )
         for event in quality_events_from_audit(audit)
     ]
+    ledger.clear_quality_index(run_id)
     ledger.upsert_quality_index(records)
     return [asdict(record) for record in records]
 

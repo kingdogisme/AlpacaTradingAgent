@@ -45,6 +45,8 @@ class Propagator:
                     "current_safe_response": "",
                     "current_neutral_response": "",
                     "latest_speaker": "Risky",  # Initialize latest speaker
+                    "phase": "opening",
+                    "rebuttal_rounds_completed": 0,
                     "count": 0,
                     "risky_history": "",
                     "safe_history": "",
@@ -61,6 +63,7 @@ class Propagator:
             "news_report": "",
             "macro_report": "",
             "report_context": {},
+            "conditional_trade_plan": {},
         }
 
     def get_graph_args(self) -> Dict[str, Any]:

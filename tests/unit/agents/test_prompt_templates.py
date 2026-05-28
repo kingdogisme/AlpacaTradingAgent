@@ -198,12 +198,18 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("research-only/no live order", trader_prompt)
         self.assertIn("research-only/no live order", risk_manager_prompt)
 
-    def test_position_sizing_policy_matches_ten_ticket_portfolio(self):
+    def test_position_sizing_policy_supports_trend_concentrated_portfolios(self):
         investment_prompt = load_prompt("trading_modes/investment")
         research_manager_prompt = load_prompt("managers/research_manager")
         trader_prompt = load_prompt("trader/trader_context")
         risk_manager_prompt = load_prompt("managers/risk_manager")
 
+        self.assertIn("trend-concentrated", investment_prompt)
+        self.assertIn("deterministic sizing", investment_prompt.lower())
+        self.assertIn("configured portfolio policy", research_manager_prompt)
+        self.assertIn("{portfolio_policy_context}", research_manager_prompt)
+        self.assertIn("{theme_basket_context}", trader_prompt)
+        self.assertIn("{sizing_guidance_context}", risk_manager_prompt)
         for prompt in (
             investment_prompt,
             research_manager_prompt,
@@ -211,12 +217,26 @@ class PromptTemplateTests(unittest.TestCase):
             risk_manager_prompt,
         ):
             with self.subTest(prompt=prompt[:40]):
-                self.assertIn("approximately 10-ticket", prompt)
                 self.assertIn("risk-to-invalidation", prompt)
                 self.assertIn("notional exposure", prompt)
-                self.assertIn("1.0%-2.0% NAV", prompt)
-                self.assertIn("2.0%-2.5% NAV", prompt)
-                self.assertIn("3.0% NAV", prompt)
+                self.assertIn("theme", prompt.lower())
+
+    def test_decision_policy_prompt_contract_is_present(self):
+        trader_prompt = load_prompt("trader/trader_context")
+        risk_manager_prompt = load_prompt("managers/risk_manager")
+        research_manager_prompt = load_prompt("managers/research_manager")
+
+        self.assertIn("{decision_policy_context}", trader_prompt)
+        self.assertIn("{decision_policy_context}", risk_manager_prompt)
+        self.assertIn("{decision_policy_context}", research_manager_prompt)
+        for prompt in (trader_prompt, risk_manager_prompt):
+            with self.subTest(prompt=prompt[:40]):
+                self.assertIn("Factor Weights", prompt)
+                self.assertIn("Gate Checks", prompt)
+                self.assertIn("Sizing Calculation", prompt)
+                self.assertIn("Crowding Gate", prompt)
+                self.assertIn("Momentum Crash Gate", prompt)
+                self.assertIn("Academic Countercheck", prompt)
 
     def test_key_agent_templates_accept_language_instruction(self):
         values = DefaultPromptValues(
