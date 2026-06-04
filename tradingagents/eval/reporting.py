@@ -56,9 +56,36 @@ def summarize_rows(rows: list[dict[str, Any]], group_by: list[str] | None = None
             "avg_raw_return": _avg([item.get("raw_return") for item in resolved]),
             "avg_alpha": _avg([item.get("alpha_return") for item in resolved if item.get("alpha_return") is not None]),
             "avg_reward": _avg([item.get("reward_scalar") for item in resolved]),
+            "soft_gate_audit": soft_gate_audit(items),
         }
         summaries.append(summary)
     return summaries
+
+
+def soft_gate_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    relevant = [
+        row for row in rows
+        if any(
+            tag in (row.get("critic_failure_tags") or [])
+            for tag in ("soft_gate_over_veto", "over_conservative_hold", "trigger_met_but_no_action")
+        )
+    ]
+    counterfactual_advantages = []
+    for row in rows:
+        counterfactuals = (row.get("reward_components") or {}).get("counterfactual_rewards") or {}
+        final_reward = _scenario_reward(counterfactuals, "final_action")
+        veto_reward = _scenario_reward(counterfactuals, "risk_manager_veto")
+        if final_reward is not None and veto_reward is not None:
+            counterfactual_advantages.append(veto_reward - final_reward)
+    return {
+        "episodes": len(rows),
+        "flagged_soft_gate_over_veto": sum("soft_gate_over_veto" in (row.get("critic_failure_tags") or []) for row in rows),
+        "flagged_over_conservative_hold": sum("over_conservative_hold" in (row.get("critic_failure_tags") or []) for row in rows),
+        "flagged_trigger_met_but_no_action": sum("trigger_met_but_no_action" in (row.get("critic_failure_tags") or []) for row in rows),
+        "flag_rate": (len(relevant) / len(rows)) if rows else None,
+        "avg_risk_veto_counterfactual_advantage": _avg(counterfactual_advantages),
+        "recommendation": _soft_gate_recommendation(relevant, counterfactual_advantages, rows),
+    }
 
 
 def _avg(values: list[float | None]) -> float | None:
@@ -66,6 +93,29 @@ def _avg(values: list[float | None]) -> float | None:
     if not clean:
         return None
     return sum(clean) / len(clean)
+
+
+def _scenario_reward(counterfactuals: dict[str, Any], key: str) -> float | None:
+    scenario = counterfactuals.get(key)
+    if not isinstance(scenario, dict) or scenario.get("pnl_reward") is None:
+        return None
+    return float(scenario["pnl_reward"])
+
+
+def _soft_gate_recommendation(
+    relevant: list[dict[str, Any]],
+    counterfactual_advantages: list[float],
+    rows: list[dict[str, Any]],
+) -> str:
+    if not rows:
+        return "no_data"
+    flag_rate = len(relevant) / len(rows)
+    avg_advantage = _avg(counterfactual_advantages) or 0.0
+    if flag_rate >= 0.20 and avg_advantage > 0:
+        return "soft_gates_likely_over_vetoing; review multipliers and hard-block settings"
+    if flag_rate == 0:
+        return "no_soft_gate_over_veto_detected"
+    return "mixed; keep audit-first and compare avoided losses versus missed entries"
 
 
 def _group_value(row: dict[str, Any], field: str) -> Any:

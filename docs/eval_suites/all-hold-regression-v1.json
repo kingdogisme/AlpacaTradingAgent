@@ -1,0 +1,20 @@
+{
+  "suite_id": "benchmark:all_hold_regression:v1",
+  "description": "Template suite for the recent all-HOLD regression set. Fill or extend cases from resolved episode ledger rows before formal comparison.",
+  "cases": [
+    {
+      "case_id": "all-hold:NBIS:2026-05-30:position",
+      "symbol": "NBIS",
+      "trade_date": "2026-05-30",
+      "horizon": "position",
+      "leakage_policy": "point_in_time"
+    },
+    {
+      "case_id": "all-hold:NBIS:2026-06-01:position",
+      "symbol": "NBIS",
+      "trade_date": "2026-06-01",
+      "horizon": "position",
+      "leakage_policy": "point_in_time"
+    }
+  ]
+}

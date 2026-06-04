@@ -26,13 +26,26 @@ class HeuristicCritic:
         reward_scalar = reward.get("reward_scalar")
         alpha = reward.get("alpha_return")
         failure_tags: list[str] = []
+        final_decision = _final_decision_text(episode)
+        decision_actions = _stage_actions(episode)
 
         if action and oracle and action != oracle:
             failure_tags.append("wrong_direction")
         if action in {"HOLD", "NEUTRAL"} and oracle in {"BUY", "LONG", "SELL", "SHORT"}:
             failure_tags.append("missed_directional_move")
+            failure_tags.append("over_conservative_hold")
+            if _has_future_buy_condition(final_decision):
+                failure_tags.append("missed_confirmed_entry")
         if action in {"BUY", "LONG", "SELL", "SHORT"} and oracle in {"HOLD", "NEUTRAL"}:
             failure_tags.append("overtraded_neutral_market")
+        if action in {"HOLD", "NEUTRAL"} and decision_actions.get("trader") in {"BUY", "LONG"}:
+            failure_tags.append("risk_manager_veto")
+            if oracle in {"BUY", "LONG"}:
+                failure_tags.append("soft_gate_over_veto")
+        if _looks_like_moving_trigger(final_decision):
+            failure_tags.append("moving_trigger")
+        if _has_trigger_review_context(episode) and action in {"HOLD", "NEUTRAL"}:
+            failure_tags.append("trigger_met_but_no_action")
         if reward_scalar is not None and float(reward_scalar) < 0:
             failure_tags.append("negative_reward")
         if alpha is not None and float(alpha) < 0:
@@ -96,6 +109,17 @@ def _final_action(episode: dict[str, Any]) -> str | None:
     return episode.get("final_signal")
 
 
+def _final_decision_text(episode: dict[str, Any]) -> str:
+    for decision in episode.get("decisions", []):
+        if decision.get("stage") == "final":
+            return str(decision.get("raw_text") or "")
+    return ""
+
+
+def _stage_actions(episode: dict[str, Any]) -> dict[str, str | None]:
+    return {str(decision.get("stage")): decision.get("action") for decision in episode.get("decisions", [])}
+
+
 def _reflection_text(action: str | None, oracle: str | None, reward: dict[str, Any]) -> str:
     if action and oracle and action != oracle:
         return (
@@ -116,6 +140,12 @@ def _improvement_candidates(failure_tags: list[str]) -> list[str]:
         candidates.append("Compare final risk-manager override against trader and research-manager actions.")
     if "missed_directional_move" in failure_tags:
         candidates.append("Inspect whether neutral decision thresholds were too conservative for this horizon.")
+    if "over_conservative_hold" in failure_tags:
+        candidates.append("Review whether soft gates should have reduced starter size instead of vetoing a confirmed entry.")
+    if "moving_trigger" in failure_tags:
+        candidates.append("Compare the new entry trigger against the active prior conditional plan before changing thresholds.")
+    if "trigger_met_but_no_action" in failure_tags:
+        candidates.append("Force trigger review to choose execute, resize, cancel, or supersede with explicit reason.")
     if "overtraded_neutral_market" in failure_tags:
         candidates.append("Tighten neutral-band checks before directional recommendations.")
     if "underperformed_benchmark" in failure_tags:
@@ -123,3 +153,20 @@ def _improvement_candidates(failure_tags: list[str]) -> list[str]:
     if not candidates:
         candidates.append("No change candidate from deterministic critic.")
     return candidates
+
+
+def _has_future_buy_condition(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in ("breakout", "pullback", "retest", "confirmation", "trigger", "突破", "回踩", "确认"))
+
+
+def _looks_like_moving_trigger(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in ("new trigger", "stricter", "supersede", "retest", "新的", "更严格", "重新等待"))
+
+
+def _has_trigger_review_context(episode: dict[str, Any]) -> bool:
+    metadata = episode.get("metadata") if isinstance(episode.get("metadata"), dict) else {}
+    review = metadata.get("active_plan_review") if isinstance(metadata.get("active_plan_review"), dict) else {}
+    reviews = review.get("reviews") if isinstance(review.get("reviews"), list) else []
+    return any(item.get("status") in {"met", "partially_met"} for item in reviews if isinstance(item, dict))

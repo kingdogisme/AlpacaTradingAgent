@@ -44,7 +44,7 @@ def test_tool_wrapper_prepends_data_quality_header_and_logs_artifact(tmp_path, m
     assert quality["criticality"] == "critical"
     assert quality["artifact"]["raw_output_ref"] == "tool_call:1"
 
-    run_file = next((tmp_path / "eval_results" / "AAPL" / "TradingAgentsStrategy_logs" / "runs").glob("*.json"))
+    run_file = next((tmp_path / "results" / "AAPL" / "TradingAgentsStrategy_logs" / "runs").glob("*.json"))
     audit = json.loads(run_file.read_text(encoding="utf-8"))
     event = next(item for item in audit["events"] if item["type"] == "tool_call")
     assert event["payload"]["quality_details"]["data_quality"]["artifact_ref"] == "tool_call:1"

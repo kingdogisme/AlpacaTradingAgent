@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import threading
@@ -29,6 +30,10 @@ def _utc_now_iso() -> str:
 def _sanitize_for_path(value: str) -> str:
     sanitized = re.sub(r"[^\w\-.]+", "_", value.strip())
     return sanitized or "unknown"
+
+
+def _default_results_dir() -> Path:
+    return Path(os.getenv("TRADINGAGENTS_RESULTS_DIR", "eval_results"))
 
 
 def _json_safe(value: Any) -> Any:
@@ -125,7 +130,7 @@ class RunAuditLogger:
 
     def _recover_stale_running_logs(self) -> None:
         """Mark stale on-disk runs as aborted if they were left in running state."""
-        root = Path("eval_results")
+        root = _default_results_dir()
         if not root.exists():
             return
 
@@ -201,8 +206,9 @@ class RunAuditLogger:
             safe_symbol = _sanitize_for_path(symbol or "unknown")
             run_uuid = uuid.uuid4().hex[:10]
             run_id = f"{trade_date}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{run_uuid}"
+            results_dir = Path((config or {}).get("results_dir") or _default_results_dir())
 
-            run_dir = Path("eval_results") / safe_symbol / "TradingAgentsStrategy_logs" / "runs"
+            run_dir = results_dir / safe_symbol / "TradingAgentsStrategy_logs" / "runs"
             run_dir.mkdir(parents=True, exist_ok=True)
             file_path = run_dir / f"{run_id}.json"
 
@@ -516,8 +522,12 @@ class RunAuditLogger:
         if not run_data:
             return
 
-        safe_symbol = _sanitize_for_path(run_data.get("symbol") or "unknown")
-        path = Path("eval_results") / safe_symbol / "TradingAgentsStrategy_logs" / "runs" / f"{run_id}.json"
+        path_value = run_data.get("file_path")
+        if path_value:
+            path = Path(path_value)
+        else:
+            safe_symbol = _sanitize_for_path(run_data.get("symbol") or "unknown")
+            path = _default_results_dir() / safe_symbol / "TradingAgentsStrategy_logs" / "runs" / f"{run_id}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as f:
             json.dump(run_data, f, indent=2, ensure_ascii=False)

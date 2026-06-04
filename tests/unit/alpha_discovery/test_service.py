@@ -42,9 +42,15 @@ class FakeRunner:
     def __init__(self):
         self.calls = []
 
-    def run(self, ticker, trade_date, analysts):
-        self.calls.append((ticker, trade_date, analysts))
+    def run(self, ticker, trade_date, analysts, config_overrides=None):
+        self.calls.append((ticker, trade_date, analysts, config_overrides))
         return "run-1", "BUY", "high"
+
+
+class FakePlanRunner(FakeRunner):
+    def run(self, ticker, trade_date, analysts, config_overrides=None):
+        self.calls.append((ticker, trade_date, analysts, config_overrides))
+        return "run-plan", "BUY", "high", "tp_linked"
 
 
 def test_discover_wsb_persists_candidate_and_excludes_etf(tmp_path):
@@ -203,9 +209,58 @@ def test_cron_run_dry_run_and_execute_handoff(tmp_path):
     )
 
     assert dry_run[0]["run_status"] == "dry_run"
-    assert runner.calls == [("MU", "2026-05-13", ["market", "social", "news", "macro"])]
+    assert runner.calls == [
+        (
+            "MU",
+            "2026-05-13",
+            ["market", "fundamentals", "news", "social", "macro"],
+            {
+                "trading_horizon": "position",
+                "trading_mode": "investment",
+                "episode_ledger_metadata": {
+                    "source": "alpha_discovery",
+                    "ad_candidate_id": "batch-1-mu",
+                    "ad_batch_id": "batch-1",
+                    "ad_tier": "A",
+                    "ad_alpha_score": 0.9,
+                    "ad_opportunity_type": "continuation",
+                    "ad_direction_hint": "bullish",
+                },
+            },
+        )
+    ]
     assert executed[0]["run_id"] == "run-1"
     assert repo.recent_handoffs("MU", since_iso="2026-05-13T00:00:00Z")
+
+
+def test_cron_run_execute_records_plan_id_on_handoff(tmp_path):
+    repo = AlphaDiscoveryRepository(tmp_path / "ad.sqlite")
+    repo.upsert_batch(DiscoveryBatch("batch-1", "test", "2026-05-13T20:00:00Z"))
+    repo.upsert_candidate(
+        OpportunityCandidate(
+            candidate_id="batch-1-mu",
+            batch_id="batch-1",
+            ticker="MU",
+            tier="A",
+            alpha_score=0.9,
+            opportunity_type="continuation",
+            direction_hint="bullish",
+        ),
+        updated_at="2026-05-13T20:00:00Z",
+    )
+    service = AlphaDiscoveryService(repository=repo, sellthenews_client=FakeClient(), config={"alpha_discovery_confirmation_enabled": False})
+
+    executed = service.run_candidates(
+        tier="A",
+        max_symbols=1,
+        execute=True,
+        trade_date="2026-05-13",
+        graph_runner=FakePlanRunner(),
+    )
+
+    handoff = repo.recent_handoffs("MU", since_iso="2026-05-13T00:00:00Z")[0]
+    assert executed[0]["plan_id"] == "tp_linked"
+    assert handoff["plan_id"] == "tp_linked"
 
 
 def test_run_candidates_can_filter_specific_ticker(tmp_path):
@@ -240,7 +295,7 @@ def test_run_candidates_can_filter_specific_ticker(tmp_path):
         ticker="FIG",
     )
 
-    assert runner.calls == [("FIG", "2026-05-13", ["market", "social", "news", "macro"])]
+    assert runner.calls[0][0:3] == ("FIG", "2026-05-13", ["market", "fundamentals", "news", "social", "macro"])
     assert executed[0]["ticker"] == "FIG"
 
 

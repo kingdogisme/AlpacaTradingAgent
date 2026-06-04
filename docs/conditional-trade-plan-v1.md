@@ -5,11 +5,16 @@
 Conditional Trade Plan v1 turns AlpacaTradingAgent from a research-report
 system into a controlled semi-automated trading decision system.
 
-The core change is architectural: the final output should no longer be only a
+The core change is architectural: the final output is no longer only a
 natural-language recommendation such as `BUY`, `HOLD`, or `SELL`. A completed
-run should also produce an approved, structured, monitorable trade plan. That
-plan defines when a trade is allowed, when it is invalid, how much risk is
-allowed, and what must be rechecked before an order is sent.
+run also produces an approved, structured, monitorable trade plan. That plan
+defines when a trade is allowed, when it is invalid, how much risk is allowed,
+and what must be rechecked before an order is sent.
+
+Current implementation status: the trade lifecycle package, SQLite repository,
+monitor service, pre-trade validator, paper-only execution path, and structured
+plan field are implemented. Real-time news blockers, full OMS/EMS order
+reconciliation, and richer portfolio simulation remain v1.1 backlog items.
 
 The v1 design intentionally separates four responsibilities:
 
@@ -39,8 +44,15 @@ agent research run
 ### Signal Generation
 
 The agent stack remains responsible for research, debate, synthesis, and risk
-approval. The important v1 change is that the approved output must include a
-structured plan in addition to the existing final report text.
+approval. The approved output includes a structured plan in addition to the
+existing final report text.
+
+The canonical source is `conditional_trade_plan` in final state or a
+`conditional_trade_plan_json:` line emitted by Risk Judge structured output.
+Natural-language parsing is only a compatibility fallback and supports both
+English and the default `zh-CN` labels. BUY/LONG/SELL/SHORT plans missing a
+numeric trigger or numeric invalidation are stored as rejected/non-executable,
+not activated.
 
 The plan should include:
 
@@ -144,8 +156,8 @@ Recommended fields:
 - `trading_mode`: investment or trading
 - `horizon`: swing, position, or trend
 - `action`: BUY/HOLD/SELL/LONG/NEUTRAL/SHORT
-- `status`: draft, active, triggered, executed, expired, rejected, cancelled,
-  superseded
+- `status`: draft, active, triggered, needs_reconciliation, executed, expired,
+  rejected, cancelled, superseded
 - `created_at`
 - `updated_at`
 - `valid_until`
@@ -197,6 +209,9 @@ Recommended fields:
 - `risk_snapshot_json`
 - `execution_policy_json`
 
+Validation rows include stable `reason_code` values so tests, UI, and lifecycle
+events do not depend on free-text reason wording.
+
 ## Plan Arbitration Rules
 
 The system should not let each new analysis run casually overwrite an active
@@ -244,13 +259,16 @@ For each active plan:
 1. Expire the plan if `valid_until` has passed.
 2. Fetch current price/quote and lightweight technical data.
 3. Record a `monitor_observed` event.
-4. If trigger conditions are met, mark or event the plan as triggered.
+4. If trigger conditions are met for the required consecutive observations,
+   mark or event the plan as triggered.
 5. Run the pre-trade validator.
 6. If validation fails, record rejection and leave the plan rejected or active
    depending on reason.
 7. If validation passes and Alpaca is paper, submit the order through existing
-   execution helpers.
-8. Record order result and update final plan status.
+   execution helpers with a deterministic idempotency/client order reference.
+8. Record order result and update final plan status. If a process is interrupted
+   after trigger and before order result, the plan should be left in
+   `needs_reconciliation` or reconciled before another order is attempted.
 
 The monitor must never directly place orders without the validator result.
 
@@ -281,6 +299,8 @@ v1 safety defaults are conservative:
 - Plans missing `valid_until` never become active.
 - Plans missing a valid trigger or invalidation should be stored as rejected or
   non-executable rather than guessed into an order.
+- Flat investment-mode SELL and duplicate BUY while already LONG do not submit
+  broker orders.
 - Validator failure should be recorded as structured lifecycle data, not hidden
   in console logs only.
 

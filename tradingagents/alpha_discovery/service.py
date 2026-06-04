@@ -24,7 +24,13 @@ from .symbol_filters import is_common_stock_candidate, normalize_ticker
 
 
 class GraphRunner(Protocol):
-    def run(self, ticker: str, trade_date: str, analysts: list[str]) -> tuple[str | None, str | None, str | None]:
+    def run(
+        self,
+        ticker: str,
+        trade_date: str,
+        analysts: list[str],
+        config_overrides: dict[str, Any] | None = None,
+    ) -> tuple[str | None, str | None, str | None]:
         ...
 
 
@@ -467,6 +473,7 @@ class AlphaDiscoveryService:
     def basket_report(self, *, status: str | None = "open") -> dict:
         rows = self.repository.list_candidates(tiers=None, status=status, limit=None)
         signals = self.repository.list_source_signals(candidate_ids=[row["candidate_id"] for row in rows])
+        lifecycle_by_candidate = self._lifecycle_by_candidate(rows)
         signal_counts_by_candidate: dict[str, int] = {}
         raw_sources_by_candidate: dict[str, set[str]] = {}
         for signal in signals:
@@ -500,6 +507,7 @@ class AlphaDiscoveryService:
                 "source_signal_count": signal_counts_by_candidate.get(row["candidate_id"], 0),
                 "raw_sources": sorted(raw_sources_by_candidate.get(row["candidate_id"], set())),
                 "risk_flags": row.get("risk_flags", []),
+                "lifecycle": lifecycle_by_candidate.get(row["candidate_id"], {}),
             }
             if row.get("rejected_reason"):
                 reason = row["rejected_reason"]
@@ -520,6 +528,43 @@ class AlphaDiscoveryService:
         summary["source_hit_rates"] = _hit_rate_report(outcome_rows, group_by="source")
         summary["theme_hit_rates"] = _hit_rate_report(outcome_rows, group_by="theme")
         return summary
+
+    def _lifecycle_by_candidate(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        candidate_ids = [row["candidate_id"] for row in rows]
+        if not candidate_ids:
+            return {}
+        handoffs = self.repository.list_handoffs(candidate_ids=candidate_ids, limit=None)
+        latest_handoff_by_candidate: dict[str, dict[str, Any]] = {}
+        for handoff in handoffs:
+            latest_handoff_by_candidate.setdefault(handoff["candidate_id"], handoff)
+        plan_by_run_id: dict[str, Any] = {}
+        try:
+            from tradingagents.trade_lifecycle import TradePlanRepository
+            from tradingagents.trade_lifecycle.reporting import summarize_plan
+
+            plan_repository = TradePlanRepository(self.config.get("trade_lifecycle_db_path"))
+            run_ids = [handoff.get("run_id") for handoff in handoffs if handoff.get("run_id")]
+            for run_id in run_ids:
+                plan = plan_repository.get_plan_by_source_run_id(run_id)
+                if plan:
+                    plan_by_run_id[run_id] = summarize_plan(plan, plan_repository)
+        except Exception:
+            plan_by_run_id = {}
+        result: dict[str, dict[str, Any]] = {}
+        for candidate_id, handoff in latest_handoff_by_candidate.items():
+            plan_summary = plan_by_run_id.get(handoff.get("run_id"))
+            result[candidate_id] = {
+                "run_id": handoff.get("run_id"),
+                "handoff_status": handoff.get("status"),
+                "ata_final_signal": handoff.get("ata_final_signal"),
+                "ata_confidence": handoff.get("ata_confidence"),
+                "plan_id": handoff.get("plan_id") or (plan_summary or {}).get("plan_id"),
+                "plan_status": (plan_summary or {}).get("status"),
+                "plan_progress": (plan_summary or {}).get("progress"),
+                "latest_validation": (plan_summary or {}).get("latest_validation"),
+                "latest_event": (plan_summary or {}).get("latest_event"),
+            }
+        return result
 
     def health_report(self) -> dict:
         events = self.repository.list_events(limit=500)
@@ -602,18 +647,30 @@ class AlphaDiscoveryService:
                 self._record_run_decision(candidate, "daily_limit", execute=False, payload={"today_runs": len(today_runs)})
                 results.append({**candidate, "run_status": "daily_limit", "execute": False})
                 continue
-            analysts = candidate.get("recommended_analysts") or ["market", "social", "news", "macro"]
+            analysts = self._default_ata_analysts()
+            ata_config = self._ata_config_for_candidate(candidate)
             if not execute:
-                self._record_run_decision(candidate, "dry_run", execute=False, payload={"analysts": analysts})
-                results.append({**candidate, "run_status": "dry_run", "execute": False})
+                self._record_run_decision(
+                    candidate,
+                    "dry_run",
+                    execute=False,
+                    payload={"analysts": analysts, "ata_config": ata_config},
+                )
+                results.append({**candidate, "run_status": "dry_run", "execute": False, "ata_config": ata_config})
                 continue
             if graph_runner is None:
                 raise ValueError("graph_runner is required when execute=True")
-            run_id, final_signal, confidence = graph_runner.run(
+            run_result = graph_runner.run(
                 candidate["ticker"],
                 trade_date or datetime.now().date().isoformat(),
                 analysts,
+                ata_config,
             )
+            if len(run_result) == 4:
+                run_id, final_signal, confidence, plan_id = run_result
+            else:
+                run_id, final_signal, confidence = run_result
+                plan_id = self._plan_id_for_run(run_id)
             self.repository.upsert_handoff(
                 Handoff(
                     candidate_id=candidate["candidate_id"],
@@ -622,6 +679,7 @@ class AlphaDiscoveryService:
                     executed_at=utc_now_iso(),
                     ata_final_signal=final_signal,
                     ata_confidence=confidence,
+                    plan_id=plan_id,
                 )
             )
             total_today_runs.append({"candidate_id": candidate["candidate_id"], "ticker": candidate["ticker"]})
@@ -629,7 +687,13 @@ class AlphaDiscoveryService:
                 candidate,
                 "executed",
                 execute=True,
-                payload={"run_id": run_id, "ata_final_signal": final_signal, "analysts": analysts},
+                payload={
+                    "run_id": run_id,
+                    "plan_id": plan_id,
+                    "ata_final_signal": final_signal,
+                    "analysts": analysts,
+                    "ata_config": ata_config,
+                },
             )
             results.append(
                 {
@@ -637,10 +701,48 @@ class AlphaDiscoveryService:
                     "run_status": "executed",
                     "execute": True,
                     "run_id": run_id,
+                    "plan_id": plan_id,
                     "ata_final_signal": final_signal,
+                    "ata_config": ata_config,
                 }
             )
         return results
+
+    def _plan_id_for_run(self, run_id: str | None) -> str | None:
+        if not run_id:
+            return None
+        try:
+            from tradingagents.trade_lifecycle import TradePlanRepository
+
+            plan = TradePlanRepository(self.config.get("trade_lifecycle_db_path")).get_plan_by_source_run_id(run_id)
+            return plan.plan_id if plan else None
+        except Exception:
+            return None
+
+    def _default_ata_analysts(self) -> list[str]:
+        raw = self.config.get("alpha_discovery_ata_analysts") or "market,fundamentals,news,social,macro"
+        if isinstance(raw, str):
+            analysts = [part.strip() for part in raw.split(",") if part.strip()]
+        elif isinstance(raw, list):
+            analysts = [str(part).strip() for part in raw if str(part).strip()]
+        else:
+            analysts = []
+        return analysts or ["market", "fundamentals", "news", "social", "macro"]
+
+    def _ata_config_for_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "trading_horizon": self.config.get("alpha_discovery_ata_horizon", "position"),
+            "trading_mode": self.config.get("alpha_discovery_ata_trading_mode", "investment"),
+            "episode_ledger_metadata": {
+                "source": "alpha_discovery",
+                "ad_candidate_id": candidate.get("candidate_id"),
+                "ad_batch_id": candidate.get("batch_id"),
+                "ad_tier": candidate.get("tier"),
+                "ad_alpha_score": candidate.get("alpha_score"),
+                "ad_opportunity_type": candidate.get("opportunity_type"),
+                "ad_direction_hint": candidate.get("direction_hint"),
+            },
+        }
 
     def _run_collector(self, *, batch_id: str, source: str, collector) -> list[OpportunityCandidate]:
         collector_started = time.monotonic()

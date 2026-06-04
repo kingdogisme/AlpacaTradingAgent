@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import sqlite3
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -107,6 +107,7 @@ class TradePlanRepository:
                     symbol TEXT NOT NULL,
                     passed INTEGER NOT NULL,
                     decision TEXT NOT NULL,
+                    reason_code TEXT NOT NULL DEFAULT '',
                     reasons_json TEXT NOT NULL,
                     observation_json TEXT NOT NULL,
                     execution_policy_json TEXT NOT NULL,
@@ -115,8 +116,25 @@ class TradePlanRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_trade_plan_validations_plan_time
                     ON trade_plan_validations(plan_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS trade_monitor_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_trade_monitor_events_type_time
+                    ON trade_monitor_events(event_type, created_at);
                 """
             )
+            self._ensure_column(conn, "trade_plan_validations", "reason_code", "TEXT NOT NULL DEFAULT ''")
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def upsert_plan(self, plan: ConditionalTradePlan) -> ConditionalTradePlan:
         now = utc_now_iso()
@@ -184,9 +202,47 @@ class TradePlanRepository:
             row = conn.execute("SELECT * FROM trade_plans WHERE plan_id = ?", (plan_id,)).fetchone()
         return self._row_to_plan(row) if row else None
 
+    def get_plan_by_source_run_id(self, source_run_id: str) -> ConditionalTradePlan | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM trade_plans WHERE source_run_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (source_run_id,),
+            ).fetchone()
+        return self._row_to_plan(row) if row else None
+
+    def list_plans(
+        self,
+        *,
+        statuses: Sequence[TradePlanStatus | str] | None = None,
+        symbols: Iterable[str] | None = None,
+        limit: int | None = 100,
+    ) -> list[ConditionalTradePlan]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if statuses:
+            normalized_statuses = [TradePlanStatus(status).value for status in statuses]
+            placeholders = ",".join("?" for _ in normalized_statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(normalized_statuses)
+        if symbols:
+            normalized_symbols = [str(symbol).upper() for symbol in symbols]
+            placeholders = ",".join("?" for _ in normalized_symbols)
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend(normalized_symbols)
+        query = "SELECT * FROM trade_plans"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._row_to_plan(row) for row in rows]
+
     def list_active_plans(self, symbols: Iterable[str] | None = None) -> list[ConditionalTradePlan]:
-        params: list[Any] = [TradePlanStatus.ACTIVE.value]
-        where = "status = ?"
+        params: list[Any] = [TradePlanStatus.ACTIVE.value, TradePlanStatus.NEEDS_REVIEW.value]
+        where = "status IN (?, ?)"
         if symbols:
             normalized = [str(symbol).upper() for symbol in symbols]
             placeholders = ",".join("?" for _ in normalized)
@@ -218,6 +274,30 @@ class TradePlanRepository:
                 event_type="status_change",
                 message=reason or f"{plan.status.value} -> {next_plan.status.value}",
                 payload={"from": plan.status.value, "to": next_plan.status.value, **(payload or {})},
+            )
+        )
+        return next_plan
+
+    def force_status(
+        self,
+        plan_id: str,
+        status: TradePlanStatus | str,
+        *,
+        reason: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> ConditionalTradePlan | None:
+        plan = self.get_plan(plan_id)
+        if plan is None:
+            return None
+        target = TradePlanStatus(status)
+        next_plan = plan.model_copy(update={"status": target, "updated_at": utc_now_iso()})
+        self.upsert_plan(next_plan)
+        self.append_event(
+            TradePlanEvent(
+                plan_id=plan_id,
+                event_type="status_change",
+                message=reason or f"{plan.status.value} -> {target.value}",
+                payload={"from": plan.status.value, "to": target.value, "forced": True, **(payload or {})},
             )
         )
         return next_plan
@@ -271,16 +351,78 @@ class TradePlanRepository:
                 ),
             )
 
+    def append_monitor_event(
+        self,
+        *,
+        event_type: str,
+        status: str = "ok",
+        message: str = "",
+        payload: dict[str, Any] | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO trade_monitor_events (
+                    event_type, status, message, payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event_type,
+                    status,
+                    message,
+                    _json_dump(payload or {}),
+                    created_at or utc_now_iso(),
+                ),
+            )
+
+    def list_monitor_events(
+        self,
+        *,
+        event_type: str | None = None,
+        limit: int | None = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if event_type:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+        query = "SELECT * FROM trade_monitor_events"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, event_id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "event_id": row["event_id"],
+                "event_type": row["event_type"],
+                "status": row["status"],
+                "message": row["message"],
+                "payload": _json_load(row["payload_json"], {}),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def latest_monitor_event(self, event_type: str | None = None) -> dict[str, Any] | None:
+        events = self.list_monitor_events(event_type=event_type, limit=1)
+        return events[0] if events else None
+
     def record_validation(self, validation: PreTradeValidation) -> None:
         data = _model_dump(validation)
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO trade_plan_validations (
-                    validation_id, plan_id, symbol, passed, decision, reasons_json,
+                    validation_id, plan_id, symbol, passed, decision, reason_code, reasons_json,
                     observation_json, execution_policy_json, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     validation.validation_id,
@@ -288,6 +430,7 @@ class TradePlanRepository:
                     validation.symbol.upper(),
                     1 if validation.passed else 0,
                     validation.decision,
+                    validation.reason_code,
                     _json_dump(validation.reasons),
                     _json_dump(data.get("observation") or {}),
                     _json_dump(data.get("execution_policy") or {}),
@@ -300,7 +443,7 @@ class TradePlanRepository:
                 event_type="validation",
                 status="passed" if validation.passed else "rejected",
                 message="; ".join(validation.reasons),
-                payload=data,
+                payload={**data, "reason_code": validation.reason_code},
             )
         )
 
@@ -322,6 +465,59 @@ class TradePlanRepository:
             }
             for row in rows
         ]
+
+    def latest_event(self, plan_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM trade_plan_events WHERE plan_id = ? ORDER BY created_at DESC, event_id DESC LIMIT 1",
+                (plan_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "event_id": row["event_id"],
+            "plan_id": row["plan_id"],
+            "event_type": row["event_type"],
+            "status": row["status"],
+            "message": row["message"],
+            "payload": _json_load(row["payload_json"], {}),
+            "created_at": row["created_at"],
+        }
+
+    def list_validations(self, plan_id: str | None = None, *, limit: int | None = 100) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if plan_id:
+            clauses.append("plan_id = ?")
+            params.append(plan_id)
+        query = "SELECT * FROM trade_plan_validations"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "validation_id": row["validation_id"],
+                "plan_id": row["plan_id"],
+                "symbol": row["symbol"],
+                "passed": bool(row["passed"]),
+                "decision": row["decision"],
+                "reason_code": row["reason_code"],
+                "reasons": _json_load(row["reasons_json"], []),
+                "observation": _json_load(row["observation_json"], {}),
+                "execution_policy": _json_load(row["execution_policy_json"], {}),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def latest_validation(self, plan_id: str) -> dict[str, Any] | None:
+        rows = self.list_validations(plan_id, limit=1)
+        return rows[0] if rows else None
 
     def _row_to_plan(self, row: sqlite3.Row) -> ConditionalTradePlan:
         return ConditionalTradePlan(

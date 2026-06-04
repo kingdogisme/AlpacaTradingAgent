@@ -36,16 +36,21 @@ class PreTradeValidator:
         current_position: str | None = None,
     ) -> PreTradeValidation:
         reasons: list[str] = []
+        reason_codes: list[str] = []
 
         if plan.is_expired(observation.observed_at):
+            reason_codes.append("expired")
             reasons.append("stale signal: plan valid_until has elapsed")
 
         if not _paper_enabled(self.config):
+            reason_codes.append("live_account")
             reasons.append("live account auto execution is forbidden; alpaca_use_paper must be true")
 
         if plan.status.value != "active":
+            reason_codes.append("invalid_status")
             reasons.append(f"plan status is not active: {plan.status.value}")
         if observation.price <= 0:
+            reason_codes.append("invalid_price")
             reasons.append("hard risk reject: no valid observed price")
 
         if plan.action in NO_ORDER_ACTIONS or plan.side == "none":
@@ -54,24 +59,43 @@ class PreTradeValidator:
                 symbol=plan.symbol,
                 passed=False,
                 decision="no_order",
+                reason_code="no_order_action",
                 reasons=["HOLD/NEUTRAL plan does not create broker orders"],
+                observation=observation,
+                execution_policy=None,
+            )
+
+        position_reason = self._position_reason(plan, current_position)
+        if position_reason:
+            code, reason, no_order = position_reason
+            return PreTradeValidation(
+                plan_id=plan.plan_id,
+                symbol=plan.symbol,
+                passed=False,
+                decision="no_order" if no_order else "rejected",
+                reason_code=code,
+                reasons=[reason],
                 observation=observation,
                 execution_policy=None,
             )
 
         invalidation_reason = self._invalidation_reason(plan, observation)
         if invalidation_reason:
+            reason_codes.append("invalidation_breached")
             reasons.append(invalidation_reason)
         if plan.invalidation.price_below is None and plan.invalidation.price_above is None:
+            reason_codes.append("missing_invalidation")
             reasons.append("hard risk reject: explicit numeric invalidation is required")
 
         trigger_reason = self._trigger_reason(plan, observation)
         if trigger_reason:
+            reason_codes.append("trigger_not_met")
             reasons.append(trigger_reason)
 
-        risk_reason = self._risk_reason(plan, observation, account_info or {})
-        if risk_reason:
-            reasons.extend(risk_reason)
+        risk_reasons = self._risk_reasons(plan, observation, account_info or {})
+        for code, reason in risk_reasons:
+            reason_codes.append(code)
+            reasons.append(reason)
 
         if reasons:
             return PreTradeValidation(
@@ -79,6 +103,7 @@ class PreTradeValidator:
                 symbol=plan.symbol,
                 passed=False,
                 decision="rejected",
+                reason_code=reason_codes[0] if reason_codes else "rejected",
                 reasons=reasons,
                 observation=observation,
                 execution_policy=None,
@@ -89,10 +114,32 @@ class PreTradeValidator:
             symbol=plan.symbol,
             passed=True,
             decision="approved",
+            reason_code="approved",
             reasons=["pre-trade risk check passed"],
             observation=observation,
             execution_policy=self._execution_policy(plan, account_info or {}),
         )
+
+    def _position_reason(
+        self,
+        plan: ConditionalTradePlan,
+        current_position: str | None,
+    ) -> tuple[str, str, bool] | None:
+        position = str(current_position or "NEUTRAL").upper()
+        trading_mode = str(plan.trading_mode or self.config.get("trading_mode") or "investment").lower()
+        if trading_mode == "investment":
+            if plan.action == TradePlanAction.SELL and position != "LONG":
+                return ("flat_sell", "investment SELL requires an existing LONG position", True)
+            if plan.action == TradePlanAction.BUY and position == "LONG":
+                return ("already_long", "BUY plan will not add because current position is already LONG", True)
+        if plan.action in {TradePlanAction.LONG, TradePlanAction.BUY} and position == "SHORT":
+            return ("position_mismatch", "long-side plan cannot execute while current position is SHORT", False)
+        if plan.action == TradePlanAction.SHORT:
+            if "/" in plan.symbol:
+                return ("crypto_short_forbidden", "crypto SHORT execution is not supported", False)
+            if not bool(plan.execution_policy.allow_shorts):
+                return ("shorts_disabled", "SHORT plan requires allow_shorts", False)
+        return None
 
     def _invalidation_reason(self, plan: ConditionalTradePlan, observation: MarketObservation) -> str | None:
         invalidation = plan.invalidation
@@ -139,49 +186,55 @@ class PreTradeValidator:
             return "trigger not met: price is not above SMA200"
         return None
 
-    def _risk_reason(
+    def _risk_reasons(
         self,
         plan: ConditionalTradePlan,
         observation: MarketObservation,
         account_info: dict[str, Any],
-    ) -> list[str]:
-        reasons: list[str] = []
+    ) -> list[tuple[str, str]]:
+        reasons: list[tuple[str, str]] = []
         budget = plan.risk_budget
         if budget.max_gap_pct is not None and observation.gap_pct is not None:
             if abs(observation.gap_pct) > budget.max_gap_pct:
                 reasons.append(
-                    f"hard risk reject: gap {observation.gap_pct:.2%} exceeds {budget.max_gap_pct:.2%}"
+                    ("gap_risk", f"hard risk reject: gap {observation.gap_pct:.2%} exceeds {budget.max_gap_pct:.2%}")
                 )
         if budget.min_volume_ratio is not None:
             if observation.volume_ratio is None or observation.volume_ratio < budget.min_volume_ratio:
                 reasons.append(
-                    f"hard risk reject: volume_ratio below {budget.min_volume_ratio:.2f}"
+                    ("liquidity", f"hard risk reject: volume_ratio below {budget.min_volume_ratio:.2f}")
                 )
 
         equity = _safe_float(account_info.get("equity"))
         notional = self._planned_notional(plan, account_info)
         if equity and budget.max_notional_pct is not None and notional / equity > budget.max_notional_pct:
             reasons.append(
-                f"hard risk reject: notional {notional:.2f} exceeds max_notional_pct {budget.max_notional_pct:.2%}"
+                ("max_notional_pct", f"hard risk reject: notional {notional:.2f} exceeds max_notional_pct {budget.max_notional_pct:.2%}")
             )
         buying_power = _safe_float(account_info.get("buying_power"))
         if buying_power is not None and plan.side == "buy" and notional > buying_power:
             reasons.append(
-                f"hard risk reject: notional {notional:.2f} exceeds buying_power {buying_power:.2f}"
+                ("buying_power", f"hard risk reject: notional {notional:.2f} exceeds buying_power {buying_power:.2f}")
             )
         if budget.max_notional is not None and notional > budget.max_notional:
             reasons.append(
-                f"hard risk reject: notional {notional:.2f} exceeds max_notional {budget.max_notional:.2f}"
+                ("max_notional", f"hard risk reject: notional {notional:.2f} exceeds max_notional {budget.max_notional:.2f}")
             )
 
         max_single_pct = _safe_float(self.config.get("max_single_name_notional_pct"))
         if equity and max_single_pct and notional / equity > max_single_pct:
             reasons.append(
-                f"hard risk reject: notional {notional:.2f} exceeds single-name cap {max_single_pct:.2%}"
+                ("single_name_cap", f"hard risk reject: notional {notional:.2f} exceeds single-name cap {max_single_pct:.2%}")
             )
 
-        if plan.action == TradePlanAction.SHORT and not bool(plan.execution_policy.allow_shorts):
-            reasons.append("hard risk reject: SHORT plan requires allow_shorts")
+        for raw_key, code, label in (
+            ("theme_notional_pct", "theme_cap", "theme cap"),
+            ("open_risk_pct", "open_risk_cap", "open risk cap"),
+        ):
+            raw_value = _safe_float(account_info.get(raw_key) or account_info.get(code))
+            cap = _safe_float(self.config.get(f"max_{raw_key}") or self.config.get(f"max_{code}"))
+            if raw_value is not None and cap is not None and raw_value > cap:
+                reasons.append(("risk_overlay", f"hard risk reject: {label} {raw_value:.2%} exceeds {cap:.2%}"))
 
         return reasons
 
@@ -189,6 +242,9 @@ class PreTradeValidator:
         policy = plan.execution_policy.model_copy(deep=True)
         policy.paper_only = True
         policy.notional = policy.notional or self._planned_notional(plan, account_info)
+        base_key = f"{plan.plan_id}:{plan.action.value}:{plan.symbol}:{policy.notional}"
+        policy.idempotency_key = base_key
+        policy.client_order_id = f"ata-{plan.plan_id}-{plan.action.value.lower()}-{plan.symbol.replace('/', '')}"[:48]
         if "/" in plan.symbol:
             policy.time_in_force = "gtc"
         return policy
@@ -225,13 +281,16 @@ def execute_validated_plan(
 
     from tradingagents.dataflows.alpaca_utils import AlpacaUtils
 
-    return AlpacaUtils.execute_trading_action(
+    result = AlpacaUtils.execute_trading_action(
         symbol=plan.symbol,
         current_position=current_position or AlpacaUtils.get_current_position_state(plan.symbol),
         signal=plan.action.value,
         dollar_amount=float(policy.notional or plan.max_notional or 1000),
         allow_shorts=bool(policy.allow_shorts),
     )
+    result["client_order_id"] = policy.client_order_id
+    result["idempotency_key"] = policy.idempotency_key
+    return result
 
 
 def _safe_float(value: Any) -> float | None:

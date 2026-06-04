@@ -30,7 +30,7 @@ from tradingagents.dataflows.config import (
 )
 from tradingagents.dataflows.ticker_utils import TickerUtils
 from tradingagents.dataflows.utils import safe_ticker_component
-from tradingagents.trade_lifecycle import persist_approved_plan
+from tradingagents.trade_lifecycle import latest_active_plan_review_context, persist_approved_plan
 
 from .checkpointer import clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
@@ -416,6 +416,15 @@ class TradingAgentsGraph:
         init_agent_state = self.propagator.create_initial_state(
             company_name, trade_date
         )
+        active_plan_reviews, active_plan_review_context = latest_active_plan_review_context(
+            company_name,
+            config=self.config,
+            horizon=self.config.get("trading_horizon"),
+        )
+        init_agent_state["active_plan_review"] = {
+            "context": active_plan_review_context,
+            "reviews": [review.model_dump(mode="json") for review in active_plan_reviews],
+        }
         args = self._graph_args_for_run(company_name, str(trade_date))
         graph, checkpointer_ctx = self._graph_for_run(company_name, str(trade_date))
         run_logger.start_run(
@@ -639,6 +648,7 @@ class TradingAgentsGraph:
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
             "conditional_trade_plan": final_state.get("conditional_trade_plan", {}),
+            "active_plan_review": final_state.get("active_plan_review", {}),
         }
 
         # Save to file

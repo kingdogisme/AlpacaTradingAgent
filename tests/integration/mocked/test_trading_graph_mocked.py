@@ -63,7 +63,7 @@ def _final_state(ticker, trade_date):
             "judge_decision": "risk decision",
         },
         "investment_plan": "investment plan",
-        "final_trade_decision": "risk decision\nFINAL TRANSACTION PROPOSAL: **BUY**",
+        "final_trade_decision": "risk decision. Entry at 101. Invalidation at 95.\nFINAL TRANSACTION PROPOSAL: **BUY**",
         "trading_horizon": "swing",
     }
 

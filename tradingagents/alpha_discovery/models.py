@@ -60,6 +60,7 @@ class Handoff:
     executed_at: str
     ata_final_signal: str | None = None
     ata_confidence: str | None = None
+    plan_id: str | None = None
 
 
 @dataclass

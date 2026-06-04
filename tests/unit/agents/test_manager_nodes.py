@@ -165,6 +165,7 @@ def test_risk_manager_outputs_final_executable_action_and_state(isolated_config)
     assert "Account Equity / NAV: $2,500.00" in str(llm.prompts[0])
     assert "Portfolio Policy: TREND_CONCENTRATED" in str(llm.prompts[0])
     assert "Theme Basket Context for AAPL" in str(llm.prompts[0])
+    assert "Active prior conditional plan review" in str(llm.prompts[0])
 
 
 def test_risk_manager_validator_downgrades_flat_long_only_sell(isolated_config):
@@ -269,3 +270,25 @@ def test_risk_manager_structured_output_uses_configured_language(isolated_config
     assert "**风险理由**: 没有现仓，等待确认更优。" in result["final_trade_decision"]
     assert "**必要风控**: 突破确认后再分批建仓。" in result["final_trade_decision"]
     assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["final_trade_decision"]
+
+
+def test_risk_manager_injects_active_plan_review_context(isolated_config):
+    isolated_config["decision_policy_enabled"] = False
+    llm = PlainLLM("Trigger Review: execute prior plan.\nFINAL TRANSACTION PROPOSAL: **BUY**")
+    node = create_risk_manager(llm, EmptyMemory(), isolated_config)
+    state = _base_state()
+    state["active_plan_review"] = {
+        "context": "Active Conditional Trade Plan Review:\n- plan_id: tp_nbis\n  lifecycle_status: met",
+        "reviews": [{"plan_id": "tp_nbis", "status": "met"}],
+    }
+
+    with patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_current_position_state", return_value="NEUTRAL"), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_positions_data", return_value=[]
+    ), patch(
+        "tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info",
+        return_value={"equity": 2500, "buying_power": 1000, "cash": 500},
+    ):
+        result = node(state)
+
+    assert "plan_id: tp_nbis" in str(llm.prompts[0])
+    assert result["active_plan_review"]["reviews"][0]["status"] == "met"

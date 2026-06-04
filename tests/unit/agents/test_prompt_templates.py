@@ -68,6 +68,7 @@ class PromptTemplateTests(unittest.TestCase):
                 "decision_format": "BUY/HOLD/SELL",
                 "final_decision": "FINAL TRANSACTION PROPOSAL: **HOLD**",
                 "final_format": "FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL**",
+                "active_plan_review_context": "No active conditional trade plan.",
                 "mode_name": "SWING TRADING INVESTMENT MODE",
                 "raw_return": "+1.0%",
                 "ticker": "NVDA",
@@ -107,6 +108,9 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("Do not recommend option contracts", risk_manager_prompt)
         self.assertIn("Optimize risk-adjusted return", risk_manager_prompt)
         self.assertIn("excessive conservatism", risk_manager_prompt)
+        self.assertIn("Lifecycle continuity comes first", risk_manager_prompt)
+        self.assertIn("Do not silently move an already-satisfied BUY trigger", risk_manager_prompt)
+        self.assertIn("Treat soft risks as sizing/confidence modifiers", risk_manager_prompt)
 
     def test_investment_mode_prompts_match_long_only_no_trade_semantics(self):
         investment_prompt = load_prompt("trading_modes/investment")

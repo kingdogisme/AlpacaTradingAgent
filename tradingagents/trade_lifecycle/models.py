@@ -24,10 +24,21 @@ class TradePlanStatus(str, Enum):
     DRAFT = "draft"
     ACTIVE = "active"
     TRIGGERED = "triggered"
+    NEEDS_REVIEW = "needs_review"
+    NEEDS_RECONCILIATION = "needs_reconciliation"
     EXECUTED = "executed"
     EXPIRED = "expired"
     REJECTED = "rejected"
     CANCELLED = "cancelled"
+    SUPERSEDED = "superseded"
+
+
+class PlanReviewStatus(str, Enum):
+    NOT_MET = "not_met"
+    PARTIALLY_MET = "partially_met"
+    MET = "met"
+    INVALIDATED = "invalidated"
+    EXPIRED = "expired"
     SUPERSEDED = "superseded"
 
 
@@ -58,6 +69,7 @@ ALLOWED_STATUS_TRANSITIONS: dict[TradePlanStatus, set[TradePlanStatus]] = {
     },
     TradePlanStatus.ACTIVE: {
         TradePlanStatus.TRIGGERED,
+        TradePlanStatus.NEEDS_REVIEW,
         TradePlanStatus.EXECUTED,
         TradePlanStatus.EXPIRED,
         TradePlanStatus.REJECTED,
@@ -65,6 +77,20 @@ ALLOWED_STATUS_TRANSITIONS: dict[TradePlanStatus, set[TradePlanStatus]] = {
         TradePlanStatus.SUPERSEDED,
     },
     TradePlanStatus.TRIGGERED: {
+        TradePlanStatus.NEEDS_REVIEW,
+        TradePlanStatus.NEEDS_RECONCILIATION,
+        TradePlanStatus.EXECUTED,
+        TradePlanStatus.REJECTED,
+        TradePlanStatus.CANCELLED,
+    },
+    TradePlanStatus.NEEDS_REVIEW: {
+        TradePlanStatus.NEEDS_RECONCILIATION,
+        TradePlanStatus.EXECUTED,
+        TradePlanStatus.REJECTED,
+        TradePlanStatus.CANCELLED,
+        TradePlanStatus.SUPERSEDED,
+    },
+    TradePlanStatus.NEEDS_RECONCILIATION: {
         TradePlanStatus.EXECUTED,
         TradePlanStatus.REJECTED,
         TradePlanStatus.CANCELLED,
@@ -88,12 +114,19 @@ class TradeTrigger(BaseModel):
     rsi_max: Optional[float] = None
     require_price_above_sma_50: Optional[bool] = None
     require_price_above_sma_200: Optional[bool] = None
+    require_reclaim_sma_50: Optional[bool] = None
+    require_reclaim_sma_200: Optional[bool] = None
     debounce_observations: int = 1
     hysteresis_pct: float = 0.0
     description: str = ""
+    conditions: list["TradeTrigger"] = Field(default_factory=list)
+    operator: Literal["OR"] = "OR"
 
     @model_validator(mode="after")
     def validate_price_shape(self) -> "TradeTrigger":
+        if self.conditions:
+            self.operator = "OR"
+            return self
         if self.type == "price_above" and self.price_above is None:
             raise ValueError("price_above trigger requires price_above")
         if self.type == "price_below" and self.price_below is None:
@@ -131,6 +164,8 @@ class ExecutionPolicy(BaseModel):
     qty: Optional[float] = None
     paper_only: bool = True
     allow_shorts: bool = False
+    idempotency_key: Optional[str] = None
+    client_order_id: Optional[str] = None
 
 
 class MarketObservation(BaseModel):
@@ -146,6 +181,23 @@ class MarketObservation(BaseModel):
     sma_50: Optional[float] = None
     sma_200: Optional[float] = None
     raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlanLifecycleReview(BaseModel):
+    plan_id: str
+    source_run_id: Optional[str] = None
+    symbol: str
+    horizon: Optional[str] = None
+    status: PlanReviewStatus
+    plan_status: TradePlanStatus
+    trigger_met: bool = False
+    invalidated: bool = False
+    expired: bool = False
+    observation: Optional[MarketObservation] = None
+    reasons: list[str] = Field(default_factory=list)
+    required_action: Optional[Literal["review", "none"]] = None
+    allowed_decisions: list[str] = Field(default_factory=list)
+    active_plan: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConditionalTradePlan(BaseModel):
@@ -211,6 +263,7 @@ class PreTradeValidation(BaseModel):
     symbol: str
     passed: bool
     decision: Literal["approved", "rejected", "no_order"]
+    reason_code: str
     reasons: list[str] = Field(default_factory=list)
     observation: Optional[MarketObservation] = None
     execution_policy: Optional[ExecutionPolicy] = None

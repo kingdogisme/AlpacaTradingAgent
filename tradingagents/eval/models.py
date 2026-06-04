@@ -4,6 +4,58 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+EVALUATION_TARGET_TYPES = {
+    "final_action",
+    "conditional_plan",
+    "triggered_conditional_plan",
+    "ad_candidate",
+}
+
+EVALUATION_TRIGGER_STATUSES = {"not_applicable", "not_triggered", "triggered", "expired"}
+EVALUATION_EXECUTION_STATUSES = {"not_ordered", "needs_review", "executed", "cancelled"}
+EVALUATION_STATUSES = {"not_mature", "resolved", "insufficient_data", "failed"}
+
+
+@dataclass(frozen=True)
+class EvaluationTargetRecord:
+    target_id: str
+    target_type: str
+    symbol: str
+    action: str
+    horizon: str | None
+    anchor_date: str
+    holding_days: int
+    run_id: str | None = None
+    plan_id: str | None = None
+    candidate_id: str | None = None
+    source: str | None = None
+    trigger_status: str = "not_applicable"
+    execution_status: str = "not_ordered"
+    metadata_json: dict[str, Any] = field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationOutcomeRecord:
+    target_id: str
+    reward_version: str
+    evaluation_status: str
+    holding_days: int
+    raw_return: float | None = None
+    benchmark_return: float | None = None
+    alpha_return: float | None = None
+    oracle_label: str | None = None
+    classification_reward: float | None = None
+    pnl_reward: float | None = None
+    reward_scalar: float | None = None
+    mfe: float | None = None
+    mae: float | None = None
+    components_json: dict[str, Any] = field(default_factory=dict)
+    resolved_at: str | None = None
+    data_source: str = "TargetAwareRewardResolver"
+
+
 @dataclass(frozen=True)
 class EpisodeRecord:
     run_id: str

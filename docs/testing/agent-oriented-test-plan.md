@@ -52,7 +52,10 @@ external services.
   histories/messages plus shared risk history/count/latest speaker.
 - Risk Manager must use structured fallback, preserve executable action, and
   write `final_trade_decision`, `recommended_action`, `trading_mode`,
-  `trading_horizon`, and `current_position`.
+  `trading_horizon`, `current_position`, and `conditional_trade_plan`.
+- `conditional_trade_plan` is the canonical conditional order policy. Tests must
+  preserve existing `final_trade_decision` behavior while asserting structured
+  plan fields for trigger, invalidation, expiry, risk budget, and status.
 - Crypto short execution remains prohibited in `AlpacaUtils.execute_trading_action`
   even when `allow_shorts=True`.
 
@@ -65,6 +68,8 @@ external services.
 - `TradingAgentsGraph.propagate` mocked runs must write full state logs, memory
   logs, audit summaries, and clear checkpoints after successful checkpointed
   runs.
+- Mocked graph and WebUI execution tests must prove trade execution goes through
+  `TradeMonitorService` and `PreTradeValidator`, never directly from report text
+  to broker helper.
 - Failed runs must finish audit logging with `failed` status and an error
   summary.
-

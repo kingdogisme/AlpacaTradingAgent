@@ -73,6 +73,22 @@ def test_sse_response_parse_with_unprefixed_continuation_lines():
     assert text == "first line\nsecond line\nthird line"
 
 
+def test_sse_response_parse_with_raw_newlines_inside_json_string():
+    response = FakeResponse(
+        text=(
+            "event: message\n"
+            'data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"first line\n'
+            'second line with MSFT\n'
+            'third line"}]}}\n\n'
+        ),
+        headers={"content-type": "text/event-stream"},
+    )
+
+    text = decode_mcp_response(response)["result"]["content"][0]["text"]
+
+    assert text == "first line\nsecond line with MSFT\nthird line"
+
+
 def test_http_error_raises_unavailable(monkeypatch):
     monkeypatch.setattr(
         sellthenews.requests,

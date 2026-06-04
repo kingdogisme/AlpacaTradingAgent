@@ -168,8 +168,16 @@ def _has_any(text: str, needles: Iterable[str]) -> bool:
     return any(needle in lower for needle in needles)
 
 
-def _observed_date_from_payload(text: str, tool_name: str) -> str | None:
-    if get_source_spec(tool_name).source_id not in {"technical_brief", "trend_brief"}:
+def _observed_date_from_payload(text: str, tool_name: str, inputs: dict[str, Any] | None = None) -> str | None:
+    source_id = get_source_spec(tool_name).source_id
+    inputs = inputs or {}
+    if source_id == "sellthenews_options":
+        # Options reports contain many future expiration dates. Do not let the
+        # generic "freshest date in text" parser treat a LEAPS expiry as the
+        # observation timestamp. The API response is fetched live for curr_date,
+        # and the report header carries that as the as-of date.
+        return _input_date(inputs, ("curr_date", "as_of", "end_date"))
+    if source_id not in {"technical_brief", "trend_brief"}:
         return None
     try:
         payload = json.loads(text)
@@ -219,9 +227,11 @@ def evaluate_tool_output(
     fallback_from = _fallback_from_text(text, spec)
 
     as_of = _input_date(inputs, ("end_date", "curr_date", "as_of")) or _utc_now_iso()[:10]
-    observed = freshest_date_in_text(text)
-    observed_at = observed.isoformat() if observed is not None else _observed_date_from_payload(text, tool_name)
-    observed = parse_date(observed_at) if observed_at is not None else observed
+    observed_at = _observed_date_from_payload(text, tool_name, inputs)
+    observed = parse_date(observed_at) if observed_at is not None else None
+    if observed is None:
+        observed = freshest_date_in_text(text)
+        observed_at = observed.isoformat() if observed is not None else None
     age_days = date_age_days(observed, as_of=as_of) if observed is not None else None
 
     freshness = "unknown"

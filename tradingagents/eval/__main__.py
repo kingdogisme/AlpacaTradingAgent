@@ -14,6 +14,7 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from .benchmarking import compare_existing_runs, load_benchmark_suite
 from .critic import DEFAULT_CRITIC_VERSION, HeuristicCritic, critic_memory_candidate
 from .export import export_jsonl
+from .harness import build_harness_report, build_hypothesis_report
 from .ledger import EpisodeLedger
 from .memory_v2 import (
     create_data_quality_memory_candidates,
@@ -25,8 +26,13 @@ from .memory_v2 import (
     promote_memory,
     retrieve_memory,
 )
-from .reporting import summarize_rows
+from .reporting import soft_gate_audit as build_soft_gate_audit, summarize_rows
 from .rewards import RewardResolver
+from .targets import (
+    EvaluationTargetBuilder,
+    TargetAwareRewardResolver,
+    build_target_report,
+)
 
 
 app = typer.Typer(help="TradingAgents evaluation ledger and reward tooling.")
@@ -68,6 +74,83 @@ def score(
     resolver = RewardResolver(ledger, config=DEFAULT_CONFIG)
     rewards = resolver.score_due_episodes(as_of=as_of)
     console.print(f"Resolved {len(rewards)} reward(s).")
+
+
+@app.command("eval-target-build")
+def eval_target_build(
+    since: Optional[str] = typer.Option(None, help="Only build episode targets since YYYY-MM-DD."),
+    include_trade_plans: bool = typer.Option(True, help="Include trade lifecycle conditional targets."),
+    include_ad_candidates: bool = typer.Option(True, help="Include AlphaDiscovery candidate targets."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+    trade_db_path: Optional[Path] = typer.Option(None, help="Override trade lifecycle SQLite path."),
+    ad_db_path: Optional[Path] = typer.Option(None, help="Override AlphaDiscovery SQLite path."),
+) -> None:
+    ledger = EpisodeLedger(ledger_path)
+    trade_repository = None
+    alpha_repository = None
+    if include_trade_plans:
+        from tradingagents.trade_lifecycle import TradePlanRepository
+
+        trade_repository = TradePlanRepository(trade_db_path or DEFAULT_CONFIG.get("trade_lifecycle_db_path"))
+    if include_ad_candidates:
+        from tradingagents.alpha_discovery import AlphaDiscoveryRepository
+
+        alpha_repository = AlphaDiscoveryRepository(ad_db_path or DEFAULT_CONFIG.get("alpha_discovery_db_path"))
+    targets = EvaluationTargetBuilder(
+        ledger,
+        trade_repository=trade_repository,
+        alpha_repository=alpha_repository,
+        config=DEFAULT_CONFIG,
+    ).build_all(since=since)
+    console.print_json(data={"created_or_updated": len(targets), "target_ids": [target.target_id for target in targets]})
+
+
+@app.command("eval-target-list")
+def eval_target_list(
+    target_type: Optional[str] = typer.Option(None, help="Filter by target type."),
+    symbol: Optional[str] = typer.Option(None, help="Filter by symbol."),
+    horizon: Optional[str] = typer.Option(None, help="Filter by horizon."),
+    pending_only: bool = typer.Option(False, help="Only targets missing the current reward version outcome."),
+    limit: Optional[int] = typer.Option(100, help="Maximum targets to print."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+) -> None:
+    ledger = EpisodeLedger(ledger_path)
+    rows = ledger.list_evaluation_targets(
+        {
+            "target_type": target_type,
+            "symbol": symbol.upper() if symbol else None,
+            "horizon": horizon,
+            "pending_only": pending_only,
+            "reward_version": DEFAULT_CONFIG.get("eval_reward_version", "v1_directional_alpha"),
+            "limit": limit,
+        }
+    )
+    console.print_json(data=rows)
+
+
+@app.command("eval-target-resolve")
+def eval_target_resolve(
+    as_of: str = typer.Option(..., help="Resolve targets as of YYYY-MM-DD."),
+    target_type: Optional[str] = typer.Option(None, help="Filter by target type."),
+    symbol: Optional[str] = typer.Option(None, help="Filter by symbol."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+) -> None:
+    ledger = EpisodeLedger(ledger_path)
+    outcomes = TargetAwareRewardResolver(ledger, config=DEFAULT_CONFIG).score_due_targets(
+        as_of=as_of,
+        filters={"target_type": target_type, "symbol": symbol.upper() if symbol else None},
+    )
+    console.print_json(data={"resolved": len(outcomes), "target_ids": [outcome.target_id for outcome in outcomes]})
+
+
+@app.command("eval-target-report")
+def eval_target_report(
+    group_by: str = typer.Option("target_type,horizon,symbol", help="Comma-separated grouping fields."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+) -> None:
+    ledger = EpisodeLedger(ledger_path)
+    groups = [item.strip() for item in group_by.split(",") if item.strip()]
+    console.print_json(data=build_target_report(ledger, group_by=groups))
 
 
 @app.command("normalize-traces")
@@ -153,6 +236,95 @@ def report(
         )
     console.print(table)
     console.print_json(data=summaries)
+
+
+@app.command("soft-gate-audit")
+def soft_gate_audit(
+    since: Optional[str] = typer.Option(None, help="Only include episodes since YYYY-MM-DD."),
+    include_high_leakage: bool = typer.Option(False, help="Include episodes collected with live web/news data."),
+    format: str = typer.Option("json", help="Output format: json or table."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+) -> None:
+    ledger = EpisodeLedger(ledger_path)
+    rows = ledger.report_rows(since=since, include_high_leakage=include_high_leakage)
+    payload = build_soft_gate_audit(rows)
+    if format == "json":
+        console.print_json(data=payload)
+        return
+    if format != "table":
+        raise typer.BadParameter("format must be table or json")
+    table = Table(title="Soft Gate Audit")
+    table.add_column("metric")
+    table.add_column("value")
+    for key, value in payload.items():
+        table.add_row(key, json.dumps(value, sort_keys=True) if isinstance(value, dict) else str(value))
+    console.print(table)
+
+
+@app.command("harness-report")
+def harness_report(
+    suite: Optional[Path] = typer.Option(None, help="Benchmark suite JSON path."),
+    since: Optional[str] = typer.Option(None, help="Only include episodes since YYYY-MM-DD."),
+    prompt_version: Optional[str] = typer.Option(None, help="Filter by prompt version."),
+    config_hash: Optional[str] = typer.Option(None, help="Filter by config hash."),
+    experiment_id: Optional[str] = typer.Option(None, help="Filter by experiment id."),
+    baseline_prompt: Optional[str] = typer.Option(None, help="Baseline prompt version for suite comparison."),
+    candidate_prompt: Optional[str] = typer.Option(None, help="Candidate prompt version for suite comparison."),
+    baseline_config_hash: Optional[str] = typer.Option(None, help="Baseline config hash for suite comparison."),
+    candidate_config_hash: Optional[str] = typer.Option(None, help="Candidate config hash for suite comparison."),
+    baseline_experiment: Optional[str] = typer.Option(None, help="Baseline experiment id for suite comparison."),
+    candidate_experiment: Optional[str] = typer.Option(None, help="Candidate experiment id for suite comparison."),
+    include_high_leakage: bool = typer.Option(False, help="Include high-leakage episodes."),
+    min_resolved: int = typer.Option(5, help="Minimum resolved sample for hypothesis conclusions."),
+    format: str = typer.Option("json", help="Output format: json."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    ledger = EpisodeLedger(ledger_path)
+    payload = build_harness_report(
+        ledger,
+        suite_path=suite,
+        since=since,
+        include_high_leakage=include_high_leakage,
+        variant_filter={
+            "prompt_version": prompt_version,
+            "config_hash": config_hash,
+            "experiment_id": experiment_id,
+        },
+        baseline_filter={
+            "prompt_version": baseline_prompt,
+            "config_hash": baseline_config_hash,
+            "experiment_id": baseline_experiment,
+        },
+        candidate_filter={
+            "prompt_version": candidate_prompt,
+            "config_hash": candidate_config_hash,
+            "experiment_id": candidate_experiment,
+        },
+        min_resolved=min_resolved,
+    )
+    console.print_json(data=payload)
+
+
+@app.command("hypothesis-report")
+def hypothesis_report(
+    since: Optional[str] = typer.Option(None, help="Only include episodes since YYYY-MM-DD."),
+    include_high_leakage: bool = typer.Option(False, help="Include high-leakage episodes."),
+    min_resolved: int = typer.Option(5, help="Minimum resolved sample for hypothesis conclusions."),
+    format: str = typer.Option("json", help="Output format: json."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    ledger = EpisodeLedger(ledger_path)
+    payload = build_hypothesis_report(
+        ledger,
+        since=since,
+        include_high_leakage=include_high_leakage,
+        min_resolved=min_resolved,
+    )
+    console.print_json(data=payload)
 
 
 @app.command()

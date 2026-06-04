@@ -266,6 +266,35 @@ def create_market_analyst(llm, toolkit):
         tool_result_cache = {}
         iteration_count = 0
 
+        def _execute_tool(tool_name: str, tool_args: dict) -> str:
+            tool_fn = next((t for t in tools if t.name == tool_name), None)
+            if tool_fn is None:
+                tool_result = f"Tool '{tool_name}' not found."
+                print(f"[MARKET] ⚠️ {tool_result}")
+                return tool_result
+
+            call_signature = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, default=str)}"
+            call_count = tool_call_counts.get(call_signature, 0) + 1
+            tool_call_counts[call_signature] = call_count
+
+            if call_signature in tool_result_cache:
+                return tool_result_cache[call_signature]
+            if call_count > max_same_call_repeats:
+                return (
+                    f"Skipped repeated tool call '{tool_name}' with identical arguments "
+                    f"after {max_same_call_repeats} execution(s). Reuse previous evidence."
+                )
+            try:
+                # LangChain Tool objects expose `.run` (string IO) as well as `.invoke` (dict/kwarg IO)
+                if hasattr(tool_fn, "invoke"):
+                    tool_result = tool_fn.invoke(tool_args)
+                else:
+                    tool_result = tool_fn.run(**tool_args)
+                tool_result_cache[call_signature] = str(tool_result)
+                return str(tool_result)
+            except Exception as tool_err:
+                return f"Error running tool '{tool_name}': {str(tool_err)}"
+
         # Handle iterative tool calls until the model stops requesting them
         while tools and getattr(result, "additional_kwargs", {}).get("tool_calls") and iteration_count < max_tool_iterations:
             iteration_count += 1
@@ -285,34 +314,7 @@ def create_market_analyst(llm, toolkit):
                     tool_name = getattr(tool_call, 'name', None)
                     tool_args = getattr(tool_call, 'args', {})
 
-                # Find the matching tool by name
-                tool_fn = next((t for t in tools if t.name == tool_name), None)
-
-                if tool_fn is None:
-                    tool_result = f"Tool '{tool_name}' not found."
-                    print(f"[MARKET] ⚠️ {tool_result}")
-                else:
-                    call_signature = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, default=str)}"
-                    call_count = tool_call_counts.get(call_signature, 0) + 1
-                    tool_call_counts[call_signature] = call_count
-
-                    if call_signature in tool_result_cache:
-                        tool_result = tool_result_cache[call_signature]
-                    elif call_count > max_same_call_repeats:
-                        tool_result = (
-                            f"Skipped repeated tool call '{tool_name}' with identical arguments "
-                            f"after {max_same_call_repeats} execution(s). Reuse previous evidence."
-                        )
-                    else:
-                        try:
-                            # LangChain Tool objects expose `.run` (string IO) as well as `.invoke` (dict/kwarg IO)
-                            if hasattr(tool_fn, "invoke"):
-                                tool_result = tool_fn.invoke(tool_args)
-                            else:
-                                tool_result = tool_fn.run(**tool_args)
-                            tool_result_cache[call_signature] = str(tool_result)
-                        except Exception as tool_err:
-                            tool_result = f"Error running tool '{tool_name}': {str(tool_err)}"
+                tool_result = _execute_tool(tool_name, tool_args)
 
                 # Preserve the original assistant message because DeepSeek thinking
                 # mode requires its reasoning_content to be passed back.
@@ -331,6 +333,24 @@ def create_market_analyst(llm, toolkit):
             messages_history.extend(tool_messages)
 
             # Ask the LLM to continue with the new context
+            result = chain.invoke(messages_history)
+
+        if sellthenews_options_available and not any(
+            sig.startswith("get_sellthenews_options_data:") for sig in tool_result_cache
+        ):
+            options_result = _execute_tool(
+                "get_sellthenews_options_data",
+                {"ticker": ticker, "curr_date": current_date, "greeks": "gamma"},
+            )
+            messages_history.append(
+                AIMessage(
+                    content=(
+                        "Additional options positioning context fetched because SellTheNews options are enabled "
+                        "and the model did not call the options tool before drafting.\n\n"
+                        + str(options_result)
+                    )
+                )
+            )
             result = chain.invoke(messages_history)
 
         if tools and getattr(result, "additional_kwargs", {}).get("tool_calls"):

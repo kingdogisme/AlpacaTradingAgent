@@ -106,6 +106,7 @@ class AlphaDiscoveryRepository:
                     executed_at TEXT NOT NULL,
                     ata_final_signal TEXT,
                     ata_confidence TEXT,
+                    plan_id TEXT,
                     PRIMARY KEY(candidate_id, run_id),
                     FOREIGN KEY(candidate_id) REFERENCES opportunity_candidates(candidate_id)
                 );
@@ -179,6 +180,12 @@ class AlphaDiscoveryRepository:
                 conn.execute("ALTER TABLE opportunity_candidates ADD COLUMN discovered_at TEXT")
             if "score_components_json" not in candidate_columns:
                 conn.execute("ALTER TABLE opportunity_candidates ADD COLUMN score_components_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "handoffs", "plan_id", "TEXT")
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def upsert_n8n_ingest_event(
         self,
@@ -689,19 +696,42 @@ class AlphaDiscoveryRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_handoffs(self, *, candidate_ids: list[str] | None = None, limit: int | None = 500) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if candidate_ids:
+            placeholders = ",".join("?" for _ in candidate_ids)
+            clauses.append(f"h.candidate_id IN ({placeholders})")
+            params.extend(candidate_ids)
+        query = """
+            SELECT h.*, c.ticker, c.tier, c.alpha_score
+            FROM handoffs h
+            JOIN opportunity_candidates c ON c.candidate_id=h.candidate_id
+        """
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY h.executed_at DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
     def upsert_handoff(self, handoff: Handoff) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO handoffs (
-                    candidate_id, run_id, status, executed_at, ata_final_signal, ata_confidence
+                    candidate_id, run_id, status, executed_at, ata_final_signal, ata_confidence, plan_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(candidate_id, run_id) DO UPDATE SET
                     status=excluded.status,
                     executed_at=excluded.executed_at,
                     ata_final_signal=excluded.ata_final_signal,
-                    ata_confidence=excluded.ata_confidence
+                    ata_confidence=excluded.ata_confidence,
+                    plan_id=COALESCE(excluded.plan_id, handoffs.plan_id)
                 """,
                 (
                     handoff.candidate_id,
@@ -710,6 +740,7 @@ class AlphaDiscoveryRepository:
                     handoff.executed_at,
                     handoff.ata_final_signal,
                     handoff.ata_confidence,
+                    handoff.plan_id,
                 ),
             )
 

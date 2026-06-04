@@ -18,7 +18,7 @@ from ..utils.report_context import (
 )
 from ..utils.structured import bind_structured, invoke_structured_or_freetext
 from tradingagents.dataflows.alpaca_utils import AlpacaUtils
-from tradingagents.trade_lifecycle import build_plan_from_final_state
+from tradingagents.trade_lifecycle import build_plan_from_final_state, latest_active_plan_review_context
 from tradingagents.portfolio import (
     build_decision_policy_context,
     build_portfolio_policy_context,
@@ -196,6 +196,18 @@ def create_risk_manager(llm, memory, config=None):
         sizing_guidance_context = build_sizing_guidance_context(config)
         decision_policy_context = build_decision_policy_context(config, horizon_context["horizon"])
         theme_basket_context = build_theme_basket_context(company_name, positions_data, account_info, config)
+        active_plan_reviews = state.get("active_plan_review", {}).get("reviews") or []
+        active_plan_review_context = state.get("active_plan_review", {}).get("context")
+        if not active_plan_review_context:
+            try:
+                reviews, active_plan_review_context = latest_active_plan_review_context(
+                    company_name,
+                    config=config,
+                    horizon=horizon_context["horizon"],
+                )
+                active_plan_reviews = [review.model_dump(mode="json") for review in reviews]
+            except Exception:
+                active_plan_review_context = "No active conditional trade plan context is available."
         # ---------------------------------------------------------
         # END NEW BLOCK
         # ---------------------------------------------------------
@@ -254,6 +266,7 @@ def create_risk_manager(llm, memory, config=None):
             decision_policy_context=decision_policy_context,
             theme_basket_context=theme_basket_context,
             sizing_guidance_context=sizing_guidance_context,
+            active_plan_review_context=active_plan_review_context,
             trader_plan=trader_plan,
             claim_matrix=claim_matrix,
             all_reports_text=all_reports_text,
@@ -319,6 +332,10 @@ def create_risk_manager(llm, memory, config=None):
             "trading_horizon": horizon_context["horizon"],
             "current_position": current_position,
             "recommended_action": extracted_recommendation,
+            "active_plan_review": {
+                "context": active_plan_review_context,
+                "reviews": active_plan_reviews,
+            },
         }
         try:
             plan = build_plan_from_final_state(

@@ -43,6 +43,36 @@ def test_critic_due_only_creates_diagnostic_memory_candidate(tmp_path: Path):
     assert ledger.resolved_reward_episodes_without_critic("v1") == []
 
 
+def test_critic_tags_over_conservative_hold_and_soft_gate_veto():
+    episode = {
+        "run_id": "run-hold",
+        "metadata": {"active_plan_review": {"reviews": [{"status": "met"}]}},
+        "decisions": [
+            {"stage": "trader", "action": "BUY", "raw_text": "**Action**: BUY"},
+            {
+                "stage": "final",
+                "action": "HOLD",
+                "raw_text": "Wait for a new trigger after breakout confirmation.\nFINAL TRANSACTION PROPOSAL: **HOLD**",
+            },
+        ],
+        "rewards": [
+            {
+                "reward_status": "resolved",
+                "oracle_label": "BUY",
+                "reward_scalar": -0.2,
+                "alpha_return": 0.08,
+            }
+        ],
+        "trace_spans": [{"span_id": "final_decision-0001", "span_type": "final_decision"}],
+    }
+
+    record = HeuristicCritic("v1").critique(episode)
+
+    assert "over_conservative_hold" in record.failure_tags
+    assert "soft_gate_over_veto" in record.failure_tags
+    assert "trigger_met_but_no_action" in record.failure_tags
+
+
 def test_export_jsonl_emits_joinable_records_without_raw_decision_text(tmp_path: Path):
     ledger = EpisodeLedger(tmp_path / "eval.sqlite")
     ledger.start_episode("run-1", "AAPL", "2026-01-02", {"online_tools": False}, ["market"])

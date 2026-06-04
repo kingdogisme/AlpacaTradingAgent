@@ -1,0 +1,20 @@
+{
+  "suite_id": "benchmark:golden_lifecycle:v1",
+  "description": "Golden lifecycle continuity cases. NBIS covers the 2026-05-30 breakout plan and the 2026-06-01 trigger review follow-up.",
+  "cases": [
+    {
+      "case_id": "golden-lifecycle:NBIS:2026-05-30:position",
+      "symbol": "NBIS",
+      "trade_date": "2026-05-30",
+      "horizon": "position",
+      "leakage_policy": "point_in_time"
+    },
+    {
+      "case_id": "golden-lifecycle:NBIS:2026-06-01:position",
+      "symbol": "NBIS",
+      "trade_date": "2026-06-01",
+      "horizon": "position",
+      "leakage_policy": "point_in_time"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Optional, Any
+import json
 
 from pydantic import BaseModel, Field
 
@@ -113,6 +114,13 @@ class RiskDecision(BaseModel):
     factor_scores: Optional[str] = Field(default=None, description="Horizon factor scores and weighted score.")
     gate_checks: Optional[str] = Field(default=None, description="Deterministic gate pass/fail checks.")
     sizing_calculation: Optional[str] = Field(default=None, description="Risk-to-invalidation sizing calculation.")
+    conditional_trade_plan: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Canonical structured conditional trade plan for monitor/validator execution. "
+            "Include symbol, action, trigger, invalidation, valid_until, risk_budget, max_notional, and execution_policy."
+        ),
+    )
 
 
 ZH_CN_LABELS = {
@@ -231,6 +239,8 @@ def render_risk_decision(decision: RiskDecision, output_language: str | None = N
         parts.extend(["", _field_line("user_recommendation", decision.user_recommendation, labels)])
     if decision.alpaca_action_plan:
         parts.extend(["", _field_line("alpaca_action_plan", decision.alpaca_action_plan, labels)])
+    if decision.conditional_trade_plan:
+        parts.extend(["", f"conditional_trade_plan_json: {json.dumps(decision.conditional_trade_plan, ensure_ascii=False, sort_keys=True)}"])
     parts.extend(
         [
             "",

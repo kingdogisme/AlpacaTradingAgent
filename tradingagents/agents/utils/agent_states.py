@@ -102,3 +102,7 @@ class AgentState(MessagesState):
         Dict[str, Any],
         "Risk-approved conditional trade plan for monitor/validator execution",
     ]
+    active_plan_review: Annotated[
+        Dict[str, Any],
+        "Review of active prior conditional plans for lifecycle continuity",
+    ]

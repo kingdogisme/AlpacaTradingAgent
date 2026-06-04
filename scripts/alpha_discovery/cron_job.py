@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from tradingagents.alpha_discovery import AlphaDiscoveryService
@@ -16,6 +17,7 @@ def main() -> int:
     parser.add_argument("--confirm-tier", default="B,C")
     parser.add_argument("--max-candidates", type=int, default=25)
     parser.add_argument("--max-symbols", type=int, default=6)
+    parser.add_argument("--execute", action="store_true", help="Actually run ATA for eligible candidates.")
     args = parser.parse_args()
 
     service = AlphaDiscoveryService(config=DEFAULT_CONFIG)
@@ -37,6 +39,13 @@ def main() -> int:
             flush=True,
         )
         return 1
+
+
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _run_job(service: AlphaDiscoveryService, args: argparse.Namespace):
@@ -70,10 +79,22 @@ def _run_job(service: AlphaDiscoveryService, args: argparse.Namespace):
         )
 
     if args.job == "run":
-        results = service.run_candidates(tier=args.tier, max_symbols=args.max_symbols, execute=False)
+        execute = args.execute or _env_bool("TRADINGAGENTS_ALPHA_DISCOVERY_CRON_EXECUTE", default=False)
+        graph_runner = None
+        if execute:
+            # Reuse the CLI ATA runner so cron records the same Alpha Discovery handoff metadata.
+            from cli.main import _TradingAgentsGraphRunner
+
+            graph_runner = _TradingAgentsGraphRunner(DEFAULT_CONFIG.copy())
+        results = service.run_candidates(
+            tier=args.tier,
+            max_symbols=args.max_symbols,
+            execute=execute,
+            graph_runner=graph_runner,
+        )
         return {
             "tier": args.tier,
-            "execute": False,
+            "execute": execute,
             "result_count": len(results),
             "run_status_counts": count_values(results, "run_status"),
             "candidates": [compact_candidate(row) for row in results],

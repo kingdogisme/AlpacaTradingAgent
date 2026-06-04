@@ -76,8 +76,15 @@ DEFAULT_RISK_OVERLAY_MULTIPLIERS: dict[str, float] = {
     "low": 1.0,
     "medium": 0.75,
     "high": 0.50,
-    "extreme": 0.0,
+    "extreme": 0.25,
     "momentum_crash": 0.50,
+}
+
+DEFAULT_SOFT_GATE_MULTIPLIERS: dict[str, float] = {
+    "weighted_score": 0.75,
+    "technical": 0.65,
+    "trend_theme": 0.70,
+    "valuation_fundamentals": 0.70,
 }
 
 
@@ -103,6 +110,7 @@ class GateResult:
     name: str
     passed: bool
     reason: str
+    severity: str = "hard"
 
 
 @dataclass(frozen=True)
@@ -146,11 +154,16 @@ class DecisionPolicyResult:
     recommended_action: str
     sizing_calculation: str
     risk_overlay: RiskOverlayResult
+    soft_gate_multiplier: float = 1.0
     validator_note: str = ""
 
     @property
     def gate_passed(self) -> bool:
         return all(gate.passed for gate in self.gate_results)
+
+    @property
+    def hard_gate_passed(self) -> bool:
+        return all(gate.passed for gate in self.gate_results if gate.severity == "hard")
 
 
 def _horizon_key(horizon: str | None) -> str:
@@ -217,19 +230,19 @@ def build_decision_policy_context(config: dict[str, Any] | None = None, horizon:
     weights = ", ".join(f"{name} {_pct(weight)}" for name, weight in policy.weights.items())
     ladder = policy.risk_budget_ladder
     if policy.horizon == "swing":
-        gate = "Gate Checks: data quality, actionability, invalidation, risk-to-invalidation, and technical confirmation. Bearish technical gate blocks BUY."
+        gate = "Hard Gates: data quality, actionability, invalidation, and risk-to-invalidation. Soft Gates: weighted score and technical confirmation adjust size/confidence instead of vetoing by default."
     elif policy.horizon == "position":
-        gate = "Gate Checks: data quality, actionability, invalidation, risk-to-invalidation, and at least two trend/theme confirmations. Cheap valuation alone cannot justify BUY."
+        gate = "Hard Gates: data quality, actionability, invalidation, and risk-to-invalidation. Soft Gates: weighted score and trend/theme confirmations adjust size/confidence instead of vetoing by default."
     else:
-        gate = "Gate Checks: data quality, actionability, invalidation, risk-to-invalidation, and valuation/fundamental support. Overvaluation plus extended trend becomes HOLD/watchlist."
+        gate = "Hard Gates: data quality, actionability, invalidation, and risk-to-invalidation. Soft Gates: weighted score and valuation/fundamental support adjust size/confidence instead of vetoing by default."
     return "\n".join(
         [
             f"Decision Policy: deterministic {policy.horizon} methodology.",
             f"Factor Weights: {weights}.",
             "Academic Countercheck: momentum works over intermediate horizons, but value/fundamental quality, crowding, and momentum-crash states must constrain sizing.",
             gate,
-            "Crowding Gate: price extension, abnormal volume/attention, social/options crowding, and same-theme exposure can reduce or block new risk.",
-            "Momentum Crash Gate: after market panic plus high volatility plus rebound, high-momentum extended names cannot receive full-size BUY risk.",
+            "Crowding Gate: price extension, abnormal volume/attention, social/options crowding, and same-theme exposure reduce risk by default; hard block only when configured.",
+            "Momentum Crash Gate: after market panic plus high volatility plus rebound, high-momentum extended names receive reduced risk by default; hard block only when configured.",
             "Sizing Calculation: choose allowed_risk_pct from gate quality before notional sizing.",
             (
                 "Risk Budget Ladder: blocked "
@@ -258,8 +271,11 @@ def evaluate_decision_policy(
     scores = _normalize_factor_scores(policy, factor_scores or _infer_factor_scores(policy.horizon, evidence_text))
     weighted_score = round(sum(item.contribution for item in scores), 3)
     gate_results = _evaluate_gates(policy, scores, evidence_text, entry_price, invalidation_price)
-    gate_passed = all(gate.passed for gate in gate_results)
-    risk_bucket, base_allowed_risk_pct = _risk_budget_for(policy, weighted_score, gate_passed)
+    dynamic_soft_gates = _bool_config(config, "decision_policy_dynamic_soft_gates_enabled", True)
+    hard_gate_passed = all(gate.passed for gate in gate_results if gate.severity == "hard")
+    effective_gate_passed = hard_gate_passed if dynamic_soft_gates else all(gate.passed for gate in gate_results)
+    risk_bucket, base_allowed_risk_pct = _risk_budget_for(policy, weighted_score, effective_gate_passed)
+    soft_gate_multiplier = _soft_gate_multiplier(config, gate_results) if dynamic_soft_gates else 1.0
     risk_overlay = evaluate_risk_overlays(
         config=config,
         horizon=policy.horizon,
@@ -268,7 +284,7 @@ def evaluate_decision_policy(
         overlay_inputs=overlay_inputs,
         theme_remaining_notional_pct=theme_remaining_notional_pct,
     )
-    allowed_risk_pct = round(base_allowed_risk_pct * risk_overlay.risk_multiplier, 6)
+    allowed_risk_pct = round(base_allowed_risk_pct * soft_gate_multiplier * risk_overlay.risk_multiplier, 6)
     sizing = _sizing_text(
         config=config,
         entry_price=entry_price,
@@ -278,9 +294,11 @@ def evaluate_decision_policy(
     )
     recommended_action = str(proposed_action or "HOLD").upper()
     note = ""
-    if recommended_action in {"BUY", "LONG"} and (not gate_passed or risk_overlay.blocked_reason):
+    if recommended_action in {"BUY", "LONG"} and (not effective_gate_passed or risk_overlay.blocked_reason):
         recommended_action = "NEUTRAL" if recommended_action == "LONG" else "HOLD"
-        failed = ", ".join(gate.name for gate in gate_results if not gate.passed)
+        failed = ", ".join(
+            gate.name for gate in gate_results if not gate.passed and (not dynamic_soft_gates or gate.severity == "hard")
+        )
         if risk_overlay.blocked_reason:
             note = f"decision policy overlay blocked BUY ({risk_overlay.blocked_reason}); action downgraded"
         else:
@@ -303,6 +321,7 @@ def evaluate_decision_policy(
         recommended_action=recommended_action,
         sizing_calculation=sizing,
         risk_overlay=risk_overlay,
+        soft_gate_multiplier=soft_gate_multiplier,
         validator_note=note,
     )
 
@@ -328,10 +347,15 @@ def evaluate_risk_overlays(
         multiplier = min(multiplier, momentum.risk_multiplier)
 
     blocked: list[str] = []
-    if _bool_config(config, "crowding_gate_enabled", True) and crowding.blocked:
+    if (
+        _bool_config(config, "crowding_gate_enabled", True)
+        and _bool_config(config, "crowding_extreme_blocks", False)
+        and crowding.blocked
+    ):
         blocked.append("crowding_gate=extreme")
     if (
         _bool_config(config, "momentum_crash_gate_enabled", True)
+        and _bool_config(config, "momentum_crash_blocks", False)
         and momentum.blocked
         and horizon in {"position", "trend"}
         and weighted_score < 0.76
@@ -352,7 +376,7 @@ def render_decision_policy_result(result: DecisionPolicyResult) -> str:
         for item in result.factor_scores
     )
     gates = "; ".join(
-        f"{gate.name}={'PASS' if gate.passed else 'FAIL'} ({gate.reason})" for gate in result.gate_results
+        f"{gate.name}={'PASS' if gate.passed else 'FAIL'}[{gate.severity}] ({gate.reason})" for gate in result.gate_results
     )
     return "\n".join(
         [
@@ -367,6 +391,7 @@ def render_decision_policy_result(result: DecisionPolicyResult) -> str:
             (
                 f"Sizing 计算: risk_bucket={result.risk_bucket}; "
                 f"base_allowed_risk_pct={_pct(result.base_allowed_risk_pct)}; "
+                f"soft_gate_multiplier={result.soft_gate_multiplier:.2f}; "
                 f"risk_multiplier={result.risk_overlay.risk_multiplier:.2f}; "
                 f"allowed_risk_pct={_pct(result.allowed_risk_pct)}; {result.sizing_calculation}"
             ),
@@ -407,6 +432,7 @@ def _evaluate_gates(
             "weighted_score",
             weighted >= policy.gate_thresholds.get("min_weighted_score", 0.60),
             f"weighted score {weighted:.3f} must meet threshold",
+            "soft",
         ),
     ]
     if policy.horizon == "swing":
@@ -416,6 +442,7 @@ def _evaluate_gates(
                 "technical",
                 technical >= policy.gate_thresholds.get("min_technical_score", 0.5) and "technical bearish" not in text,
                 "technical confirmation must not be bearish",
+                "soft",
             )
         )
     elif policy.horizon == "position":
@@ -425,6 +452,7 @@ def _evaluate_gates(
                 "trend_theme",
                 confirmations >= int(policy.gate_thresholds.get("min_trend_confirmations", 2)),
                 f"{confirmations} trend/theme confirmations detected",
+                "soft",
             )
         )
     elif policy.horizon == "trend":
@@ -436,6 +464,7 @@ def _evaluate_gates(
                 "valuation_fundamentals",
                 not (valuation <= policy.gate_thresholds.get("max_valuation_score_without_support", 0.35) and fundamentals < 0.65 and extended),
                 "high valuation requires fundamental support",
+                "soft",
             )
         )
     return gates
@@ -445,11 +474,23 @@ def _risk_budget_for(policy: HorizonFactorPolicy, weighted_score: float, gate_pa
     ladder = policy.risk_budget_ladder
     if not gate_passed:
         return "blocked", ladder["blocked"]
+    quality_floor = policy.gate_thresholds.get("min_weighted_score", 0.60) * 0.75
+    if weighted_score < quality_floor:
+        return "blocked", ladder["blocked"]
     if weighted_score >= 0.76:
         return "confirmed_leader", ladder["confirmed_leader_max"]
     if weighted_score >= 0.64:
         return "valid_starter", ladder["valid_starter_max"]
     return "weak", ladder["weak_max"]
+
+
+def _soft_gate_multiplier(config: dict[str, Any] | None, gates: list[GateResult]) -> float:
+    multipliers = _flat_config_map(config, "soft_gate_multipliers", DEFAULT_SOFT_GATE_MULTIPLIERS)
+    value = 1.0
+    for gate in gates:
+        if gate.severity == "soft" and not gate.passed:
+            value *= multipliers.get(gate.name, 0.75)
+    return round(max(value, _float_config(config, "minimum_soft_gate_multiplier", 0.25)), 3)
 
 
 def _sizing_text(

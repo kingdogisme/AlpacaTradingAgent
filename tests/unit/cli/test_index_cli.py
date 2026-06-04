@@ -82,3 +82,29 @@ def test_index_cli_json_contracts(tmp_path: Path, monkeypatch):
     assert run_payload["records"][0]["quality_status"] == "fail"
     assert quality_payload["records"][0]["artifact_ref"] == "tool_call:1"
     assert pack_payload["summary"]["quality_status"] == "fail"
+
+
+def test_run_index_filters_by_final_action(tmp_path: Path, monkeypatch):
+    db_path = _seed_cli_run(tmp_path)
+    monkeypatch.setitem(cli_main.DEFAULT_CONFIG, "episode_ledger_path", str(db_path))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["run-index", "--action", "BUY", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["summary"]["records"] == 1
+    assert payload["records"][0]["final_action"] == "BUY"
+
+
+def test_buy_runs_cli_lists_buy_cases(tmp_path: Path, monkeypatch):
+    db_path = _seed_cli_run(tmp_path)
+    monkeypatch.setitem(cli_main.DEFAULT_CONFIG, "episode_ledger_path", str(db_path))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["buy-runs", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["summary"]["final_action"] == "BUY"
+    assert payload["records"][0]["run_id"] == "run-cli"

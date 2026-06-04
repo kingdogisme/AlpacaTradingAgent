@@ -65,7 +65,7 @@ flowchart LR
     RiskRoundOne["Parallel Risk Round 1<br/>optional"]:::agent
     RiskDebate["Risk Debate<br/>Risky/Safe/Neutral loop"]:::agent
     RiskJudge["Risk Judge<br/>final decision"]:::agent
-    FinalDecision["Final Decision<br/>BUY/HOLD/SELL or LONG/NEUTRAL/SHORT"]:::decision
+    FinalDecision["Final Decision<br/>text + structured conditional plan"]:::decision
 
     TAGraph --> InitialState --> ParallelAnalysts --> ReportContext
     ReportContext --> ResearchDebate --> ResearchManager --> Trader
@@ -108,10 +108,13 @@ flowchart LR
     Reports["Reports / JSONL Export<br/>offline learning dataset"]:::eval
   end
 
-  subgraph Execution["OPTIONAL EXECUTION ADAPTER"]
+  subgraph TradeLifecycle["TRADE LIFECYCLE"]
     direction TB
-    ExecutionGate["Execution Gate<br/>trade-after-analyze + trend guard"]:::exec
-    AlpacaOrders["Alpaca Orders<br/>paper/live when enabled"]:::exec
+    ConditionalPlan["ConditionalTradePlan<br/>trigger + invalidation + risk budget"]:::exec
+    TradeLifecycleDB["Trade Lifecycle SQLite<br/>plans, events, validations"]:::exec
+    TradeMonitor["TradeMonitorService<br/>poll active plans"]:::exec
+    PreTradeValidator["PreTradeValidator<br/>paper-only risk check"]:::exec
+    AlpacaOrders["Alpaca Orders<br/>paper execution only"]:::exec
     AccountPanel["Positions / Orders UI<br/>account review"]:::exec
   end
 
@@ -176,8 +179,11 @@ flowchart LR
   Critic --> Reports
   GovernedMemory --> Reports
 
-  FinalDecision --> ExecutionGate
-  ExecutionGate --> AlpacaOrders
+  FinalDecision --> ConditionalPlan
+  ConditionalPlan --> TradeLifecycleDB
+  TradeLifecycleDB --> TradeMonitor
+  TradeMonitor --> PreTradeValidator
+  PreTradeValidator --> AlpacaOrders
   AlpacaOrders --> AccountPanel
 
   classDef entry fill:#24324a,stroke:#5f8fd3,stroke-width:2px,color:#f2f2f2;
@@ -241,6 +247,11 @@ flowchart TD
   Safe --> Neutral
   Neutral --> RiskLoop
   RiskJudge --> Final["final_trade_decision<br/>recommended_action + horizon + mode"]
+  Final --> TradePlan["conditional_trade_plan<br/>approved trigger + invalidation + risk budget"]
+  TradePlan --> LifecycleDB["trade_lifecycle SQLite"]
+  LifecycleDB --> Monitor["TradeMonitorService"]
+  Monitor --> Validator["PreTradeValidator"]
+  Validator --> PaperOrder["Alpaca paper order only"]
   Final --> End([END])
 ```
 

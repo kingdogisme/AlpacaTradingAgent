@@ -1,0 +1,15 @@
+[Unit]
+Description=TradingAgents trade monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/workspace/sde/AlpacaTradingAgent
+EnvironmentFile=-/home/ubuntu/workspace/sde/AlpacaTradingAgent/.env
+ExecStart=/home/ubuntu/workspace/sde/AlpacaTradingAgent/.venv/bin/python -m cli.main trade-monitor --interval-seconds 60
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

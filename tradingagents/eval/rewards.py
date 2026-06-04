@@ -141,6 +141,34 @@ def pnl_reward_for(action: str | None, return_used: float, band: float, cost_bps
     return 0.0
 
 
+def counterfactual_rewards(
+    *,
+    final_action: str | None,
+    return_used: float,
+    band: float,
+    cost_bps: float,
+    trading_mode: str | None = None,
+    analyst_action: str | None = None,
+    risk_vetoed_action: str | None = None,
+    conditional_plan_action: str | None = None,
+) -> dict[str, dict[str, float | str | None]]:
+    buy_action = "LONG" if str(trading_mode or "").lower() == "trading" else "BUY"
+    scenarios = {
+        "final_action": final_action,
+        "buy_next_open": buy_action,
+        "follow_conditional_plan": conditional_plan_action or final_action,
+        "analyst_signal": analyst_action,
+        "risk_manager_veto": risk_vetoed_action,
+    }
+    return {
+        name: {
+            "action": action,
+            "pnl_reward": pnl_reward_for(action, return_used, band, cost_bps) if action else 0.0,
+        }
+        for name, action in scenarios.items()
+    }
+
+
 def clip_reward(value: float) -> float:
     return max(-1.0, min(1.0, value))
 
@@ -152,10 +180,12 @@ class RewardResolver:
         *,
         price_provider: PriceProvider | None = None,
         config: dict | None = None,
+        trade_repository=None,
     ):
         self.ledger = ledger
         self.price_provider = price_provider or YFinancePriceProvider()
         self.config = config or {}
+        self.trade_repository = trade_repository
         self.reward_version = self.config.get("eval_reward_version", "v1_directional_alpha")
 
     def score_due_episodes(self, *, as_of: str | None = None) -> list[RewardRecordV1]:
@@ -234,6 +264,18 @@ class RewardResolver:
             band,
             float(self.config.get("eval_transaction_cost_bps", 10)),
         )
+        cost_bps = float(self.config.get("eval_transaction_cost_bps", 10))
+        full_episode = self.ledger.load_episode(episode["run_id"]) or episode
+        counterfactuals = counterfactual_rewards(
+            final_action=episode.get("action"),
+            return_used=return_used,
+            band=band,
+            cost_bps=cost_bps,
+            trading_mode=mode,
+            analyst_action=_stage_action(full_episode, "trader") or _stage_action(full_episode, "research_manager"),
+            risk_vetoed_action=_risk_vetoed_action(full_episode),
+            conditional_plan_action=_conditional_plan_action(full_episode),
+        )
         reward_scalar = clip_reward((class_reward + pnl_reward) / 2.0)
 
         reward = RewardRecordV1(
@@ -252,7 +294,8 @@ class RewardResolver:
                 "return_used": return_used,
                 "neutral_band": band,
                 "benchmark": benchmark,
-                "transaction_cost_bps": float(self.config.get("eval_transaction_cost_bps", 10)),
+                "transaction_cost_bps": cost_bps,
+                "counterfactual_rewards": counterfactuals,
             },
             resolved_at=datetime.now(timezone.utc).isoformat(),
             data_source=type(self.price_provider).__name__,
@@ -266,3 +309,46 @@ class RewardResolver:
     @staticmethod
     def _mode_from_action(action: str | None) -> str:
         return "trading" if action in {"LONG", "NEUTRAL", "SHORT"} else "investment"
+
+
+def _stage_action(episode: dict, stage: str) -> str | None:
+    for decision in episode.get("decisions", []):
+        if decision.get("stage") == stage:
+            return decision.get("action")
+    return None
+
+
+def _risk_vetoed_action(episode: dict) -> str | None:
+    final = _stage_action(episode, "final")
+    trader = _stage_action(episode, "trader")
+    if final in {"HOLD", "NEUTRAL"} and trader in {"BUY", "LONG", "SELL", "SHORT"}:
+        return trader
+    return None
+
+
+def _conditional_plan_action(episode: dict) -> str | None:
+    run_id = episode.get("run_id")
+    config = episode.get("config") if isinstance(episode.get("config"), dict) else {}
+    action = _conditional_plan_action_from_trade_repository(run_id, config)
+    if action:
+        return action
+    metadata = episode.get("metadata") if isinstance(episode.get("metadata"), dict) else {}
+    plan = metadata.get("conditional_trade_plan") if isinstance(metadata.get("conditional_trade_plan"), dict) else {}
+    action = str(plan.get("action") or "").upper()
+    return action if action in {"BUY", "LONG", "SELL", "SHORT", "HOLD", "NEUTRAL"} else None
+
+
+def _conditional_plan_action_from_trade_repository(run_id: str | None, config: dict | None = None) -> str | None:
+    if not run_id:
+        return None
+    try:
+        from tradingagents.trade_lifecycle import TradePlanRepository
+
+        repository = TradePlanRepository((config or {}).get("trade_lifecycle_db_path"))
+        plan = repository.get_plan_by_source_run_id(run_id)
+    except Exception:
+        return None
+    if not plan:
+        return None
+    action = str(getattr(plan.action, "value", plan.action) or "").upper()
+    return action if action in {"BUY", "LONG", "SELL", "SHORT", "HOLD", "NEUTRAL"} else None

@@ -9,8 +9,8 @@ real Alpaca, LLM, news, or market-data calls.
 ## Test Pyramid
 
 - Unit tests: highest volume. Cover pure helpers, schemas, config precedence,
-  ticker conversion, agent state transitions, final action parsing, and UI/CLI
-  helper rendering.
+  ticker conversion, agent state transitions, final action parsing, trade
+  lifecycle plans/validators/monitor behavior, and UI/CLI helper rendering.
 - Mocked integration tests: exercise LangGraph setup and `TradingAgentsGraph`
   propagation with fake LLM clients, fake compiled graphs, temporary logs, and
   mocked checkpoints.
@@ -24,6 +24,9 @@ real Alpaca, LLM, news, or market-data calls.
 - Alpaca and market data: patch client factories or public helpers such as
   `AlpacaUtils.get_stock_data`, `get_latest_quote`, `place_market_order`, and
   `close_position`.
+- Trade lifecycle: use temporary SQLite paths, mocked market observations,
+  mocked account/position helpers, and mocked paper order helpers. Deterministic
+  tests must not call real Alpaca, LLM, or live market/news data.
 - News/search providers: patch discovery and tool outputs. Deterministic tests
   must not call `requests`, OpenAI web search, Finnhub, CoinDesk, Google News,
   Reddit, FRED, or yfinance unless the call itself is mocked.
@@ -34,6 +37,8 @@ real Alpaca, LLM, news, or market-data calls.
 
 - Install `requirements.txt`.
 - Run `python3 -m pytest tests/unit tests/integration/mocked -q`.
+- Run `python3 -m pytest tests/unit/trade_lifecycle -q` as the focused
+  lifecycle quality gate for monitor/validator changes.
 - Fail on unknown pytest markers or accidental external network access.
 - Do not require API keys in PR validation.
 
@@ -48,4 +53,3 @@ RUN_EXTERNAL_TESTS=1 python3 -m pytest tests/smoke -q
 
 Smoke tests should verify provider reachability and one minimal happy path, not
 duplicate deterministic unit coverage.
-

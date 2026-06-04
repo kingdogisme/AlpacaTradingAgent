@@ -1,0 +1,20 @@
+{
+  "suite_id": "benchmark:recent_real_runs:v1",
+  "description": "Template suite for recent real runs. Extend with fixed symbol/date/horizon cases from the episode ledger before collecting candidate variants.",
+  "cases": [
+    {
+      "case_id": "recent-real:NBIS:2026-05-30:position",
+      "symbol": "NBIS",
+      "trade_date": "2026-05-30",
+      "horizon": "position",
+      "leakage_policy": "point_in_time"
+    },
+    {
+      "case_id": "recent-real:NBIS:2026-06-01:position",
+      "symbol": "NBIS",
+      "trade_date": "2026-06-01",
+      "horizon": "position",
+      "leakage_policy": "point_in_time"
+    }
+  ]
+}

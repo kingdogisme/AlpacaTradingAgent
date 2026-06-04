@@ -122,6 +122,12 @@ The main evaluation records are:
 Useful commands:
 
 ```bash
+# AI-agent navigation map and default debug path.
+python -m cli.main agent-map --format json
+python -m cli.main run-index --run-id <run_id> --format json
+python -m cli.main quality-index --run-id <run_id> --format json
+python -m cli.main retrieval-pack --type risk_review --run-id <run_id> --format json
+
 # Collect historical low-leakage episodes. Live web/news tools are disabled by default.
 python -m tradingagents.eval collect \
   --symbols AAPL,MSFT \
@@ -148,6 +154,10 @@ python -m tradingagents.eval export \
   --since 2026-01-01 \
   --output eval_export.jsonl
 ```
+
+For debugging, prefer `run-index -> quality-index -> retrieval-pack -> raw audit
+excerpt`. Raw audit JSON remains the source of truth, but it is intentionally
+not the first surface for AI agents or routine developer inspection.
 
 See [docs/evolution-roadmap.md](docs/evolution-roadmap.md) for the full roadmap
 from evaluation foundation to Memory V2, critic pipelines, strategy libraries,

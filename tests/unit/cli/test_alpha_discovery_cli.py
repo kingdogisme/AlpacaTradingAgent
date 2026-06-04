@@ -27,8 +27,11 @@ def test_record_ad_handoff_for_ticker_uses_dict_rows(tmp_path):
         run_id="run-fig",
         final_signal="HOLD",
         confidence="medium",
+        plan_id="tp_fig",
         config={"alpha_discovery_db_path": str(db_path)},
     )
 
     assert candidate_id == "batch-1-fig"
-    assert repo.recent_handoffs("FIG", since_iso="2026-05-13T00:00:00Z")[0]["run_id"] == "run-fig"
+    handoff = repo.recent_handoffs("FIG", since_iso="2026-05-13T00:00:00Z")[0]
+    assert handoff["run_id"] == "run-fig"
+    assert handoff["plan_id"] == "tp_fig"

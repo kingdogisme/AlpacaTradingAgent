@@ -163,6 +163,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "confirmed_leader_max": 0.025,
     },
     "minimum_executable_notional_pct": 0.02,
+    "decision_policy_dynamic_soft_gates_enabled": True,
+    "soft_gate_multipliers": {
+        "weighted_score": 0.75,
+        "technical": 0.65,
+        "trend_theme": 0.70,
+        "valuation_fundamentals": 0.70,
+    },
+    "minimum_soft_gate_multiplier": 0.25,
     "trade_lifecycle_default_notional": float(os.getenv("TRADINGAGENTS_TRADE_LIFECYCLE_DEFAULT_NOTIONAL", "1000")),
     "trade_lifecycle_max_gap_pct": float(os.getenv("TRADINGAGENTS_TRADE_LIFECYCLE_MAX_GAP_PCT", "0.08")),
     "trade_lifecycle_min_volume_ratio": None,
@@ -170,6 +178,20 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "trade_lifecycle_debounce_observations": 1,
     "trade_lifecycle_hysteresis_pct": 0.0,
     "trade_lifecycle_valid_days": None,
+    "trade_monitor_respect_market_hours": os.getenv("TRADINGAGENTS_TRADE_MONITOR_RESPECT_MARKET_HOURS", "true").lower()
+    in ("1", "true", "yes", "on"),
+    "trade_monitor_use_alpaca_clock": os.getenv("TRADINGAGENTS_TRADE_MONITOR_USE_ALPACA_CLOCK", "true").lower()
+    in ("1", "true", "yes", "on"),
+    "trade_monitor_heartbeat_stale_seconds": int(os.getenv("TRADINGAGENTS_TRADE_MONITOR_HEARTBEAT_STALE_SECONDS", "600")),
+    "trade_monitor_review_webhook_url": os.getenv("TRADINGAGENTS_TRADE_MONITOR_REVIEW_WEBHOOK_URL", ""),
+    "trade_monitor_webhook_timeout_seconds": float(os.getenv("TRADINGAGENTS_TRADE_MONITOR_WEBHOOK_TIMEOUT_SECONDS", "5")),
+    "trade_monitor_review_im_channel": os.getenv("TRADINGAGENTS_TRADE_MONITOR_REVIEW_IM_CHANNEL", ""),
+    "trade_monitor_review_im_account": os.getenv("TRADINGAGENTS_TRADE_MONITOR_REVIEW_IM_ACCOUNT", ""),
+    "trade_monitor_review_im_target": os.getenv("TRADINGAGENTS_TRADE_MONITOR_REVIEW_IM_TARGET", ""),
+    "trade_monitor_openclaw_bin": os.getenv("TRADINGAGENTS_TRADE_MONITOR_OPENCLAW_BIN", "openclaw"),
+    "trade_monitor_openclaw_timeout_seconds": float(
+        os.getenv("TRADINGAGENTS_TRADE_MONITOR_OPENCLAW_TIMEOUT_SECONDS", "10")
+    ),
     "crowding_gate_enabled": True,
     "momentum_crash_gate_enabled": True,
     "crowding_thresholds": {
@@ -199,9 +221,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "low": 1.0,
         "medium": 0.75,
         "high": 0.50,
-        "extreme": 0.0,
+        "extreme": 0.25,
         "momentum_crash": 0.50,
     },
+    "crowding_extreme_blocks": False,
+    "momentum_crash_blocks": False,
     "theme_map": {
         "BE": "ai_power_infrastructure",
         "VRT": "ai_power_infrastructure",
@@ -288,6 +312,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "alpha_discovery_full_ata_cooldown_hours": 24,
     "alpha_discovery_max_full_ata_runs_per_day": 5,
     "alpha_discovery_default_ata_daily_budget": 5,
+    "alpha_discovery_auto_run_a_list": os.getenv(
+        "TRADINGAGENTS_ALPHA_DISCOVERY_AUTO_RUN_A_LIST",
+        "true",
+    ).strip().lower()
+    in {"1", "true", "yes", "on"},
+    "alpha_discovery_ata_horizon": os.getenv("TRADINGAGENTS_ALPHA_DISCOVERY_ATA_HORIZON", "position"),
+    "alpha_discovery_ata_trading_mode": os.getenv("TRADINGAGENTS_ALPHA_DISCOVERY_ATA_TRADING_MODE", "investment"),
+    "alpha_discovery_ata_analysts": os.getenv(
+        "TRADINGAGENTS_ALPHA_DISCOVERY_ATA_ANALYSTS",
+        "market,fundamentals,news,social,macro",
+    ),
     "alpha_discovery_confirmation_enabled": True,
     "alpha_discovery_news_confirmation_enabled": True,
     "alpha_discovery_search_news_confirmation_enabled": False,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from urllib.parse import urlencode, urlparse, urlunparse
 
@@ -55,29 +56,55 @@ class SellTheNewsClient:
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
         }
-        try:
-            response = requests.post(
-                self.base_url,
-                json=payload,
-                headers=headers,
-                timeout=self.timeout_seconds,
-            )
-        except requests.RequestException as exc:
-            raise SellTheNewsUnavailable(str(exc)) from exc
+        attempts = 2
+        last_error: SellTheNewsError | None = None
+        for attempt in range(attempts):
+            try:
+                response = requests.post(
+                    self.base_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                )
+            except requests.RequestException as exc:
+                last_error = SellTheNewsUnavailable(str(exc))
+                if attempt + 1 < attempts:
+                    time.sleep(0.25)
+                    continue
+                raise last_error from exc
 
-        if response.status_code != 200:
-            raise SellTheNewsUnavailable(f"HTTP {response.status_code}: {response.text[:300]}")
+            if response.status_code != 200:
+                last_error = SellTheNewsUnavailable(f"HTTP {response.status_code}: {response.text[:300]}")
+                if attempt + 1 < attempts and response.status_code in {408, 429, 500, 502, 503, 504}:
+                    time.sleep(0.25)
+                    continue
+                raise last_error
 
-        data = decode_mcp_response(response)
-        if not isinstance(data, dict):
-            raise SellTheNewsBadResponse("response root must be an object")
-        if data.get("error"):
-            raise SellTheNewsUnavailable(str(data["error"]))
+            try:
+                data = decode_mcp_response(response)
+            except SellTheNewsBadResponse as exc:
+                excerpt = " ".join(response.text.split())[:500]
+                last_error = SellTheNewsBadResponse(f"{exc}; raw_excerpt={excerpt!r}")
+                if attempt + 1 < attempts:
+                    time.sleep(0.25)
+                    continue
+                raise last_error from exc
 
-        text = extract_text(data.get("result"))
-        if not text.strip():
-            raise SellTheNewsBadResponse("response contained no readable content")
-        return text.strip()
+            if not isinstance(data, dict):
+                raise SellTheNewsBadResponse("response root must be an object")
+            if data.get("error"):
+                raise SellTheNewsUnavailable(str(data["error"]))
+
+            text = extract_text(data.get("result"))
+            if not text.strip():
+                last_error = SellTheNewsBadResponse("response contained no readable content")
+                if attempt + 1 < attempts:
+                    time.sleep(0.25)
+                    continue
+                raise last_error
+            return text.strip()
+
+        raise last_error or SellTheNewsUnavailable("SellTheNews request failed")
 
     def get_options_chain(
         self,
@@ -114,6 +141,47 @@ class SellTheNewsClient:
         return data
 
 
+def _escape_unescaped_control_chars_in_json_strings(text: str) -> str:
+    """Return JSON text with raw control chars inside strings escaped.
+
+    Some SellTheNews SSE responses arrive as one `data:` JSON payload but contain
+    literal line breaks inside the nested MCP text field instead of JSON-escaped
+    `\\n` sequences or repeated SSE `data:` continuation prefixes. The payload is
+    still structurally recoverable: escaping only control characters observed
+    while inside a JSON string restores valid JSON without changing delimiters.
+    """
+    out: list[str] = []
+    in_string = False
+    escaping = False
+    for char in text:
+        if escaping:
+            out.append(char)
+            escaping = False
+            continue
+        if char == "\\" and in_string:
+            out.append(char)
+            escaping = True
+            continue
+        if char == '"':
+            out.append(char)
+            in_string = not in_string
+            continue
+        if in_string and char == "\n":
+            out.append("\\n")
+            continue
+        if in_string and char == "\r":
+            out.append("\\r")
+            continue
+        if in_string and char == "\t":
+            out.append("\\t")
+            continue
+        if in_string and ord(char) < 0x20:
+            out.append(f"\\u{ord(char):04x}")
+            continue
+        out.append(char)
+    return "".join(out)
+
+
 def decode_mcp_response(response: requests.Response) -> dict[str, Any]:
     content_type = (response.headers.get("content-type") or "").lower()
     body = response.text.strip()
@@ -140,17 +208,42 @@ def decode_mcp_response(response: requests.Response) -> dict[str, Any]:
         if not events:
             raise SellTheNewsBadResponse("event-stream response contained no data payload")
         parse_error: ValueError | None = None
+        decoder = json.JSONDecoder()
         for raw in events:
             if not raw or raw == "[DONE]":
                 continue
-            try:
-                decoded = json.loads(raw)
-            except ValueError as exc:
-                parse_error = exc
-                continue
-            if not isinstance(decoded, dict):
-                raise SellTheNewsBadResponse("event-stream payload root must be an object")
-            return decoded
+            candidates = [raw]
+            first_brace = raw.find("{")
+            if first_brace > 0:
+                candidates.append(raw[first_brace:])
+            last_brace = raw.rfind("}")
+            if first_brace >= 0 and last_brace > first_brace:
+                candidates.append(raw[first_brace : last_brace + 1])
+            for candidate in candidates:
+                parse_candidates = [candidate]
+                escaped_candidate = _escape_unescaped_control_chars_in_json_strings(candidate)
+                if escaped_candidate != candidate:
+                    parse_candidates.append(escaped_candidate)
+                decoded = None
+                for parse_candidate in parse_candidates:
+                    try:
+                        decoded = json.loads(parse_candidate)
+                        break
+                    except ValueError as exc:
+                        parse_error = exc
+                        try:
+                            decoded, _ = decoder.raw_decode(parse_candidate.lstrip())
+                            break
+                        except ValueError as raw_exc:
+                            parse_error = raw_exc
+                            decoded = None
+                            continue
+                if decoded is None:
+                    continue
+                if not isinstance(decoded, dict):
+                    raise SellTheNewsBadResponse("event-stream payload root must be an object")
+                if "result" in decoded or "error" in decoded or "method" in decoded:
+                    return decoded
         raise SellTheNewsBadResponse("event-stream payload was not valid JSON") from parse_error
 
     try:

@@ -15,6 +15,8 @@ from .models import (
     CriticRecordV1,
     DecisionRecordV1,
     EpisodeRecord,
+    EvaluationOutcomeRecord,
+    EvaluationTargetRecord,
     ExperimentRecordV1,
     MemoryItemRecordV1,
     MemoryPromotionRecordV1,
@@ -30,22 +32,18 @@ from .models import (
 )
 
 
-TRACE_EVENT_TYPES = {
-    "prompt",
-    "llm_call",
-    "tool_call",
-    "agent_output",
-    "node_execution",
-    "node_error",
-}
-
-MEMORY_ITEM_TYPES = {
-    "episodic",
-    "semantic_candidate",
-    "procedural_candidate",
-    "asset_profile_candidate",
-    "data_quality_candidate",
-}
+from .ledger_records import json_dump as _json_dump, json_load as _json_load
+from .ledger_schema import SCHEMA_SQL, apply_schema_migrations
+from .ledger_trace import (
+    MEMORY_ITEM_TYPES,
+    TRACE_EVENT_TYPES,
+    _event_agent_name,
+    _event_metadata,
+    _event_node_name,
+    _flatten_json_lists,
+    _safe_span_token,
+    _token_estimate,
+)
 
 
 def default_ledger_path() -> Path:
@@ -54,19 +52,6 @@ def default_ledger_path() -> Path:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _json_dump(value: Any) -> str:
-    return json.dumps(value if value is not None else {}, sort_keys=True, ensure_ascii=False)
-
-
-def _json_load(value: str | None, fallback: Any) -> Any:
-    if not value:
-        return fallback
-    try:
-        return json.loads(value)
-    except Exception:
-        return fallback
 
 
 def stable_config_hash(config: dict[str, Any]) -> str:
@@ -88,74 +73,6 @@ def stable_config_hash(config: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _safe_span_token(value: Any) -> str:
-    text = str(value or "unknown").strip().lower()
-    return "".join(char if char.isalnum() else "_" for char in text).strip("_") or "unknown"
-
-
-def _event_agent_name(event_type: str, payload: dict[str, Any]) -> str | None:
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    if payload.get("agent_name"):
-        return str(payload["agent_name"])
-    if payload.get("agent_type"):
-        return str(payload["agent_type"])
-    if metadata.get("agent_name"):
-        return str(metadata["agent_name"])
-    report_type = payload.get("report_type") or payload.get("output_type")
-    if report_type:
-        return str(report_type)
-    return None
-
-
-def _event_node_name(payload: dict[str, Any]) -> str | None:
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    return payload.get("node_name") or metadata.get("node_name")
-
-
-def _event_metadata(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    metadata: dict[str, Any] = {}
-    for key in (
-        "report_type",
-        "output_type",
-        "model",
-        "purpose",
-        "effort",
-        "verbosity",
-        "latency_seconds",
-        "input_chars",
-        "output_chars",
-        "execution_time_seconds",
-        "elapsed_seconds",
-        "retry_count",
-        "quality_details",
-        "error_details",
-        "error_message",
-    ):
-        if key in payload:
-            metadata[key] = payload.get(key)
-    if isinstance(payload.get("metadata"), dict):
-        metadata["event_metadata"] = payload["metadata"]
-    if event_type == "tool_call" and "inputs" in payload:
-        metadata["input_keys"] = sorted((payload.get("inputs") or {}).keys())
-    return metadata
-
-
-def _flatten_json_lists(value: Any) -> list[Any]:
-    if not isinstance(value, list):
-        return []
-    result: list[Any] = []
-    for item in value:
-        if isinstance(item, list):
-            result.extend(item)
-        else:
-            result.append(item)
-    return result
-
-
-def _token_estimate(value: Any) -> int:
-    return max(1, len(json.dumps(value or {}, ensure_ascii=False, default=str)) // 4)
-
-
 class EpisodeLedger:
     """SQLite-backed episode, decision, and reward index."""
 
@@ -171,362 +88,8 @@ class EpisodeLedger:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS episodes (
-                    run_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    config_json TEXT NOT NULL,
-                    selected_analysts_json TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    final_signal TEXT,
-                    audit_path TEXT,
-                    error_message TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_episodes_symbol_date ON episodes(symbol, trade_date);
-                CREATE INDEX IF NOT EXISTS idx_episodes_status ON episodes(status);
-
-                CREATE TABLE IF NOT EXISTS decisions (
-                    run_id TEXT NOT NULL,
-                    stage TEXT NOT NULL,
-                    agent_name TEXT NOT NULL,
-                    action TEXT,
-                    confidence TEXT,
-                    advisory_rating TEXT,
-                    trading_mode TEXT,
-                    horizon TEXT,
-                    thesis TEXT,
-                    invalidation TEXT,
-                    risk_budget TEXT,
-                    position_plan TEXT,
-                    raw_text TEXT NOT NULL,
-                    parser_status TEXT NOT NULL,
-                    parser_warnings_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(run_id, stage, agent_name),
-                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_decisions_action ON decisions(action);
-
-                CREATE TABLE IF NOT EXISTS rewards (
-                    run_id TEXT NOT NULL,
-                    reward_version TEXT NOT NULL,
-                    reward_status TEXT NOT NULL DEFAULT 'resolved',
-                    holding_days INTEGER NOT NULL,
-                    raw_return REAL,
-                    benchmark_return REAL,
-                    alpha_return REAL,
-                    oracle_label TEXT,
-                    classification_reward REAL,
-                    pnl_reward REAL,
-                    reward_scalar REAL,
-                    components_json TEXT NOT NULL,
-                    resolved_at TEXT NOT NULL,
-                    data_source TEXT NOT NULL,
-                    PRIMARY KEY(run_id, reward_version),
-                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS trace_spans (
-                    run_id TEXT NOT NULL,
-                    span_id TEXT NOT NULL,
-                    parent_span_id TEXT,
-                    span_type TEXT NOT NULL,
-                    agent_name TEXT,
-                    node_name TEXT,
-                    tool_name TEXT,
-                    started_at TEXT,
-                    ended_at TEXT,
-                    status TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    artifact_ref TEXT,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(run_id, span_id),
-                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_trace_spans_run_type ON trace_spans(run_id, span_type);
-
-                CREATE TABLE IF NOT EXISTS experiments (
-                    run_id TEXT PRIMARY KEY,
-                    experiment_id TEXT NOT NULL,
-                    config_hash TEXT NOT NULL,
-                    prompt_version TEXT NOT NULL,
-                    model_provider TEXT NOT NULL,
-                    quick_model TEXT NOT NULL,
-                    deep_model TEXT NOT NULL,
-                    selected_analysts_json TEXT NOT NULL,
-                    memory_policy TEXT NOT NULL,
-                    critic_version TEXT,
-                    reward_version TEXT,
-                    leakage_risk TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_experiments_hash ON experiments(config_hash);
-                CREATE INDEX IF NOT EXISTS idx_experiments_experiment_id ON experiments(experiment_id);
-
-                CREATE TABLE IF NOT EXISTS memory_items (
-                    memory_item_id TEXT PRIMARY KEY,
-                    memory_type TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    symbol TEXT,
-                    horizon TEXT,
-                    state TEXT,
-                    created_by TEXT,
-                    promotion_score REAL NOT NULL DEFAULT 0,
-                    last_evaluated_at TEXT,
-                    source_run_id TEXT,
-                    source_ref TEXT,
-                    evidence_json TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_memory_items_type_status ON memory_items(memory_type, status);
-                CREATE INDEX IF NOT EXISTS idx_memory_items_symbol_horizon ON memory_items(symbol, horizon);
-                CREATE INDEX IF NOT EXISTS idx_memory_items_state ON memory_items(state);
-
-                CREATE TABLE IF NOT EXISTS memory_links (
-                    memory_item_id TEXT NOT NULL,
-                    linked_type TEXT NOT NULL,
-                    linked_id TEXT NOT NULL,
-                    relation TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(memory_item_id, linked_type, linked_id, relation),
-                    FOREIGN KEY(memory_item_id) REFERENCES memory_items(memory_item_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS memory_retrievals (
-                    run_id TEXT NOT NULL,
-                    memory_item_id TEXT NOT NULL,
-                    stage TEXT NOT NULL,
-                    rank INTEGER NOT NULL,
-                    score REAL,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(run_id, memory_item_id, stage),
-                    FOREIGN KEY(run_id) REFERENCES episodes(run_id),
-                    FOREIGN KEY(memory_item_id) REFERENCES memory_items(memory_item_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_memory_retrievals_run ON memory_retrievals(run_id);
-
-                CREATE TABLE IF NOT EXISTS memory_promotions (
-                    memory_item_id TEXT NOT NULL,
-                    from_status TEXT NOT NULL,
-                    to_status TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    promoted_by TEXT NOT NULL,
-                    evidence_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(memory_item_id, to_status, created_at),
-                    FOREIGN KEY(memory_item_id) REFERENCES memory_items(memory_item_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS critic_records (
-                    run_id TEXT NOT NULL,
-                    critic_version TEXT NOT NULL,
-                    failure_tags_json TEXT NOT NULL,
-                    evidence_spans_json TEXT NOT NULL,
-                    reward_snapshot_json TEXT NOT NULL,
-                    reflection_text TEXT NOT NULL,
-                    improvement_candidates_json TEXT NOT NULL,
-                    parser_status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(run_id, critic_version),
-                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS run_index (
-                    index_id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL UNIQUE,
-                    symbol TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    horizon TEXT,
-                    status TEXT NOT NULL,
-                    final_action TEXT,
-                    confidence TEXT,
-                    advisory_rating TEXT,
-                    final_signal TEXT,
-                    prompt_version TEXT,
-                    config_hash TEXT,
-                    model_provider TEXT,
-                    quick_model TEXT,
-                    deep_model TEXT,
-                    selected_analysts_json TEXT NOT NULL,
-                    quality_status TEXT NOT NULL,
-                    quality_pass INTEGER NOT NULL,
-                    quality_warn INTEGER NOT NULL,
-                    quality_fail INTEGER NOT NULL,
-                    quality_unknown INTEGER NOT NULL,
-                    critical_failures_json TEXT NOT NULL,
-                    stale_sources_json TEXT NOT NULL,
-                    fallback_sources_json TEXT NOT NULL,
-                    flags_json TEXT NOT NULL,
-                    audit_ref TEXT,
-                    audit_path TEXT,
-                    decision_ref TEXT,
-                    quality_index_ref TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_run_index_symbol_date ON run_index(symbol, trade_date);
-                CREATE INDEX IF NOT EXISTS idx_run_index_horizon ON run_index(horizon);
-                CREATE INDEX IF NOT EXISTS idx_run_index_prompt ON run_index(prompt_version);
-                CREATE INDEX IF NOT EXISTS idx_run_index_config ON run_index(config_hash);
-                CREATE INDEX IF NOT EXISTS idx_run_index_quality ON run_index(quality_status);
-
-                CREATE TABLE IF NOT EXISTS quality_index (
-                    run_id TEXT NOT NULL,
-                    artifact_ref TEXT NOT NULL,
-                    tool_name TEXT,
-                    agent_type TEXT,
-                    source_id TEXT NOT NULL,
-                    provider TEXT,
-                    dataset_type TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    freshness TEXT NOT NULL,
-                    accuracy TEXT NOT NULL,
-                    completeness TEXT NOT NULL,
-                    criticality TEXT,
-                    flags_json TEXT NOT NULL,
-                    observed_at TEXT,
-                    source_age_days INTEGER,
-                    fallback_from TEXT,
-                    timestamp TEXT,
-                    inputs_json TEXT NOT NULL,
-                    output_preview TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(run_id, artifact_ref),
-                    FOREIGN KEY(run_id) REFERENCES episodes(run_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_quality_index_status ON quality_index(status);
-                CREATE INDEX IF NOT EXISTS idx_quality_index_source ON quality_index(source_id);
-                CREATE INDEX IF NOT EXISTS idx_quality_index_dataset ON quality_index(dataset_type);
-
-                CREATE TABLE IF NOT EXISTS retrieval_packs (
-                    pack_id TEXT PRIMARY KEY,
-                    pack_type TEXT NOT NULL,
-                    policy_version TEXT NOT NULL,
-                    run_id TEXT,
-                    symbol TEXT,
-                    horizon TEXT,
-                    token_budget INTEGER NOT NULL,
-                    source_refs_json TEXT NOT NULL,
-                    summary_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_retrieval_packs_type ON retrieval_packs(pack_type);
-                CREATE INDEX IF NOT EXISTS idx_retrieval_packs_run ON retrieval_packs(run_id);
-                CREATE INDEX IF NOT EXISTS idx_retrieval_packs_symbol_horizon ON retrieval_packs(symbol, horizon);
-
-                CREATE TABLE IF NOT EXISTS retrieval_pack_items (
-                    pack_id TEXT NOT NULL,
-                    item_id TEXT NOT NULL,
-                    item_type TEXT NOT NULL,
-                    rank INTEGER NOT NULL,
-                    reason TEXT NOT NULL,
-                    source_ref TEXT NOT NULL,
-                    token_estimate INTEGER NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(pack_id, item_id),
-                    FOREIGN KEY(pack_id) REFERENCES retrieval_packs(pack_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS quality_observations (
-                    run_id TEXT NOT NULL,
-                    artifact_ref TEXT NOT NULL,
-                    symbol TEXT,
-                    source_id TEXT NOT NULL,
-                    dataset_type TEXT NOT NULL,
-                    observation_type TEXT NOT NULL,
-                    observed_at TEXT,
-                    value_num REAL,
-                    unit TEXT,
-                    extraction_status TEXT NOT NULL,
-                    flags_json TEXT NOT NULL,
-                    source_ref TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(run_id, artifact_ref, observation_type)
-                );
-                CREATE INDEX IF NOT EXISTS idx_quality_observations_run ON quality_observations(run_id);
-                CREATE INDEX IF NOT EXISTS idx_quality_observations_symbol ON quality_observations(symbol, dataset_type);
-
-                CREATE TABLE IF NOT EXISTS quality_reconciliation (
-                    reconciliation_id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    symbol TEXT,
-                    dataset_type TEXT NOT NULL,
-                    check_type TEXT NOT NULL,
-                    primary_source TEXT,
-                    comparison_source TEXT,
-                    status TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    delta_pct REAL,
-                    flags_json TEXT NOT NULL,
-                    source_refs_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_quality_reconciliation_run ON quality_reconciliation(run_id);
-                CREATE INDEX IF NOT EXISTS idx_quality_reconciliation_status ON quality_reconciliation(status);
-
-                CREATE TABLE IF NOT EXISTS source_reliability (
-                    source_id TEXT NOT NULL,
-                    dataset_type TEXT NOT NULL,
-                    window_days INTEGER NOT NULL,
-                    quality_pass INTEGER NOT NULL,
-                    quality_warn INTEGER NOT NULL,
-                    quality_fail INTEGER NOT NULL,
-                    quality_unknown INTEGER NOT NULL,
-                    fallback_count INTEGER NOT NULL,
-                    stale_count INTEGER NOT NULL,
-                    critical_fail_count INTEGER NOT NULL,
-                    pass_rate REAL NOT NULL,
-                    fallback_rate REAL NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(source_id, dataset_type, window_days)
-                );
-                """
-            )
-            reward_columns = {
-                row["name"] for row in conn.execute("PRAGMA table_info(rewards)").fetchall()
-            }
-            if "reward_status" not in reward_columns:
-                conn.execute(
-                    "ALTER TABLE rewards ADD COLUMN reward_status TEXT NOT NULL DEFAULT 'resolved'"
-                )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_rewards_status ON rewards(reward_status)")
-            memory_columns = {
-                row["name"] for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()
-            }
-            memory_migrations = {
-                "symbol": "ALTER TABLE memory_items ADD COLUMN symbol TEXT",
-                "horizon": "ALTER TABLE memory_items ADD COLUMN horizon TEXT",
-                "state": "ALTER TABLE memory_items ADD COLUMN state TEXT",
-                "created_by": "ALTER TABLE memory_items ADD COLUMN created_by TEXT",
-                "promotion_score": "ALTER TABLE memory_items ADD COLUMN promotion_score REAL NOT NULL DEFAULT 0",
-                "last_evaluated_at": "ALTER TABLE memory_items ADD COLUMN last_evaluated_at TEXT",
-                "source_run_id": "ALTER TABLE memory_items ADD COLUMN source_run_id TEXT",
-                "source_ref": "ALTER TABLE memory_items ADD COLUMN source_ref TEXT",
-            }
-            for column, statement in memory_migrations.items():
-                if column not in memory_columns:
-                    conn.execute(statement)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_symbol_horizon ON memory_items(symbol, horizon)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_state ON memory_items(state)")
+            conn.executescript(SCHEMA_SQL)
+            apply_schema_migrations(conn)
 
     def start_episode(
         self,
@@ -808,6 +371,26 @@ class EpisodeLedger:
                 ),
             )
 
+    def upsert_evaluation_target(self, target: EvaluationTargetRecord) -> None:
+        from .targets import EvaluationTargetRepository
+
+        EvaluationTargetRepository(self).upsert_target(target)
+
+    def list_evaluation_targets(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        from .targets import EvaluationTargetRepository
+
+        return EvaluationTargetRepository(self).list_targets(filters)
+
+    def upsert_evaluation_outcome(self, outcome: EvaluationOutcomeRecord) -> None:
+        from .targets import EvaluationTargetRepository
+
+        EvaluationTargetRepository(self).upsert_outcome(outcome)
+
+    def list_evaluation_outcomes(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        from .targets import EvaluationTargetRepository
+
+        return EvaluationTargetRepository(self).list_outcomes(filters)
+
     def report_rows(
         self,
         *,
@@ -827,7 +410,8 @@ class EpisodeLedger:
                 e.metadata_json, e.final_signal, e.error_message,
                 d.action, d.trading_mode, d.horizon, d.confidence,
                 r.reward_version, r.reward_status, r.raw_return, r.benchmark_return, r.alpha_return,
-                r.oracle_label, r.classification_reward, r.pnl_reward, r.reward_scalar
+                r.oracle_label, r.classification_reward, r.pnl_reward, r.reward_scalar,
+                r.components_json AS reward_components_json
                 , x.experiment_id, x.config_hash, x.prompt_version, x.model_provider,
                 x.quick_model, x.deep_model, x.memory_policy, x.critic_version,
                 x.leakage_risk
@@ -870,6 +454,7 @@ class EpisodeLedger:
             item["critic_failure_tags"] = _flatten_json_lists(
                 _json_load(item.pop("critic_failure_tags_json", None), [])
             )
+            item["reward_components"] = _json_load(item.pop("reward_components_json", None), {})
             result.append(item)
         return result
 
@@ -1436,7 +1021,16 @@ class EpisodeLedger:
         filters = filters or {}
         clauses: list[str] = []
         params: list[Any] = []
-        for key in ("run_id", "symbol", "status", "horizon", "prompt_version", "config_hash"):
+        for key in (
+            "run_id",
+            "symbol",
+            "status",
+            "horizon",
+            "prompt_version",
+            "config_hash",
+            "final_action",
+            "final_signal",
+        ):
             if filters.get(key):
                 clauses.append(f"{key} = ?")
                 params.append(filters[key])

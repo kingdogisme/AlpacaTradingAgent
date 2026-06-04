@@ -26,9 +26,34 @@ def test_swing_technical_bearish_blocks_buy(isolated_config):
         invalidation_price=95,
     )
 
-    assert result.recommended_action == "HOLD"
+    assert result.recommended_action == "BUY"
     assert not result.gate_passed
+    assert result.hard_gate_passed
+    assert result.soft_gate_multiplier < 1.0
+    assert result.allowed_risk_pct > 0
     assert any(gate.name == "technical" and not gate.passed for gate in result.gate_results)
+
+
+def test_hard_actionability_gate_still_blocks_buy(isolated_config):
+    result = evaluate_decision_policy(
+        config=isolated_config,
+        horizon="swing",
+        proposed_action="BUY",
+        factor_scores={
+            "technical": 0.80,
+            "news_social_catalyst": 0.75,
+            "macro": 0.60,
+            "fundamentals_valuation": 0.70,
+            "portfolio_risk": 0.70,
+        },
+        evidence_text="wait for pullback or future breakout confirmation. invalidation at 95. risk-to-invalidation defined.",
+        entry_price=100,
+        invalidation_price=95,
+    )
+
+    assert result.recommended_action == "HOLD"
+    assert not result.hard_gate_passed
+    assert any(gate.name == "actionability" and not gate.passed for gate in result.gate_results)
 
 
 def test_position_strong_theme_allows_expensive_starter_but_reduces_sizing(isolated_config):
@@ -71,7 +96,9 @@ def test_trend_overvalued_without_fundamental_support_must_hold(isolated_config)
         invalidation_price=85,
     )
 
-    assert result.recommended_action == "HOLD"
+    assert result.recommended_action == "BUY"
+    assert result.hard_gate_passed
+    assert result.soft_gate_multiplier < 1.0
     assert any(gate.name == "valuation_fundamentals" and not gate.passed for gate in result.gate_results)
 
 
@@ -129,6 +156,7 @@ def test_momentum_crash_state_detects_panic_high_vol_rebound(isolated_config):
 
 
 def test_momentum_crash_blocks_high_momentum_buy_when_not_confirmed_leader(isolated_config):
+    isolated_config["momentum_crash_blocks"] = True
     result = evaluate_decision_policy(
         config=isolated_config,
         horizon="position",
@@ -156,6 +184,8 @@ def test_momentum_crash_blocks_high_momentum_buy_when_not_confirmed_leader(isola
 
 
 def test_crowding_extreme_downgrades_buy_to_hold(isolated_config):
+    isolated_config["crowding_extreme_blocks"] = True
+    isolated_config["risk_overlay_multipliers"] = {**isolated_config["risk_overlay_multipliers"], "extreme": 0.0}
     result = evaluate_decision_policy(
         config=isolated_config,
         horizon="position",
@@ -182,6 +212,36 @@ def test_crowding_extreme_downgrades_buy_to_hold(isolated_config):
     assert result.risk_overlay.crowding.level == "extreme"
     assert result.recommended_action == "HOLD"
     assert "crowding_gate=extreme" in result.risk_overlay.blocked_reason
+
+
+def test_crowding_extreme_reduces_size_without_blocking_by_default(isolated_config):
+    result = evaluate_decision_policy(
+        config=isolated_config,
+        horizon="position",
+        proposed_action="BUY",
+        factor_scores={
+            "trend_relative_strength": 0.90,
+            "catalyst_news_social": 0.86,
+            "fundamentals": 0.78,
+            "macro_liquidity": 0.66,
+            "valuation": 0.58,
+        },
+        evidence_text="relative strength catalyst breakout trend. invalidation at 95. current setup is actionable.",
+        overlay_inputs={
+            "price_vs_50d": 0.25,
+            "dollar_volume_20d_to_120d": 2.5,
+            "bullish_social_ratio": 0.80,
+            "mention_zscore": 2.5,
+            "call_put_oi_ratio": 3.0,
+        },
+        entry_price=100,
+        invalidation_price=95,
+    )
+
+    assert result.risk_overlay.crowding.level == "extreme"
+    assert result.recommended_action == "BUY"
+    assert result.risk_overlay.blocked_reason == ""
+    assert result.allowed_risk_pct == pytest.approx(result.base_allowed_risk_pct * 0.25)
 
 
 def test_crowding_high_reduces_risk_without_blocking_strong_setup(isolated_config):

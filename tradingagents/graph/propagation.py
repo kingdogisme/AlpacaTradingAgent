@@ -64,6 +64,7 @@ class Propagator:
             "macro_report": "",
             "report_context": {},
             "conditional_trade_plan": {},
+            "active_plan_review": {},
         }
 
     def get_graph_args(self) -> Dict[str, Any]:
