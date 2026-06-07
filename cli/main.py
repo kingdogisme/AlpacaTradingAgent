@@ -9,6 +9,8 @@ import typer
 from rich.console import Console
 
 import cli.legacy_main as legacy_main
+from cli.commands.robinhood import robinhood_login, robinhood_probe
+from cli.commands.trade_lifecycle import trade_plan_execute
 from tradingagents.alpha_discovery import AlphaDiscoveryService
 from tradingagents.alpha_discovery.reporting import compact_candidate, count_values
 from cli.legacy_main import *  # noqa: F401,F403 - preserve historical cli.main imports
@@ -263,6 +265,9 @@ for command_name, callback in [
     ("trade-monitor-preflight", trade_monitor_preflight),
     ("trade-plan-reconcile", trade_plan_reconcile),
     ("trade-plan-action", trade_plan_action),
+    ("trade-plan-execute", trade_plan_execute),
+    ("robinhood-login", robinhood_login),
+    ("robinhood-probe", robinhood_probe),
     ("cron-resolve", cron_resolve),
     ("basket-list", basket_list),
     ("basket-report", basket_report),

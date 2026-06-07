@@ -447,6 +447,20 @@ class TradePlanRepository:
             )
         )
 
+    def record_execution_result(self, plan_id: str, result: dict[str, Any]) -> None:
+        status = str(result.get("status") or "").lower()
+        event_type = "broker_review" if result.get("broker_response", {}).get("dry_run") else "order_result"
+        event_status = "ok" if status == "executed" else "error" if status == "rejected" else "waiting"
+        self.append_event(
+            TradePlanEvent(
+                plan_id=plan_id,
+                event_type=event_type,
+                status=event_status,
+                message=f"execution result: {status or 'unknown'}",
+                payload=result,
+            )
+        )
+
     def list_events(self, plan_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(

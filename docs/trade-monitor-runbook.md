@@ -1,7 +1,8 @@
 # Trade Monitor Runbook
 
 This monitor watches active conditional trade plans and moves matched plans to
-`needs_review`. It does not place paper or live orders in v1.
+`needs_review`. Broker order review/submission is a separate explicit step via
+`trade-plan-execute`.
 
 ## Required Infrastructure
 
@@ -70,6 +71,18 @@ Run outside regular hours for testing:
 python -m cli.main trade-monitor --once --no-regular-hours-only
 ```
 
+Review a triggered plan through a broker without submitting:
+
+```bash
+python -m cli.main trade-plan-execute --plan-id <plan_id> --broker robinhood --dry-run
+```
+
+Submit after explicit operator approval:
+
+```bash
+python -m cli.main trade-plan-execute --plan-id <plan_id> --broker robinhood --submit-order
+```
+
 OpenClaw Weixin notification example:
 
 ```bash
@@ -125,3 +138,6 @@ Health check example:
 - Review webhook is generic JSON POST. OpenClaw IM notification uses
   `openclaw message send` and records the command result in
   `trade_monitor_events`.
+- Robinhood MCP broker setup is documented in
+  `docs/robinhood-mcp-runbook.md`. Keep `ROBINHOOD_MCP_DRY_RUN=true` until the
+  order approval path is deliberately enabled.

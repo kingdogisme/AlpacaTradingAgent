@@ -7,7 +7,7 @@ from tradingagents.contracts import ExecutionResult
 from tradingagents.trade_lifecycle.models import ConditionalTradePlan, MarketObservation
 from tradingagents.trade_lifecycle.validator import PreTradeValidator
 
-from .broker import BrokerAdapter
+from .broker import BrokerAdapter, create_broker_router
 
 
 @dataclass
@@ -52,7 +52,28 @@ class ExecutionService:
         *,
         account_snapshot: dict[str, Any] | None = None,
         current_position: str | None = None,
+        broker_name: str | None = None,
+        dry_run: bool | None = None,
     ) -> ExecutionResult:
+        owns_broker = self.broker is None
+        broker = self.broker or create_broker_router(self.config or {})
+        effective_dry_run = True if dry_run is None and owns_broker else dry_run
+        broker_error: str | None = None
+        if account_snapshot is None and hasattr(broker, "get_account_snapshot"):
+            try:
+                account_snapshot = broker.get_account_snapshot(
+                    broker_name=broker_name,
+                    symbol=plan.symbol,
+                )
+            except ValueError as exc:
+                broker_error = str(exc)
+                account_snapshot = {}
+        if current_position is None and hasattr(broker, "get_current_position") and broker_error is None:
+            try:
+                current_position = broker.get_current_position(plan.symbol, broker_name=broker_name)
+            except ValueError as exc:
+                broker_error = str(exc)
+                current_position = "NEUTRAL"
         validation_result = self.validate(
             plan,
             observation,
@@ -61,21 +82,42 @@ class ExecutionService:
         )
         if not validation_result.validation_passed:
             return validation_result
-        if self.broker is None:
+        if broker is None:
             return validation_result.model_copy(
                 update={
                     "status": "needs_review",
                     "reason_codes": [*validation_result.reason_codes, "broker_adapter_missing"],
                 }
             )
+        if broker_error:
+            return validation_result.model_copy(
+                update={
+                    "status": "needs_review",
+                    "reason_codes": [*validation_result.reason_codes, "broker_adapter_unavailable"],
+                    "broker_response": {"success": False, "error": broker_error},
+                }
+            )
         policy = validation_result.order_request or {}
-        response = self.broker.execute_trading_action(
-            symbol=plan.symbol,
-            current_position=current_position or "NEUTRAL",
-            signal=plan.action.value,
-            dollar_amount=float(policy.get("notional") or plan.max_notional or 1000),
-            allow_shorts=bool(policy.get("allow_shorts")),
-        )
+        broker_kwargs = {
+            "symbol": plan.symbol,
+            "current_position": current_position or "NEUTRAL",
+            "signal": plan.action.value,
+            "dollar_amount": float(policy.get("notional") or plan.max_notional or 1000),
+            "allow_shorts": bool(policy.get("allow_shorts")),
+        }
+        if effective_dry_run is not None:
+            broker_kwargs["dry_run"] = effective_dry_run
+        if broker_name and hasattr(broker, "resolve_broker_name"):
+            broker_kwargs["broker_name"] = broker_name
+        response = broker.execute_trading_action(**broker_kwargs)
+        if response.get("success") and response.get("dry_run"):
+            return validation_result.model_copy(
+                update={
+                    "status": "needs_review",
+                    "broker_response": response,
+                    "reason_codes": [*validation_result.reason_codes, "broker_dry_run"],
+                }
+            )
         return validation_result.model_copy(
             update={
                 "status": "executed" if response.get("success") else "rejected",

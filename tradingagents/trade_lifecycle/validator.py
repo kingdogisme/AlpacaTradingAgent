@@ -46,9 +46,9 @@ class PreTradeValidator:
             reason_codes.append("live_account")
             reasons.append("live account auto execution is forbidden; alpaca_use_paper must be true")
 
-        if plan.status.value != "active":
+        if plan.status.value not in {"active", "needs_review", "triggered"}:
             reason_codes.append("invalid_status")
-            reasons.append(f"plan status is not active: {plan.status.value}")
+            reasons.append(f"plan status is not executable: {plan.status.value}")
         if observation.price <= 0:
             reason_codes.append("invalid_price")
             reasons.append("hard risk reject: no valid observed price")
@@ -269,6 +269,9 @@ def execute_validated_plan(
     *,
     config: dict[str, Any] | None = None,
     current_position: str | None = None,
+    broker_name: str | None = None,
+    broker: Any | None = None,
+    dry_run: bool | None = None,
 ) -> dict[str, Any]:
     if not validation.passed or validation.execution_policy is None:
         return {"success": False, "error": "validation did not approve execution"}
@@ -279,14 +282,25 @@ def execute_validated_plan(
     if side == "none":
         return {"success": True, "actions": [{"action": "hold", "message": "no broker order for HOLD/NEUTRAL plan"}]}
 
-    from tradingagents.dataflows.alpaca_utils import AlpacaUtils
+    if broker is None:
+        from tradingagents.execution import create_broker_router
 
-    result = AlpacaUtils.execute_trading_action(
-        symbol=plan.symbol,
-        current_position=current_position or AlpacaUtils.get_current_position_state(plan.symbol),
-        signal=plan.action.value,
-        dollar_amount=float(policy.notional or plan.max_notional or 1000),
-        allow_shorts=bool(policy.allow_shorts),
+        broker = create_broker_router(config or {})
+    if current_position is None and hasattr(broker, "get_current_position"):
+        current_position = broker.get_current_position(plan.symbol, broker_name=broker_name)
+    broker_kwargs = {
+        "symbol": plan.symbol,
+        "current_position": current_position or "NEUTRAL",
+        "signal": plan.action.value,
+        "dollar_amount": float(policy.notional or plan.max_notional or 1000),
+        "allow_shorts": bool(policy.allow_shorts),
+    }
+    if dry_run is not None:
+        broker_kwargs["dry_run"] = dry_run
+    if broker_name and hasattr(broker, "resolve_broker_name"):
+        broker_kwargs["broker_name"] = broker_name
+    result = broker.execute_trading_action(
+        **broker_kwargs,
     )
     result["client_order_id"] = policy.client_order_id
     result["idempotency_key"] = policy.idempotency_key

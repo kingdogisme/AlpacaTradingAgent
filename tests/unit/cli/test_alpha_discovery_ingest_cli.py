@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 import cli.main as cli_main
 from cli.main import app
-from tradingagents.trade_lifecycle import ConditionalTradePlan, TradePlanRepository
+from tradingagents.trade_lifecycle import ConditionalTradePlan, MarketObservation, TradePlanRepository
 
 
 runner = CliRunner()
@@ -259,6 +259,75 @@ def test_trade_monitor_cli_once_triggers_and_trade_plan_cli_reports(tmp_path):
     assert list_payload[0]["status"] == "needs_review"
     assert show_payload["status"] == "needs_review"
     assert health_payload["counts_by_status"]["needs_review"] == 1
+
+
+def test_trade_plan_execute_cli_routes_reviewed_plan_to_broker(tmp_path, monkeypatch):
+    db_path = tmp_path / "trade.sqlite"
+    repo = TradePlanRepository(db_path)
+    plan = _plan()
+    repo.upsert_plan(plan)
+    repo.update_status(
+        plan.plan_id,
+        "needs_review",
+        reason="trigger met",
+        payload={
+            "observation": MarketObservation(
+                symbol="AAPL",
+                price=100.0,
+                gap_pct=0.01,
+                volume_ratio=1.0,
+            ).model_dump(mode="json")
+        },
+    )
+
+    class FakeBroker:
+        def get_account_snapshot(self, **kwargs):
+            return {"equity": 10000, "buying_power": 10000, "broker_args": kwargs}
+
+        def get_current_position(self, symbol, **kwargs):
+            return "NEUTRAL"
+
+        def execute_trading_action(self, **kwargs):
+            return {"success": True, "dry_run": True, "broker": "fake", "order_request": kwargs}
+
+    class FakeRouter:
+        def __init__(self, *_args, **_kwargs):
+            self.broker = FakeBroker()
+
+        def get_account_snapshot(self, **kwargs):
+            return self.broker.get_account_snapshot(**kwargs)
+
+        def get_current_position(self, *args, **kwargs):
+            return self.broker.get_current_position(*args, **kwargs)
+
+        def resolve_broker_name(self, **_kwargs):
+            return "robinhood"
+
+        def execute_trading_action(self, **kwargs):
+            return self.broker.execute_trading_action(**kwargs)
+
+    monkeypatch.setattr("tradingagents.execution.plan_executor.create_broker_router", lambda _config: FakeRouter())
+
+    result = runner.invoke(
+        app,
+        [
+            "trade-plan-execute",
+            "--plan-id",
+            plan.plan_id,
+            "--broker",
+            "robinhood",
+            "--dry-run",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["execution"]["status"] == "needs_review"
+    assert payload["execution"]["broker_response"]["order_request"]["broker_name"] == "robinhood"
+    assert payload["plan"]["status"] == "needs_review"
+    assert any(event["event_type"] == "broker_review" for event in repo.list_events(plan.plan_id))
 
 
 def test_trade_monitor_cli_untriggered_and_expired_outputs(tmp_path):

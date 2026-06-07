@@ -197,6 +197,26 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "trade_monitor_openclaw_timeout_seconds": float(
         os.getenv("TRADINGAGENTS_TRADE_MONITOR_OPENCLAW_TIMEOUT_SECONDS", "10")
     ),
+    "broker_adapter": os.getenv("TRADINGAGENTS_BROKER_ADAPTER", "alpaca"),
+    "broker_routes": {
+        "default": os.getenv("TRADINGAGENTS_BROKER_ADAPTER", "alpaca"),
+        "symbols": {},
+    },
+    "robinhood_mcp_url": os.getenv("ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading"),
+    "robinhood_mcp_token_path": os.getenv(
+        "ROBINHOOD_MCP_TOKEN_PATH",
+        os.path.join(_TRADINGAGENTS_HOME, "robinhood", "oauth_token.json"),
+    ),
+    "robinhood_mcp_redirect_uri": os.getenv(
+        "ROBINHOOD_MCP_REDIRECT_URI",
+        "http://127.0.0.1:8765/oauth/callback",
+    ),
+    "robinhood_account_number": os.getenv("ROBINHOOD_ACCOUNT_NUMBER", ""),
+    "robinhood_mcp_dry_run": os.getenv("ROBINHOOD_MCP_DRY_RUN", "true").strip().lower()
+    in {"1", "true", "yes", "on"},
+    "robinhood_mcp_live_orders_enabled": os.getenv("ROBINHOOD_MCP_LIVE_ORDERS_ENABLED", "false").strip().lower()
+    in {"1", "true", "yes", "on"},
+    "robinhood_mcp_timeout_seconds": float(os.getenv("ROBINHOOD_MCP_TIMEOUT_SECONDS", "20")),
     "crowding_gate_enabled": True,
     "momentum_crash_gate_enabled": True,
     "crowding_thresholds": {

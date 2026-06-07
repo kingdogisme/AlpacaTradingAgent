@@ -353,8 +353,23 @@ class TradeMonitorService:
 
         return AlpacaUtils.get_current_position_state(symbol)
 
-    def _execute_plan(self, plan, validation, *, current_position: str | None = None) -> dict[str, Any]:
-        return execute_validated_plan(plan, validation, config=self.config, current_position=current_position)
+    def _execute_plan(
+        self,
+        plan,
+        validation,
+        *,
+        current_position: str | None = None,
+        broker_name: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        return execute_validated_plan(
+            plan,
+            validation,
+            config=self.config,
+            current_position=current_position,
+            broker_name=broker_name,
+            dry_run=dry_run,
+        )
 
     def _debounce_met(self, plan) -> bool:
         required = max(int(plan.trigger.debounce_observations or 1), 1)

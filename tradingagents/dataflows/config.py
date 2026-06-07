@@ -247,6 +247,33 @@ def get_alpaca_use_paper() -> str:
     return value
 
 
+def get_broker_adapter() -> str:
+    """Get the configured execution broker adapter."""
+    return (
+        os.getenv("TRADINGAGENTS_BROKER_ADAPTER")
+        or get_config().get("broker_adapter")
+        or "alpaca"
+    )
+
+
+def get_robinhood_mcp_token_path() -> str:
+    """Get the local Robinhood MCP OAuth token cache path."""
+    return (
+        os.getenv("ROBINHOOD_MCP_TOKEN_PATH")
+        or get_config().get("robinhood_mcp_token_path")
+        or "~/.tradingagents/robinhood/oauth_token.json"
+    )
+
+
+def get_robinhood_mcp_url() -> str:
+    """Get the Robinhood trading MCP streamable HTTP URL."""
+    return (
+        os.getenv("ROBINHOOD_MCP_URL")
+        or get_config().get("robinhood_mcp_url")
+        or "https://agent.robinhood.com/mcp/trading"
+    )
+
+
 def get_fred_api_key() -> str:
     """Get FRED API key from runtime, environment variables, or config."""
     return get_api_key("fred_api_key", "FRED_API_KEY")
