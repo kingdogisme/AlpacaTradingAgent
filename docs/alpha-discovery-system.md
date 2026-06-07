@@ -764,6 +764,7 @@ python -m cli.main cron-discover --source wsb,dd --max-candidates 25
 python -m cli.main cron-confirm --tier B,C --max-candidates 25
 python -m cli.main cron-run --tier A --max-symbols 6
 python -m cli.main cron-run --tier A --max-symbols 6 --execute
+python -m cli.main cron-run --tier A --max-symbols 6 --execute --legacy-graph
 python -m cli.main cron-resolve --as-of YYYY-MM-DD
 python -m cli.main basket-list --tier A,B --status open
 python -m cli.main basket-report --status open
@@ -780,11 +781,13 @@ WSB heat remains capped at B-list. Price/volume confirmation checks relative
 volume, 1-day move, gap, and overextension so the system does not blindly chase
 already-exhausted moves.
 
-For the first 24h production regression, run AD in discovery/confirmation and
-`cron-run` dry-run mode only. Enable `cron-run --execute` only after reviewing
-`ad-health`, `ad-events --status error`, `basket-report`, and the dry-run
-candidates. A broken collector should soft-fail and log `collector_failed`
-rather than kill the entire batch.
+`cron-run --execute` now hands candidates to ATA V2 report + portfolio decision
+by default and does not submit broker orders. Use `--legacy-graph` only when
+testing the pre-V2 monolithic ATA path. For the first 24h production regression,
+run AD in discovery/confirmation and `cron-run` dry-run mode only. Enable
+`cron-run --execute` only after reviewing `ad-health`, `ad-events --status error`,
+`basket-report`, and the dry-run candidates. A broken collector should soft-fail
+and log `collector_failed` rather than kill the entire batch.
 
 ## Non-Goals For The First Version
 

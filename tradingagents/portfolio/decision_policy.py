@@ -156,6 +156,7 @@ class DecisionPolicyResult:
     risk_overlay: RiskOverlayResult
     soft_gate_multiplier: float = 1.0
     validator_note: str = ""
+    alpaca_intent: str = "NO_ORDER"
 
     @property
     def gate_passed(self) -> bool:
@@ -250,7 +251,7 @@ def build_decision_policy_context(config: dict[str, Any] | None = None, horizon:
                 f"valid starter {_pct(ladder['valid_starter_min'])}-{_pct(ladder['valid_starter_max'])}; "
                 f"confirmed leader {_pct(ladder['confirmed_leader_min'])}-{_pct(ladder['confirmed_leader_max'])}."
             ),
-            "Required output fields: Factor Scores, Gate Checks, Sizing Calculation, User Recommendation, Alpaca Execution Action.",
+            "Required output fields: Factor Scores, Gate Checks, Sizing Calculation, User Recommendation, Alpaca Intent / Action Plan.",
         ]
     )
 
@@ -294,21 +295,25 @@ def evaluate_decision_policy(
     )
     recommended_action = str(proposed_action or "HOLD").upper()
     note = ""
+    alpaca_intent = "IMMEDIATE_ORDER" if recommended_action in {"BUY", "LONG", "SELL", "SHORT"} else "NO_ORDER"
     if recommended_action in {"BUY", "LONG"} and (not effective_gate_passed or risk_overlay.blocked_reason):
-        recommended_action = "NEUTRAL" if recommended_action == "LONG" else "HOLD"
         failed = ", ".join(
             gate.name for gate in gate_results if not gate.passed and (not dynamic_soft_gates or gate.severity == "hard")
         )
+        alpaca_intent = "NO_ORDER" if risk_overlay.blocked_reason else "CONDITIONAL_ORDER"
         if risk_overlay.blocked_reason:
-            note = f"decision policy overlay blocked BUY ({risk_overlay.blocked_reason}); action downgraded"
+            note = f"human action preserved; Alpaca execution blocked because {risk_overlay.blocked_reason}"
         else:
-            note = f"decision policy gate failed ({failed}); action downgraded"
+            note = f"human action preserved; Alpaca execution conditional because decision policy gate failed ({failed})"
     min_notional = _float_config(config, "minimum_executable_notional_pct", 0.02)
     if recommended_action in {"BUY", "LONG"} and "notional_exposure_pct=" in sizing:
         notional = _extract_pct_decimal(sizing, "notional_exposure_pct")
         if notional is not None and notional < min_notional:
-            recommended_action = "NEUTRAL" if recommended_action == "LONG" else "HOLD"
-            note = f"decision policy sizing below minimum executable notional {_pct(min_notional)}; action downgraded"
+            alpaca_intent = "NO_ORDER"
+            note = (
+                "human action preserved; Alpaca execution blocked because "
+                f"sizing is below minimum executable notional {_pct(min_notional)}"
+            )
 
     return DecisionPolicyResult(
         horizon=policy.horizon,
@@ -323,6 +328,7 @@ def evaluate_decision_policy(
         risk_overlay=risk_overlay,
         soft_gate_multiplier=soft_gate_multiplier,
         validator_note=note,
+        alpaca_intent=alpaca_intent,
     )
 
 

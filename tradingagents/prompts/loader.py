@@ -72,6 +72,6 @@ def list_prompt_templates() -> list[str]:
             templates.update(
                 path.relative_to(root).as_posix()
                 for path in root.rglob("*.md")
-                if path.is_file()
+                if path.is_file() and path.name != "AGENTS.md"
             )
     return sorted(templates)

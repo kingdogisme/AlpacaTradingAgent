@@ -28,6 +28,27 @@ class Strength(str, Enum):
     WEAK = "weak"
 
 
+class EvidenceCompleteness(BaseModel):
+    status: Literal["complete", "partial"]
+    required_fields: List[str] = Field(
+        default_factory=list,
+        description="Evidence fields required for a full-strength conclusion",
+    )
+    present_fields: List[str] = Field(
+        default_factory=list,
+        description="Required evidence fields that were available",
+    )
+    missing_fields: List[str] = Field(
+        default_factory=list,
+        description="Required evidence fields that were unavailable or non-numeric",
+    )
+    confidence_cap: Literal["high", "medium", "low"] = Field(
+        default="high",
+        description="Maximum confidence analysts should use from this evidence set",
+    )
+    note: str = Field(default="")
+
+
 # ── Per-indicator state models ───────────────────────────────────────────
 
 class TrendState(BaseModel):
@@ -159,6 +180,10 @@ class TechnicalBrief(BaseModel):
     signal_summary: SignalSummary = Field(
         description="Aggregate signal across all timeframes"
     )
+    evidence_completeness: EvidenceCompleteness = Field(
+        default_factory=lambda: EvidenceCompleteness(status="complete", confidence_cap="high"),
+        description="Completeness gate for required technical indicator evidence",
+    )
     raw_prices: dict = Field(
         description="Snapshot: last_close, prev_close, daily_change_pct"
     )
@@ -180,6 +205,9 @@ class RelativeStrengthState(BaseModel):
     relative_6m: float = Field(description="Asset minus benchmark return over roughly 6 months")
     relative_12m: float = Field(description="Asset minus benchmark return over roughly 12 months")
     rating: Literal["outperforming", "neutral", "underperforming"]
+    evidence_completeness: EvidenceCompleteness = Field(
+        default_factory=lambda: EvidenceCompleteness(status="complete", confidence_cap="high")
+    )
 
 
 class TrendInvalidation(BaseModel):
@@ -223,6 +251,10 @@ class TrendBrief(BaseModel):
     relative_strength: RelativeStrengthState
     invalidation: TrendInvalidation
     regime_alignment: RegimeAlignment
+    evidence_completeness: EvidenceCompleteness = Field(
+        default_factory=lambda: EvidenceCompleteness(status="complete", confidence_cap="high"),
+        description="Completeness gate for trend, moving-average slope, and relative-strength evidence",
+    )
     raw_prices: dict
     risk_overlays: dict = Field(
         default_factory=dict,

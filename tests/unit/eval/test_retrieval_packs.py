@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tradingagents.eval import EpisodeLedger
 from tradingagents.eval.indexing import build_retrieval_pack, build_run_index
+from tradingagents.eval.models import LayerEvaluationResultRecord, LayerEvaluationTargetRecord
 
 
 def _seed_run(ledger: EpisodeLedger, tmp_path: Path, run_id: str, symbol: str = "AAPL") -> None:
@@ -84,3 +85,41 @@ def test_ticker_horizon_pack_summarizes_recent_runs(tmp_path: Path):
     assert pack["summary"]["runs"] == 2
     assert pack["summary"]["action_distribution"] == {"HOLD": 2}
     assert all(item["item_id"].startswith("pack_item:") for item in pack["items"])
+
+
+def test_layer_eval_pack_scopes_records_by_layer_and_artifact(tmp_path: Path):
+    ledger = EpisodeLedger(tmp_path / "eval.sqlite")
+    ledger.upsert_layer_evaluation_target(
+        LayerEvaluationTargetRecord(
+            target_id="target-decision",
+            layer="decision",
+            target_type="investment_decision",
+            symbol="NVDA",
+            anchor_date="2026-06-06",
+            decision_id="dec-1",
+            horizon="position",
+        )
+    )
+    ledger.upsert_layer_evaluation_record(
+        LayerEvaluationResultRecord(
+            evaluation_id="eval-decision",
+            target_id="target-decision",
+            layer="decision",
+            evaluator_name="decision_contract_grader",
+            status="warn",
+            failure_tags=["missing_trigger"],
+        )
+    )
+
+    pack = build_retrieval_pack(
+        ledger,
+        pack_type="layer_eval",
+        layer="decision",
+        artifact_id="dec-1",
+        limit=5,
+    )
+
+    assert pack["pack_id"] == "retrieval_pack:layer_eval:dec-1:v1"
+    assert pack["summary"]["layer_distribution"] == {"decision": 1}
+    assert pack["summary"]["target_type_distribution"] == {"investment_decision": 1}
+    assert pack["items"][0]["payload"]["decision_id"] == "dec-1"

@@ -305,7 +305,7 @@ def _safe_float(value: Any) -> float | None:
 def _paper_enabled(config: dict[str, Any] | None = None) -> bool:
     raw = (config or {}).get("alpaca_use_paper")
     runtime_raw = os.getenv("ALPACA_USE_PAPER")
-    if get_alpaca_use_paper is not None:
+    if raw is None and get_alpaca_use_paper is not None:
         try:
             runtime_raw = get_alpaca_use_paper()
         except Exception:

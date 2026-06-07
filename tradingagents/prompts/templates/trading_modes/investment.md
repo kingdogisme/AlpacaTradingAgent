@@ -5,26 +5,26 @@ Available actions:
 - HOLD: Maintain the current long position while the thesis remains intact, or stay in cash/watchlist when no long entry is justified yet
 - SELL: Exit or reduce an existing long position when the thesis fails, risk rises, or a better allocation is needed
 
-Executable action semantics:
-- BUY is the only Alpaca action that can open a new long position from a flat/paper-trading account.
-- HOLD sends no order to Alpaca. Use it when the user-facing recommendation is watchlist/wait/maintain, not when the system actually wants to open starter exposure now.
-- SELL closes or reduces an existing long position. In long-only investment mode, do not use SELL to express bearishness when there is no position; use advisory rating SELL/STRONG SELL plus executable HOLD.
+Report and execution semantics:
+- BUY/HOLD/SELL in the final transaction proposal is the human investment action.
+- Alpaca execution is controlled separately by Alpaca Intent and conditional trade plans; default to no order unless the trade lifecycle validator approves execution.
+- SELL closes or reduces an existing long position. In long-only investment mode, do not use SELL to express bearishness when there is no position; use advisory rating SELL/STRONG SELL plus human HOLD.
 
 Core requirements:
 - Stay long-only; do not recommend short exposure
-- Use the deterministic decision policy: selected horizon -> Factor Weights -> Gate Checks -> Sizing Calculation -> final output. Do not rely on prompt intuition when the gate result blocks current actionability.
+- Use the deterministic decision policy: selected horizon -> Factor Weights -> Gate Checks -> Sizing Calculation -> final output. Do not rely on prompt intuition when the gate result blocks current actionability; preserve the human action and move blocked execution into Alpaca Intent.
 - Treat no open position as the normal paper-trading starting point, not as a reason to avoid BUY. If a new long entry or starter allocation is justified now, recommend BUY.
 - If there is no open position and no long entry is justified yet, use HOLD for "do not enter / wait / no trade" rather than SELL; reserve SELL for reducing or exiting an existing long position
 - Tie every action to evidence, invalidation, and risk discipline
 - Match sizing and position management to the selected horizon context
 - Prefer explicit thesis maintenance rules over vague directional views
 - Optimize risk-adjusted return: penalize unclear downside and undefined exits, but also penalize excessive conservatism that would miss high-quality confirmed opportunities
-- Separate "not ideal full-size entry" from "not worth buying," but keep the action honest. A setup may merit a staged BUY or starter allocation only when an order placed now has positive expected value under the stated invalidation. If the plan only becomes valid after a future pullback, retest, breakout, close, or volume confirmation, use HOLD now and state the trigger for a future BUY.
+- Separate "not ideal full-size entry" from "not worth buying," but keep the action honest. A setup may merit a human BUY even when Alpaca execution must wait for a future pullback, retest, breakout, close, or volume confirmation; express that as conditional/no-order execution rather than forcing HOLD.
 
 BUY actionability gate:
-- BUY from flat requires both thesis confirmation and executable entry confirmation: durable catalyst or fundamentals, aligned horizon trend/relative strength, current price not too extended versus invalidation, defined risk-to-invalidation, and no unresolved event/liquidity/macro risk that makes immediate entry unfavorable.
-- Strong thesis but poor immediate entry quality is not a BUY. Use HOLD/watchlist with explicit buy trigger when the current entry would rely on a future condition.
-- Starter BUY is still an executable BUY; do not use it as a label for "wait for a better entry."
+- BUY from flat requires thesis confirmation: durable catalyst or fundamentals, aligned horizon trend/relative strength, defined invalidation, and acceptable expected value for the selected horizon.
+- Strong thesis but poor immediate entry quality can be human BUY with Alpaca Intent CONDITIONAL_ORDER/NO_ORDER when the current order would rely on a future condition.
+- Starter BUY as human advice is distinct from immediate Alpaca execution; use Alpaca Intent to express whether an order is allowed now.
 
 Portfolio sizing policy:
 - Follow the configured portfolio policy injected into trader and risk-manager prompts; it may be trend-concentrated rather than traditional equal-weight diversification.

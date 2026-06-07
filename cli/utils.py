@@ -3,7 +3,27 @@ from typing import List, Optional, Tuple, Dict
 try:
     import questionary
 except ModuleNotFoundError:  # optional for non-interactive CLI/test paths
-    questionary = None
+    class _QuestionaryUnavailable:
+        class Choice:
+            def __init__(self, title, value=None, **kwargs):
+                self.title = title
+                self.value = value
+
+        class Style:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        def text(self, *args, **kwargs):
+            raise ModuleNotFoundError(
+                "Interactive CLI features require the optional package 'questionary'. "
+                "Install it with `python -m pip install questionary`."
+            )
+
+        select = checkbox = confirm = text
+
+    questionary = _QuestionaryUnavailable()
+else:
+    _QuestionaryUnavailable = None
 from rich import console
 from cli.models import AnalystType
 from tradingagents.openai_model_registry import get_model_options_with_status
@@ -12,11 +32,18 @@ console = console.Console()
 
 
 def _require_questionary():
-    if questionary is None:
+    if _QuestionaryUnavailable is not None and isinstance(questionary, _QuestionaryUnavailable) and not _is_questionary_mocked():
         raise ModuleNotFoundError(
             "Interactive CLI features require the optional package 'questionary'. "
             "Install it with `python -m pip install questionary`."
         )
+
+
+def _is_questionary_mocked() -> bool:
+    return any(
+        getattr(getattr(questionary, name, None), "mock_calls", None) is not None
+        for name in ("select", "checkbox", "confirm", "text")
+    )
 
 ANALYST_ORDER = [
     ("Market Analyst", AnalystType.MARKET),

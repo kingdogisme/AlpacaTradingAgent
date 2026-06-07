@@ -26,6 +26,7 @@ from .memory_v2 import (
     promote_memory,
     retrieve_memory,
 )
+from .pit import audit_pit_run, parse_suite_cases, run_pit_case
 from .reporting import soft_gate_audit as build_soft_gate_audit, summarize_rows
 from .rewards import RewardResolver
 from .targets import (
@@ -145,12 +146,65 @@ def eval_target_resolve(
 
 @app.command("eval-target-report")
 def eval_target_report(
-    group_by: str = typer.Option("target_type,horizon,symbol", help="Comma-separated grouping fields."),
+    group_by: str = typer.Option("trust_tier,system_version,prompt_version,config_hash,target_type,horizon,symbol", help="Comma-separated grouping fields."),
+    include_high_leakage: bool = typer.Option(False, help="Include high-leakage targets/outcomes."),
     ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
 ) -> None:
     ledger = EpisodeLedger(ledger_path)
     groups = [item.strip() for item in group_by.split(",") if item.strip()]
-    console.print_json(data=build_target_report(ledger, group_by=groups))
+    console.print_json(data=build_target_report(ledger, group_by=groups, include_high_leakage=include_high_leakage))
+
+
+@app.command("pit-run")
+def pit_run(
+    symbol: str = typer.Option(..., help="Ticker to rerun point-in-time."),
+    date: str = typer.Option(..., help="Historical trade date YYYY-MM-DD."),
+    horizon: str = typer.Option("swing", help="Trading horizon: swing, position, or trend."),
+    strict: bool = typer.Option(True, help="Disable online tools and require PIT-safe inputs."),
+    config: Optional[Path] = typer.Option(None, help="JSON config override path."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    payload = run_pit_case(symbol=symbol, trade_date=date, horizon=horizon, config=_load_config(config), strict=strict)
+    console.print_json(data=payload)
+
+
+@app.command("pit-audit")
+def pit_audit(
+    run_id: str = typer.Option(..., help="Run id to audit for point-in-time leakage."),
+    strict: bool = typer.Option(True, help="Treat unverifiable timestamps as leakage violations."),
+    ledger_path: Optional[Path] = typer.Option(None, help="Override ledger SQLite path."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    console.print_json(data=audit_pit_run(EpisodeLedger(ledger_path), run_id=run_id, strict=strict))
+
+
+@app.command("pit-benchmark")
+def pit_benchmark(
+    suite: Path = typer.Option(..., help="Benchmark suite JSON path."),
+    strict: bool = typer.Option(True, help="Run every case in strict historical mode."),
+    config: Optional[Path] = typer.Option(None, help="JSON config override path."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    cfg = _load_config(config)
+    results = [
+        {"case_id": case["case_id"], **run_pit_case(symbol=case["symbol"], trade_date=case["date"], horizon=case["horizon"], config=cfg, strict=strict)}
+        for case in parse_suite_cases(suite)
+    ]
+    console.print_json(
+        data={
+            "suite": str(suite),
+            "strict": strict,
+            "case_count": len(results),
+            "eligible_count": sum(1 for item in results if (item.get("pit_audit") or {}).get("status") == "pass"),
+            "results": results,
+        }
+    )
 
 
 @app.command("normalize-traces")

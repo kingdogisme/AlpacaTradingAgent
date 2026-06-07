@@ -85,7 +85,7 @@ TOOL_SOURCE_SPECS: dict[str, DataSourceSpec] = {
     "get_sellthenews_stock_news": DataSourceSpec("sellthenews_stock_news", "SellTheNews", "news", 2, "high", ("google_news", "finnhub_news"), ("published_at", "ticker_relevance")),
     "get_sellthenews_social_sentiment": DataSourceSpec("sellthenews_social", "SellTheNews", "social", 2, "medium", ("reddit", "stocktwits"), ("sample_count", "ticker_relevance")),
     "get_sellthenews_macro_news": DataSourceSpec("sellthenews_macro_news", "SellTheNews", "macro_news", 3, "medium", ("fred", "openai_web_search"), ("published_at",)),
-    "get_sellthenews_options_data": DataSourceSpec("sellthenews_options", "SellTheNews", "options", 1, "medium", (), ("spot_present", "expiration_present")),
+    "get_sellthenews_options_data": DataSourceSpec("sellthenews_options", "SellTheNews", "options", 1, "medium", (), ("spot_present", "expiration_present", "gamma_flip", "call_wall", "put_wall", "max_pain")),
     "get_reddit_news": DataSourceSpec("reddit_global_news", "Reddit", "news", 7, "low", (), ("sample_count", "published_at")),
     "get_reddit_stock_info": DataSourceSpec("reddit_company_news", "Reddit", "social", 7, "medium", ("stocktwits",), ("sample_count", "ticker_relevance")),
     "get_finnhub_news_recent": DataSourceSpec("finnhub_news", "Finnhub", "news", 7, "high", ("google_news",), ("published_at", "ticker_relevance")),
@@ -168,6 +168,38 @@ def _has_any(text: str, needles: Iterable[str]) -> bool:
     return any(needle in lower for needle in needles)
 
 
+def _looks_source_unavailable(lower: str) -> bool:
+    if lower.startswith(("error", "exception")):
+        return True
+    unavailable_patterns = (
+        "source unavailable",
+        "source was unavailable",
+        "unavailable or sparse",
+        "could not be loaded",
+        "api key not found",
+        "tool timeout",
+    )
+    if any(pattern in lower for pattern in unavailable_patterns):
+        return True
+    return re.search(
+        r"\b(?:mcp|api|source|tool|service|sec edgar|alpha vantage|sellthenews|openai)[^\n]{0,80}\bunavailable\b",
+        lower,
+    ) is not None
+
+
+def _explicit_as_of_date(text: str) -> str | None:
+    for pattern in (
+        r"\bas of\s+(\d{4}-\d{2}-\d{2})",
+        r"\bUpdated:\s*(\d{4}-\d{2}-\d{2})",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            parsed = parse_date(match.group(1))
+            if parsed is not None:
+                return parsed.isoformat()
+    return None
+
+
 def _observed_date_from_payload(text: str, tool_name: str, inputs: dict[str, Any] | None = None) -> str | None:
     source_id = get_source_spec(tool_name).source_id
     inputs = inputs or {}
@@ -177,6 +209,16 @@ def _observed_date_from_payload(text: str, tool_name: str, inputs: dict[str, Any
         # observation timestamp. The API response is fetched live for curr_date,
         # and the report header carries that as the as-of date.
         return _input_date(inputs, ("curr_date", "as_of", "end_date"))
+    if source_id in {
+        "sellthenews_social",
+        "finnhub_fundamentals",
+        "alpha_vantage_fundamentals",
+        "sec_edgar_fundamentals",
+    }:
+        # These reports can contain future metric periods, contract dates, or
+        # event dates. Prefer the report's explicit as-of date, then the tool's
+        # PIT request boundary, instead of the generic freshest-date scan.
+        return _explicit_as_of_date(text) or _input_date(inputs, ("curr_date", "as_of", "end_date"))
     if source_id not in {"technical_brief", "trend_brief"}:
         return None
     try:
@@ -196,6 +238,18 @@ def _observed_date_from_payload(text: str, tool_name: str, inputs: dict[str, Any
             if parsed is not None:
                 return parsed.isoformat()
     return None
+
+
+def _has_options_required_levels(text: str) -> bool:
+    labels = ("Gamma Flip", "Call Wall", "Put Wall", "Max Pain")
+    for label in labels:
+        match = re.search(rf"{re.escape(label)}:\s*\$?(?:unknown|none|n/a|nan)?", text, flags=re.IGNORECASE)
+        if not match:
+            return False
+        tail = text[match.start() : match.start() + 80]
+        if re.search(rf"{re.escape(label)}:\s*\$?\s*-?\d+(?:\.\d+)?", tail, flags=re.IGNORECASE) is None:
+            return False
+    return True
 
 
 def evaluate_tool_output(
@@ -219,7 +273,7 @@ def evaluate_tool_output(
 
     if not text.strip():
         flags.append("empty_output")
-    if lower.startswith("error") or " unavailable" in lower or "could not be loaded" in lower:
+    if _looks_source_unavailable(lower):
         flags.append("source_unavailable")
     if "fallback" in lower:
         flags.append("fallback_used")
@@ -261,6 +315,12 @@ def evaluate_tool_output(
             flags.append("missing_ohlcv_schema")
             completeness = "fail"
         elif _has_any(text, ("open", "high", "low", "close", "volume")):
+            accuracy = "pass"
+    elif spec.source_id == "sellthenews_options":
+        if not _has_options_required_levels(text):
+            flags.append("missing_required_options_levels")
+            completeness = "warn"
+        elif "spot price:" in lower and "selected expiration:" in lower:
             accuracy = "pass"
     elif spec.source_id == "sec_edgar_fundamentals" and "official filing" in lower:
         accuracy = "pass"

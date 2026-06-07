@@ -300,6 +300,30 @@ def _format_strike_values(items: List[Tuple[float, float]]) -> str:
     return ", ".join(f"${strike:g} ({_fmt_options_value(value)})" for strike, value in items)
 
 
+def _sellthenews_options_required_values(data: Dict[str, Any]) -> Dict[str, float]:
+    expiration = data.get("expiration") if isinstance(data.get("expiration"), dict) else {}
+    required = {}
+    for key in ("gamma_flip", "call_wall", "put_wall", "max_pain"):
+        value = _coerce_float(expiration.get(key))
+        if value is not None:
+            required[key] = value
+    return required
+
+
+def _format_sellthenews_options_required_levels(data: Dict[str, Any]) -> str:
+    values = _sellthenews_options_required_values(data)
+    labels = {
+        "gamma_flip": "Gamma Flip",
+        "call_wall": "Call Wall",
+        "put_wall": "Put Wall",
+        "max_pain": "Max Pain",
+    }
+    return "\n".join(
+        f"- {labels[key]}: {_fmt_options_value(values.get(key), money=True)}"
+        for key in ("gamma_flip", "call_wall", "put_wall", "max_pain")
+    )
+
+
 def _format_sellthenews_options_chain(data: Dict[str, Any], curr_date: str, greeks: str) -> str:
     expiration = data.get("expiration") if isinstance(data.get("expiration"), dict) else {}
     selected_exp = data.get("selected_exp") or expiration.get("expiration")
@@ -378,13 +402,20 @@ def _sellthenews_options_has_exposure(text: str) -> bool:
     return len(empty_rows) < 3
 
 
+def _sellthenews_options_text_has_required_levels(text: str) -> bool:
+    return all(
+        _extract_price_after_label(text, label) is not None
+        for label in ("Gamma Flip", "Call Wall", "Put Wall", "Max Pain")
+    )
+
+
 def _sellthenews_options_chain_has_exposure(data: Dict[str, Any]) -> bool:
     expiration = data.get("expiration") if isinstance(data.get("expiration"), dict) else {}
     if _coerce_float(expiration.get("spot")) is None:
         return False
     if not data.get("selected_exp"):
         return False
-    if _coerce_float(expiration.get("gamma_flip")) is None:
+    if set(_sellthenews_options_required_values(data)) != {"gamma_flip", "call_wall", "put_wall", "max_pain"}:
         return False
     if _top_numeric_map_items(expiration.get("gex_by_strike"), limit=1):
         return True
@@ -432,6 +463,11 @@ def _sellthenews_options_quality_notes(
 
     if "Selected Expiration:" not in str(options_text):
         notes.append("- Data quality: MCP response did not include selected expiration.")
+    if not _sellthenews_options_text_has_required_levels(options_text):
+        notes.append(
+            "- Data quality: required options levels are incomplete; Gamma Flip, Call Wall, Put Wall, "
+            "and Max Pain must all be present before using options positioning as evidence."
+        )
 
     alpaca_mid = _alpaca_mid_quote(ticker)
     threshold = float(config.get("sellthenews_options_spot_mismatch_threshold_pct", 5.0))
@@ -447,7 +483,7 @@ def _sellthenews_options_quality_notes(
         notes.append("- Data quality: exposure rows are sparse or empty; do not treat GEX levels as confirmed.")
 
     if not notes:
-        notes.append("- Data quality: spot, selected expiration, and exposure fields were present.")
+        notes.append("- Data quality: spot, selected expiration, required levels, and exposure fields were present.")
     return "\n".join(notes)
 
 
@@ -464,6 +500,11 @@ def _sellthenews_options_chain_quality_notes(
 
     if not data.get("selected_exp"):
         notes.append("- Data quality: SellTheNews response did not include selected expiration.")
+    if set(_sellthenews_options_required_values(data)) != {"gamma_flip", "call_wall", "put_wall", "max_pain"}:
+        notes.append(
+            "- Data quality: required options levels are incomplete; Gamma Flip, Call Wall, Put Wall, "
+            "and Max Pain must all be present before using options positioning as evidence."
+        )
 
     alpaca_mid = _alpaca_mid_quote(ticker)
     threshold = float(config.get("sellthenews_options_spot_mismatch_threshold_pct", 5.0))
@@ -479,7 +520,7 @@ def _sellthenews_options_chain_quality_notes(
         notes.append("- Data quality: exposure rows are sparse or empty; do not treat GEX levels as confirmed.")
 
     if not notes:
-        notes.append("- Data quality: spot, selected expiration, and numeric exposure fields were present.")
+        notes.append("- Data quality: spot, selected expiration, required levels, and numeric exposure fields were present.")
     return "\n".join(notes)
 
 
@@ -1856,7 +1897,7 @@ def get_stockstats_indicator_history(
         return "Error: timeframe must be one of 1Hour, 4Hour, 1Day."
 
     try:
-        from .technical_brief import compute_indicators
+        from ..technical_brief import compute_indicators
     except Exception as exc:
         return f"Error loading technical indicator engine: {exc}"
 
@@ -1978,7 +2019,7 @@ def get_stock_news_openai(ticker, curr_date):
     
     try:
         # Standardize ticker format for consistent API calls
-        from .ticker_utils import TickerUtils, normalize_ticker_for_logs
+        from ..ticker_utils import TickerUtils, normalize_ticker_for_logs
         ticker_info = TickerUtils.standardize_ticker(ticker)
         openai_ticker = ticker_info['openai_format']  # Use consistent format for OpenAI
         
@@ -2401,6 +2442,8 @@ def get_sellthenews_options_data(
                 f"Requested Greeks: {selected_greeks}\n"
                 f"Requested Expiration: {selected_expiration or 'nearest available'}\n"
                 f"Source: SellTheNews options chain API\n\n"
+                "Required Positioning Levels:\n"
+                f"{_format_sellthenews_options_required_levels(options_data)}\n\n"
                 f"{notes}\n\n"
                 f"{options_text}"
             )
@@ -2428,7 +2471,10 @@ def get_sellthenews_options_data(
             body,
             max_chars=max_chars,
         )
-        if fallback_on_sparse and not _sellthenews_options_has_exposure(options_text):
+        if fallback_on_sparse and (
+            not _sellthenews_options_has_exposure(options_text)
+            or not _sellthenews_options_text_has_required_levels(options_text)
+        ):
             return _sellthenews_fallback_block("options exposure data was sparse", block)
         return block
     except (SellTheNewsUnavailable, SellTheNewsBadResponse, KeyError) as exc:
@@ -2776,7 +2822,7 @@ def get_technical_brief(
     Returns:
         str: JSON string of the TechnicalBrief
     """
-    from .technical_brief import build_technical_brief
+    from ..technical_brief import build_technical_brief
 
     try:
         brief = build_technical_brief(symbol, curr_date)
@@ -2806,7 +2852,7 @@ def get_trend_brief(
     Returns:
         str: JSON string of the TrendBrief
     """
-    from .technical_brief import build_trend_brief
+    from ..technical_brief import build_trend_brief
 
     try:
         brief = build_trend_brief(symbol, curr_date, horizon)

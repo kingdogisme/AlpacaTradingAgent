@@ -4,15 +4,72 @@ import os
 import pandas as pd
 import time
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Annotated, Union, Optional, List, Dict, Any
-from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest, StockLatestQuoteRequest, CryptoLatestQuoteRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from alpaca.data.enums import DataFeed
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetAssetsRequest, GetOrdersRequest, MarketOrderRequest, ClosePositionRequest
-from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.common.enums import Sort
+
+try:
+    from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest, StockLatestQuoteRequest, CryptoLatestQuoteRequest
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    from alpaca.data.enums import DataFeed
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.requests import GetAssetsRequest, GetOrdersRequest, MarketOrderRequest, ClosePositionRequest
+    from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, QueryOrderStatus, TimeInForce
+    from alpaca.common.enums import Sort
+except ImportError as _alpaca_import_error:  # pragma: no cover - environment dependent
+    class _ValueEnum(str, Enum):
+        pass
+
+    class AssetClass(_ValueEnum):
+        US_EQUITY = "us_equity"
+        CRYPTO = "crypto"
+
+    class AssetStatus(_ValueEnum):
+        ACTIVE = "active"
+
+    class OrderSide(_ValueEnum):
+        BUY = "buy"
+        SELL = "sell"
+
+    class QueryOrderStatus(_ValueEnum):
+        ALL = "all"
+
+    class TimeInForce(_ValueEnum):
+        DAY = "day"
+        GTC = "gtc"
+
+    class DataFeed(_ValueEnum):
+        IEX = "iex"
+
+    class Sort(_ValueEnum):
+        DESC = "desc"
+
+    class TimeFrameUnit(_ValueEnum):
+        Minute = "minute"
+        Hour = "hour"
+        Day = "day"
+
+    class TimeFrame:
+        Minute = "1Min"
+        Hour = "1Hour"
+        Day = "1Day"
+
+        def __init__(self, amount=None, unit=None):
+            self.amount = amount
+            self.unit = unit
+
+    class _MissingAlpaca:
+        def __init__(self, *args, **kwargs):
+            raise ImportError(f"alpaca-py is required for Alpaca operations: {_alpaca_import_error}") from _alpaca_import_error
+
+    StockHistoricalDataClient = CryptoHistoricalDataClient = TradingClient = _MissingAlpaca
+
+    class _Request:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    StockBarsRequest = CryptoBarsRequest = StockLatestQuoteRequest = CryptoLatestQuoteRequest = _Request
+    GetAssetsRequest = GetOrdersRequest = MarketOrderRequest = ClosePositionRequest = _Request
 from .config import get_api_key, get_alpaca_use_paper, get_config
 from .ticker_utils import TickerUtils
 

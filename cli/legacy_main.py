@@ -43,6 +43,7 @@ from tradingagents.eval.quality_v2 import (
     quality_index_with_reconciliation,
     reconcile_quality,
 )
+from tradingagents.eval.pit import audit_pit_run, parse_suite_cases, run_pit_case
 from tradingagents.eval.targets import (
     EvaluationTargetBuilder,
     TargetAwareRewardResolver,
@@ -185,6 +186,108 @@ app = typer.Typer(
 )
 
 
+def _runner_config_with_overrides(base_config: dict, config_overrides: dict | None = None) -> dict:
+    run_config = base_config.copy()
+    if config_overrides:
+        metadata = {
+            **(run_config.get("episode_ledger_metadata") or {}),
+            **(config_overrides.get("episode_ledger_metadata") or {}),
+        }
+        run_config.update({key: value for key, value in config_overrides.items() if key != "episode_ledger_metadata"})
+        run_config["episode_ledger_metadata"] = metadata
+    return run_config
+
+
+def _v2_horizon(value: object) -> str:
+    text = str(value or "position").strip().lower()
+    return text if text in {"swing", "position", "trend"} else "position"
+
+
+def _ata_v2_artifact_root(config: dict) -> Path:
+    configured = config.get("ata_v2_artifact_dir")
+    if configured:
+        return Path(str(configured))
+    return Path(str(config.get("results_dir") or "eval_results")) / "ata_v2"
+
+
+def _safe_artifact_id(artifact_id: str) -> str:
+    value = str(artifact_id or "").strip()
+    if not value or "/" in value or "\\" in value:
+        raise typer.BadParameter("artifact id must be a plain id, not a path")
+    return value
+
+
+def _persist_ata_v2_report(report, config: dict) -> str:
+    path = _ata_v2_artifact_root(config) / "reports" / f"{_safe_artifact_id(report.report_id)}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    return str(path)
+
+
+def _persist_ata_v2_decision(decision, config: dict) -> str:
+    path = _ata_v2_artifact_root(config) / "decisions" / f"{_safe_artifact_id(decision.decision_id)}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(decision.model_dump_json(indent=2), encoding="utf-8")
+    return str(path)
+
+
+def _load_ata_v2_report(*, report_json: str | None, report_id: str | None, config: dict):
+    from tradingagents.contracts import ResearchReport
+
+    if bool(report_json) == bool(report_id):
+        raise typer.BadParameter("pass exactly one of --report-json or --report-id")
+    path = (
+        Path(str(report_json))
+        if report_json
+        else _ata_v2_artifact_root(config) / "reports" / f"{_safe_artifact_id(str(report_id))}.json"
+    )
+    if not path.exists():
+        raise typer.BadParameter(f"ResearchReport artifact not found: {path}")
+    return ResearchReport.model_validate_json(path.read_text(encoding="utf-8")), str(path)
+
+
+class _AtaV2Runner:
+    """Alpha Discovery handoff runner for the ATA V2 default path.
+
+    The runner performs research plus portfolio decision only. It can emit a
+    conditional plan draft from the decision layer, but it never invokes broker
+    execution; `trade-monitor` remains the execution entrypoint.
+    """
+
+    def __init__(self, config: dict):
+        self.config = config
+
+    def run(
+        self,
+        ticker: str,
+        trade_date: str,
+        analysts: list[str],
+        config_overrides: dict | None = None,
+    ):
+        from tradingagents.contracts import ResearchRequest
+        from tradingagents.portfolio.context import build_portfolio_context
+        from tradingagents.portfolio.service import PortfolioDecisionService
+        from tradingagents.research import ResearchService
+
+        run_config = _runner_config_with_overrides(self.config, config_overrides)
+        horizon = _v2_horizon(run_config.get("trading_horizon") or run_config.get("alpha_discovery_ata_horizon"))
+        request = ResearchRequest(
+            symbol=ticker.upper(),
+            trade_date=trade_date,
+            horizon=horizon,
+            selected_analysts=list(analysts),
+            source_policy={},
+            output_language=str(run_config.get("output_language") or "zh-CN"),
+        )
+        research_result = ResearchService(config=run_config).run(request)
+        portfolio_context = build_portfolio_context(research_result.report.symbol, config=run_config)
+        decision = PortfolioDecisionService(config=run_config).decide(research_result.report, portfolio_context)
+        _persist_ata_v2_report(research_result.report, run_config)
+        _persist_ata_v2_decision(decision, run_config)
+        plan_id = (decision.conditional_trade_plan or {}).get("plan_id")
+        return research_result.run_id, decision.human_action, decision.confidence, plan_id
+
+
 class _TradingAgentsGraphRunner:
     def __init__(self, config: dict):
         self.config = config
@@ -198,14 +301,7 @@ class _TradingAgentsGraphRunner:
     ):
         from tradingagents.graph.trading_graph import TradingAgentsGraph
 
-        run_config = self.config.copy()
-        if config_overrides:
-            metadata = {
-                **(run_config.get("episode_ledger_metadata") or {}),
-                **(config_overrides.get("episode_ledger_metadata") or {}),
-            }
-            run_config.update({key: value for key, value in config_overrides.items() if key != "episode_ledger_metadata"})
-            run_config["episode_ledger_metadata"] = metadata
+        run_config = _runner_config_with_overrides(self.config, config_overrides)
         graph = TradingAgentsGraph(selected_analysts=analysts, config=run_config, debug=False)
         final_state, final_signal = graph.propagate(ticker, trade_date)
         run_id = getattr(graph, "last_run_id", None)
@@ -313,9 +409,14 @@ def cron_run(
     max_symbols: int = typer.Option(6, help="Maximum symbols to inspect or execute."),
     execute: bool = typer.Option(
         False,
-        help="Actually call ATA. Default is dry-run; A-list executes automatically when enabled in config.",
+        help="Actually call ATA V2 report+decision. A-list executes automatically when enabled in config.",
     ),
     dry_run: bool = typer.Option(False, help="Force dry-run even when A-list auto-run is enabled."),
+    legacy_graph: bool = typer.Option(
+        False,
+        "--legacy-graph",
+        help="Use the pre-V2 monolithic TradingAgentsGraph for ATA handoff.",
+    ),
     trade_date: str = typer.Option(
         datetime.date.today().isoformat(),
         help="ATA trade date in YYYY-MM-DD format.",
@@ -328,7 +429,8 @@ def cron_run(
         and tier.upper() == "A"
         and bool(DEFAULT_CONFIG.get("alpha_discovery_auto_run_a_list", True))
     )
-    runner = _TradingAgentsGraphRunner(DEFAULT_CONFIG.copy()) if should_execute else None
+    runner_cls = _TradingAgentsGraphRunner if legacy_graph else _AtaV2Runner
+    runner = runner_cls(DEFAULT_CONFIG.copy()) if should_execute else None
     results = service.run_candidates(
         tier=tier,
         max_symbols=max_symbols,
@@ -344,6 +446,7 @@ def cron_run(
             "execute": should_execute,
             "auto_run_a_list": bool(DEFAULT_CONFIG.get("alpha_discovery_auto_run_a_list", True)),
             "dry_run": dry_run,
+            "runner": "legacy_graph" if legacy_graph else "ata_v2",
             "result_count": len(results),
             "run_status_counts": count_values(results, "run_status"),
             "candidates": [compact_candidate(row) for row in results],
@@ -370,24 +473,78 @@ def ata_run(
         True,
         help="Link the run to the latest open AD candidate for this ticker when present.",
     ),
+    legacy_graph: bool = typer.Option(
+        False,
+        "--legacy-graph",
+        help="Use the pre-V2 monolithic graph path. Default is V2 report + decision without execution.",
+    ),
 ) -> None:
     config = DEFAULT_CONFIG.copy()
     config["trading_horizon"] = horizon
     config["trading_mode"] = "investment"
     selected_analysts = [part.strip() for part in analysts.split(",") if part.strip()]
-    runner = _TradingAgentsGraphRunner(config)
-    result = runner.run(ticker.upper(), trade_date, selected_analysts)
-    if len(result) == 4:
-        run_id, final_signal, confidence, plan_id = result
-    else:
-        run_id, final_signal, confidence = result
-        plan_id = None
+    if legacy_graph:
+        runner = _TradingAgentsGraphRunner(config)
+        result = runner.run(ticker.upper(), trade_date, selected_analysts)
+        if len(result) == 4:
+            run_id, final_signal, confidence, plan_id = result
+        else:
+            run_id, final_signal, confidence = result
+            plan_id = None
+        candidate_id = (
+            _record_ad_handoff_for_ticker(
+                ticker=ticker.upper(),
+                run_id=run_id,
+                final_signal=final_signal,
+                confidence=confidence,
+                plan_id=plan_id,
+                config=config,
+            )
+            if record_ad_handoff
+            else None
+        )
+        _ad_print(
+            "ata_run",
+            {
+                "mode": "legacy_graph",
+                "ticker": ticker.upper(),
+                "trade_date": trade_date,
+                "horizon": horizon,
+                "analysts": selected_analysts,
+                "run_id": run_id,
+                "final_signal": final_signal,
+                "confidence": confidence,
+                "plan_id": plan_id,
+                "ad_candidate_id": candidate_id,
+            },
+        )
+        return
+
+    from tradingagents.contracts import ResearchRequest
+    from tradingagents.portfolio.context import build_portfolio_context
+    from tradingagents.portfolio.service import PortfolioDecisionService
+    from tradingagents.research import ResearchService
+
+    request = ResearchRequest(
+        symbol=ticker.upper(),
+        trade_date=trade_date,
+        horizon=horizon,
+        selected_analysts=selected_analysts,
+        source_policy={},
+        output_language=str(config.get("output_language") or "zh-CN"),
+    )
+    research_result = ResearchService(config=config).run(request)
+    portfolio_context = build_portfolio_context(research_result.report.symbol, config=config)
+    decision = PortfolioDecisionService(config=config).decide(research_result.report, portfolio_context)
+    report_path = _persist_ata_v2_report(research_result.report, config)
+    decision_path = _persist_ata_v2_decision(decision, config)
+    plan_id = (decision.conditional_trade_plan or {}).get("plan_id")
     candidate_id = (
         _record_ad_handoff_for_ticker(
             ticker=ticker.upper(),
-            run_id=run_id,
-            final_signal=final_signal,
-            confidence=confidence,
+            run_id=research_result.run_id,
+            final_signal=decision.human_action,
+            confidence=decision.confidence,
             plan_id=plan_id,
             config=config,
         )
@@ -397,15 +554,113 @@ def ata_run(
     _ad_print(
         "ata_run",
         {
+            "mode": "v2_report_decision",
             "ticker": ticker.upper(),
             "trade_date": trade_date,
             "horizon": horizon,
             "analysts": selected_analysts,
-            "run_id": run_id,
-            "final_signal": final_signal,
-            "confidence": confidence,
+            "run_id": research_result.run_id,
+            "audit_path": research_result.audit_path,
+            "report_id": research_result.report.report_id,
+            "report_path": report_path,
+            "decision_id": decision.decision_id,
+            "decision_path": decision_path,
+            "final_signal": decision.human_action,
+            "confidence": decision.confidence,
+            "actionability": decision.actionability,
+            "alpaca_intent": decision.alpaca_intent,
             "plan_id": plan_id,
             "ad_candidate_id": candidate_id,
+            "research_report": research_result.report.model_dump(mode="json"),
+            "investment_decision": decision.model_dump(mode="json"),
+        },
+    )
+
+
+@app.command("ata-report")
+def ata_report(
+    ticker: str = typer.Option(..., help="Ticker to analyze."),
+    trade_date: str = typer.Option(
+        datetime.date.today().isoformat(),
+        help="ATA trade date in YYYY-MM-DD format.",
+    ),
+    horizon: str = typer.Option(
+        "position",
+        help="Trading horizon: swing, position, or trend.",
+    ),
+    analysts: str = typer.Option(
+        "market,fundamentals,news,social,macro",
+        help="Comma-separated analysts.",
+    ),
+    thesis: Optional[str] = typer.Option(None, help="Optional thesis to test."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    from tradingagents.contracts import ResearchRequest
+    from tradingagents.research import ResearchService
+
+    config = DEFAULT_CONFIG.copy()
+    selected_analysts = [part.strip() for part in analysts.split(",") if part.strip()]
+    request = ResearchRequest(
+        symbol=ticker.upper(),
+        trade_date=trade_date,
+        horizon=horizon,
+        thesis=thesis,
+        selected_analysts=selected_analysts,
+        source_policy={},
+        output_language=str(config.get("output_language") or "zh-CN"),
+    )
+    result = ResearchService(config=config).run(request)
+    report_path = _persist_ata_v2_report(result.report, config)
+    _ad_print(
+        "ata_report",
+        {
+            "request_id": result.request.request_id,
+            "report_id": result.report.report_id,
+            "report_path": report_path,
+            "ticker": result.report.symbol,
+            "trade_date": result.report.trade_date,
+            "horizon": result.report.horizon,
+            "conclusion": result.report.conclusion,
+            "confidence": result.report.confidence,
+            "run_id": result.run_id,
+            "audit_path": result.audit_path,
+            "final_signal": result.final_signal,
+            "research_report": result.report.model_dump(mode="json"),
+        },
+    )
+
+
+@app.command("ata-decide")
+def ata_decide(
+    report_json: Optional[str] = typer.Option(None, help="Path to ResearchReport JSON."),
+    report_id: Optional[str] = typer.Option(None, help="Stored ResearchReport id under the ATA V2 artifact directory."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    from tradingagents.portfolio.context import build_portfolio_context
+    from tradingagents.portfolio.service import PortfolioDecisionService
+
+    config = DEFAULT_CONFIG.copy()
+    report, report_path = _load_ata_v2_report(report_json=report_json, report_id=report_id, config=config)
+    context = build_portfolio_context(report.symbol, config=config)
+    decision = PortfolioDecisionService(config=config).decide(report, context)
+    decision_path = _persist_ata_v2_decision(decision, config)
+    _ad_print(
+        "ata_decide",
+        {
+            "decision_id": decision.decision_id,
+            "decision_path": decision_path,
+            "report_id": decision.report_id,
+            "report_path": report_path,
+            "ticker": decision.symbol,
+            "human_action": decision.human_action,
+            "actionability": decision.actionability,
+            "alpaca_intent": decision.alpaca_intent,
+            "plan_id": (decision.conditional_trade_plan or {}).get("plan_id"),
+            "investment_decision": decision.model_dump(mode="json"),
         },
     )
 
@@ -713,14 +968,74 @@ def eval_target_resolve(
 
 @app.command("eval-target-report")
 def eval_target_report(
-    group_by: str = typer.Option("target_type,horizon,symbol", help="Comma-separated grouping fields."),
+    group_by: str = typer.Option("trust_tier,system_version,prompt_version,config_hash,target_type,horizon,symbol", help="Comma-separated grouping fields."),
+    include_high_leakage: bool = typer.Option(False, help="Include high-leakage targets/outcomes."),
     ledger_path: Optional[str] = typer.Option(None, help="Optional eval SQLite path."),
 ) -> None:
     from tradingagents.eval import EpisodeLedger
 
     ledger = EpisodeLedger(ledger_path or DEFAULT_CONFIG.get("episode_ledger_path"))
     groups = [item.strip() for item in group_by.split(",") if item.strip()]
-    _ad_print("eval_target_report", build_target_report(ledger, group_by=groups))
+    _ad_print("eval_target_report", build_target_report(ledger, group_by=groups, include_high_leakage=include_high_leakage))
+
+
+@app.command("pit-run")
+def pit_run(
+    symbol: str = typer.Option(..., help="Ticker to rerun point-in-time."),
+    date: str = typer.Option(..., help="Historical trade date YYYY-MM-DD."),
+    horizon: str = typer.Option("swing", help="Trading horizon: swing, position, or trend."),
+    strict: bool = typer.Option(True, help="Disable online tools and require PIT-safe inputs."),
+    config_path: Optional[str] = typer.Option(None, help="Optional JSON config override path."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    cfg = DEFAULT_CONFIG.copy()
+    if config_path:
+        cfg.update(json.loads(Path(config_path).read_text(encoding="utf-8")))
+    _ad_print("pit_run", run_pit_case(symbol=symbol, trade_date=date, horizon=horizon, config=cfg, strict=strict))
+
+
+@app.command("pit-audit")
+def pit_audit(
+    run_id: str = typer.Option(..., help="Run id to audit for point-in-time leakage."),
+    strict: bool = typer.Option(True, help="Treat unverifiable timestamps as leakage violations."),
+    ledger_path: Optional[str] = typer.Option(None, help="Optional eval SQLite path."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    from tradingagents.eval import EpisodeLedger
+
+    _ad_print("pit_audit", audit_pit_run(EpisodeLedger(ledger_path or DEFAULT_CONFIG.get("episode_ledger_path")), run_id=run_id, strict=strict))
+
+
+@app.command("pit-benchmark")
+def pit_benchmark(
+    suite: str = typer.Option(..., help="Benchmark suite JSON path."),
+    strict: bool = typer.Option(True, help="Run every case in strict historical mode."),
+    config_path: Optional[str] = typer.Option(None, help="Optional JSON config override path."),
+    format: str = typer.Option("json", help="Output format: json."),
+) -> None:
+    if format != "json":
+        raise typer.BadParameter("Only --format json is supported.")
+    cfg = DEFAULT_CONFIG.copy()
+    if config_path:
+        cfg.update(json.loads(Path(config_path).read_text(encoding="utf-8")))
+    results = [
+        {"case_id": case["case_id"], **run_pit_case(symbol=case["symbol"], trade_date=case["date"], horizon=case["horizon"], config=cfg, strict=strict)}
+        for case in parse_suite_cases(suite)
+    ]
+    _ad_print(
+        "pit_benchmark",
+        {
+            "suite": suite,
+            "strict": strict,
+            "case_count": len(results),
+            "eligible_count": sum(1 for item in results if (item.get("pit_audit") or {}).get("status") == "pass"),
+            "results": results,
+        },
+    )
 
 
 @app.command("ad-events")
@@ -818,7 +1133,8 @@ def cron_schedule() -> None:
                 "same_ticker_cooldown_hours": DEFAULT_CONFIG.get("alpha_discovery_full_ata_cooldown_hours", 24),
                 "execution_phases": {
                     "dry_run": "Set TRADINGAGENTS_ALPHA_DISCOVERY_AUTO_RUN_A_LIST=false or pass --dry-run; inspect ad-health, ad-events, basket-report, and trade-plan-health.",
-                    "paper_execution": "Keep alpaca_use_paper=true; cron-run may execute ATA research and trade-monitor --once owns conditional paper orders.",
+                    "decision_only": "cron-run --execute produces ATA V2 research reports and portfolio decisions only; trade-monitor --once owns conditional paper orders.",
+                    "paper_execution": "Keep alpaca_use_paper=true; execution remains isolated behind trade-monitor and trade-plan lifecycle commands.",
                 },
                 "commands": {
                     "discover": "python -m cli.main cron-discover --source wsb,dd --max-candidates 25",
@@ -2216,10 +2532,12 @@ def source_reliability(
 
 @app.command("retrieval-pack")
 def retrieval_pack(
-    pack_type: str = typer.Option(..., "--type", help="Pack type: risk_review, ticker_horizon, prompt_audit."),
+    pack_type: str = typer.Option(..., "--type", help="Pack type: risk_review, ticker_horizon, prompt_audit, layer_eval."),
     run_id: Optional[str] = typer.Option(None, help="Run id for risk_review."),
     symbol: Optional[str] = typer.Option(None, help="Symbol for ticker_horizon."),
     horizon: Optional[str] = typer.Option(None, help="Horizon for ticker_horizon."),
+    layer: Optional[str] = typer.Option(None, help="V2 layer for layer_eval: research, decision, or execution."),
+    artifact_id: Optional[str] = typer.Option(None, help="Report, decision, plan, execution, or target id for layer_eval."),
     prompt_version: Optional[str] = typer.Option(None, help="Prompt version for prompt_audit."),
     config_hash: Optional[str] = typer.Option(None, help="Config hash for prompt_audit."),
     limit: int = typer.Option(5, help="Maximum indexed runs to include."),
@@ -2239,6 +2557,8 @@ def retrieval_pack(
         run_id=run_id,
         symbol=symbol,
         horizon=horizon,
+        layer=layer,
+        artifact_id=artifact_id,
         prompt_version=prompt_version,
         config_hash=config_hash,
         limit=limit,

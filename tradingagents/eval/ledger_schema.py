@@ -76,6 +76,13 @@ SCHEMA_SQL = r"""
                     trigger_status TEXT NOT NULL,
                     execution_status TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
+                    system_version TEXT,
+                    prompt_version TEXT,
+                    config_hash TEXT,
+                    run_policy TEXT,
+                    leakage_risk TEXT NOT NULL DEFAULT 'unknown',
+                    data_cutoff TEXT,
+                    source_time_range_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -105,6 +112,13 @@ SCHEMA_SQL = r"""
                     mfe REAL,
                     mae REAL,
                     components_json TEXT NOT NULL,
+                    system_version TEXT,
+                    prompt_version TEXT,
+                    config_hash TEXT,
+                    run_policy TEXT,
+                    leakage_risk TEXT NOT NULL DEFAULT 'unknown',
+                    data_cutoff TEXT,
+                    source_time_range_json TEXT NOT NULL DEFAULT '{}',
                     resolved_at TEXT NOT NULL,
                     data_source TEXT NOT NULL,
                     PRIMARY KEY(target_id, reward_version),
@@ -112,6 +126,60 @@ SCHEMA_SQL = r"""
                 );
                 CREATE INDEX IF NOT EXISTS idx_eval_outcomes_status
                     ON evaluation_outcomes(evaluation_status);
+
+                CREATE TABLE IF NOT EXISTS layer_evaluation_targets (
+                    target_id TEXT PRIMARY KEY,
+                    schema_version TEXT NOT NULL,
+                    layer TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    run_id TEXT,
+                    report_id TEXT,
+                    decision_id TEXT,
+                    plan_id TEXT,
+                    execution_id TEXT,
+                    symbol TEXT NOT NULL,
+                    horizon TEXT,
+                    anchor_date TEXT NOT NULL,
+                    audit_refs_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_layer_type
+                    ON layer_evaluation_targets(layer, target_type);
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_run
+                    ON layer_evaluation_targets(run_id);
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_symbol_date
+                    ON layer_evaluation_targets(symbol, anchor_date);
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_report
+                    ON layer_evaluation_targets(report_id);
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_decision
+                    ON layer_evaluation_targets(decision_id);
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_plan
+                    ON layer_evaluation_targets(plan_id);
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_execution
+                    ON layer_evaluation_targets(execution_id);
+
+                CREATE TABLE IF NOT EXISTS layer_evaluation_records (
+                    evaluation_id TEXT PRIMARY KEY,
+                    schema_version TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    layer TEXT NOT NULL,
+                    evaluator_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    score REAL,
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    failure_tags_json TEXT NOT NULL DEFAULT '[]',
+                    reason TEXT NOT NULL DEFAULT '',
+                    evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(target_id) REFERENCES layer_evaluation_targets(target_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_records_target
+                    ON layer_evaluation_records(target_id);
+                CREATE INDEX IF NOT EXISTS idx_layer_eval_records_layer_status
+                    ON layer_evaluation_records(layer, status);
 
                 CREATE TABLE IF NOT EXISTS trace_spans (
                     run_id TEXT NOT NULL,
@@ -145,6 +213,12 @@ SCHEMA_SQL = r"""
                     critic_version TEXT,
                     reward_version TEXT,
                     leakage_risk TEXT NOT NULL,
+                    system_version TEXT,
+                    git_commit TEXT,
+                    dirty_diff_hash TEXT,
+                    run_policy TEXT,
+                    data_snapshot_id TEXT,
+                    run_started_at TEXT,
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -282,6 +356,10 @@ SCHEMA_SQL = r"""
                     source_age_days INTEGER,
                     fallback_from TEXT,
                     timestamp TEXT,
+                    requested_trade_date TEXT,
+                    source_timestamp TEXT,
+                    max_allowed_timestamp TEXT,
+                    leakage_status TEXT NOT NULL DEFAULT 'unknown',
                     inputs_json TEXT NOT NULL,
                     output_preview TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -409,3 +487,71 @@ def apply_schema_migrations(conn) -> None:
             conn.execute(statement)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_symbol_horizon ON memory_items(symbol, horizon)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_state ON memory_items(state)")
+    target_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(evaluation_targets)").fetchall()
+    }
+    target_migrations = {
+        "system_version": "ALTER TABLE evaluation_targets ADD COLUMN system_version TEXT",
+        "prompt_version": "ALTER TABLE evaluation_targets ADD COLUMN prompt_version TEXT",
+        "config_hash": "ALTER TABLE evaluation_targets ADD COLUMN config_hash TEXT",
+        "run_policy": "ALTER TABLE evaluation_targets ADD COLUMN run_policy TEXT",
+        "leakage_risk": "ALTER TABLE evaluation_targets ADD COLUMN leakage_risk TEXT NOT NULL DEFAULT 'unknown'",
+        "data_cutoff": "ALTER TABLE evaluation_targets ADD COLUMN data_cutoff TEXT",
+        "source_time_range_json": "ALTER TABLE evaluation_targets ADD COLUMN source_time_range_json TEXT NOT NULL DEFAULT '{}'",
+    }
+    for column, statement in target_migrations.items():
+        if column not in target_columns:
+            conn.execute(statement)
+    outcome_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(evaluation_outcomes)").fetchall()
+    }
+    outcome_migrations = {
+        "system_version": "ALTER TABLE evaluation_outcomes ADD COLUMN system_version TEXT",
+        "prompt_version": "ALTER TABLE evaluation_outcomes ADD COLUMN prompt_version TEXT",
+        "config_hash": "ALTER TABLE evaluation_outcomes ADD COLUMN config_hash TEXT",
+        "run_policy": "ALTER TABLE evaluation_outcomes ADD COLUMN run_policy TEXT",
+        "leakage_risk": "ALTER TABLE evaluation_outcomes ADD COLUMN leakage_risk TEXT NOT NULL DEFAULT 'unknown'",
+        "data_cutoff": "ALTER TABLE evaluation_outcomes ADD COLUMN data_cutoff TEXT",
+        "source_time_range_json": "ALTER TABLE evaluation_outcomes ADD COLUMN source_time_range_json TEXT NOT NULL DEFAULT '{}'",
+    }
+    for column, statement in outcome_migrations.items():
+        if column not in outcome_columns:
+            conn.execute(statement)
+    experiment_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(experiments)").fetchall()
+    }
+    experiment_migrations = {
+        "system_version": "ALTER TABLE experiments ADD COLUMN system_version TEXT",
+        "git_commit": "ALTER TABLE experiments ADD COLUMN git_commit TEXT",
+        "dirty_diff_hash": "ALTER TABLE experiments ADD COLUMN dirty_diff_hash TEXT",
+        "run_policy": "ALTER TABLE experiments ADD COLUMN run_policy TEXT",
+        "data_snapshot_id": "ALTER TABLE experiments ADD COLUMN data_snapshot_id TEXT",
+        "run_started_at": "ALTER TABLE experiments ADD COLUMN run_started_at TEXT",
+    }
+    for column, statement in experiment_migrations.items():
+        if column not in experiment_columns:
+            conn.execute(statement)
+    quality_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(quality_index)").fetchall()
+    }
+    quality_migrations = {
+        "requested_trade_date": "ALTER TABLE quality_index ADD COLUMN requested_trade_date TEXT",
+        "source_timestamp": "ALTER TABLE quality_index ADD COLUMN source_timestamp TEXT",
+        "max_allowed_timestamp": "ALTER TABLE quality_index ADD COLUMN max_allowed_timestamp TEXT",
+        "leakage_status": "ALTER TABLE quality_index ADD COLUMN leakage_status TEXT NOT NULL DEFAULT 'unknown'",
+    }
+    for column, statement in quality_migrations.items():
+        if column not in quality_columns:
+            conn.execute(statement)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_targets_provenance ON evaluation_targets(system_version, prompt_version, config_hash, leakage_risk)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_outcomes_leakage ON evaluation_outcomes(leakage_risk)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_quality_index_leakage ON quality_index(leakage_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_layer_type ON layer_evaluation_targets(layer, target_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_run ON layer_evaluation_targets(run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_symbol_date ON layer_evaluation_targets(symbol, anchor_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_report ON layer_evaluation_targets(report_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_decision ON layer_evaluation_targets(decision_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_plan ON layer_evaluation_targets(plan_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_targets_execution ON layer_evaluation_targets(execution_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_records_target ON layer_evaluation_records(target_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_eval_records_layer_status ON layer_evaluation_records(layer, status)")

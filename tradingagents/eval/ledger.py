@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 from typing import Any, Iterable
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -18,6 +19,8 @@ from .models import (
     EvaluationOutcomeRecord,
     EvaluationTargetRecord,
     ExperimentRecordV1,
+    LayerEvaluationResultRecord,
+    LayerEvaluationTargetRecord,
     MemoryItemRecordV1,
     MemoryPromotionRecordV1,
     MemoryRetrievalRecordV1,
@@ -71,6 +74,47 @@ def stable_config_hash(config: dict[str, Any]) -> str:
     }
     payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def git_provenance() -> dict[str, str | None]:
+    """Best-effort local source identity for auditable evaluation buckets."""
+    root = Path(__file__).resolve().parents[2]
+
+    def _git(args: list[str]) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
+        return completed.stdout
+
+    commit = (_git(["rev-parse", "HEAD"]) or "").strip() or None
+    diff = _git(["diff", "--binary", "HEAD"])
+    dirty_hash = hashlib.sha256(diff.encode("utf-8")).hexdigest()[:16] if diff else None
+    return {
+        "git_commit": commit,
+        "dirty_diff_hash": dirty_hash,
+        "system_version": f"{commit[:12]}{'-dirty-' + dirty_hash if dirty_hash else ''}" if commit else "unknown",
+    }
+
+
+def trust_tier_for(run_policy: str | None, leakage_risk: str | None) -> str:
+    if str(leakage_risk or "").lower() == "high":
+        return "legacy_observed"
+    policy = str(run_policy or "").lower()
+    if policy in {"pit_strict", "historical_strict", "current_pit_rerun"}:
+        return "current_pit_rerun"
+    if policy == "live_forward":
+        return "live_forward"
+    return "legacy_observed"
 
 
 class EpisodeLedger:
@@ -391,6 +435,31 @@ class EpisodeLedger:
 
         return EvaluationTargetRepository(self).list_outcomes(filters)
 
+    def upsert_layer_evaluation_target(self, target: LayerEvaluationTargetRecord | Any) -> None:
+        from .layered import LayerEvaluationRepository
+
+        LayerEvaluationRepository(self).upsert_target(target)
+
+    def get_layer_evaluation_target(self, target_id: str) -> dict[str, Any] | None:
+        from .layered import LayerEvaluationRepository
+
+        return LayerEvaluationRepository(self).get_target(target_id)
+
+    def list_layer_evaluation_targets(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        from .layered import LayerEvaluationRepository
+
+        return LayerEvaluationRepository(self).list_targets(filters)
+
+    def upsert_layer_evaluation_record(self, record: LayerEvaluationResultRecord | Any) -> None:
+        from .layered import LayerEvaluationRepository
+
+        LayerEvaluationRepository(self).upsert_record(record)
+
+    def list_layer_evaluation_records(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        from .layered import LayerEvaluationRepository
+
+        return LayerEvaluationRepository(self).list_records(filters)
+
     def report_rows(
         self,
         *,
@@ -566,10 +635,19 @@ class EpisodeLedger:
         metadata = metadata or {}
         selected_analysts = selected_analysts or list(config.get("selected_analysts") or [])
         config_hash = stable_config_hash(config)
+        source = git_provenance()
         leakage_risk = (
             metadata.get("data_leakage_risk")
+            or metadata.get("leakage_risk")
             or (config.get("episode_ledger_metadata") or {}).get("data_leakage_risk")
+            or config.get("leakage_risk")
             or ("high" if config.get("online_tools", True) else "low")
+        )
+        run_policy = (
+            metadata.get("run_policy")
+            or config.get("run_policy")
+            or ("pit_strict" if config.get("historical_mode") == "strict" else None)
+            or ("live_forward" if config.get("online_tools", True) else "legacy_observed")
         )
         record = ExperimentRecordV1(
             run_id=run_id,
@@ -584,19 +662,27 @@ class EpisodeLedger:
             critic_version=config.get("critic_version"),
             reward_version=str(config.get("eval_reward_version") or "v1_directional_alpha"),
             leakage_risk=str(leakage_risk),
-            metadata_json=metadata,
+            system_version=str(metadata.get("system_version") or config.get("system_version") or source["system_version"]),
+            git_commit=metadata.get("git_commit") or config.get("git_commit") or source["git_commit"],
+            dirty_diff_hash=metadata.get("dirty_diff_hash") or config.get("dirty_diff_hash") or source["dirty_diff_hash"],
+            run_policy=str(run_policy),
+            data_snapshot_id=metadata.get("data_snapshot_id") or config.get("data_snapshot_id"),
+            run_started_at=metadata.get("run_started_at"),
+            metadata_json={**metadata, "trust_tier": trust_tier_for(str(run_policy), str(leakage_risk))},
         )
         now = _utc_now_iso()
+        run_started_at = record.run_started_at or now
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO experiments (
                     run_id, experiment_id, config_hash, prompt_version, model_provider,
                     quick_model, deep_model, selected_analysts_json, memory_policy,
-                    critic_version, reward_version, leakage_risk, metadata_json,
-                    created_at, updated_at
+                    critic_version, reward_version, leakage_risk, system_version,
+                    git_commit, dirty_diff_hash, run_policy, data_snapshot_id,
+                    run_started_at, metadata_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     experiment_id=excluded.experiment_id,
                     config_hash=excluded.config_hash,
@@ -609,6 +695,12 @@ class EpisodeLedger:
                     critic_version=excluded.critic_version,
                     reward_version=excluded.reward_version,
                     leakage_risk=excluded.leakage_risk,
+                    system_version=excluded.system_version,
+                    git_commit=excluded.git_commit,
+                    dirty_diff_hash=excluded.dirty_diff_hash,
+                    run_policy=excluded.run_policy,
+                    data_snapshot_id=excluded.data_snapshot_id,
+                    run_started_at=excluded.run_started_at,
                     metadata_json=excluded.metadata_json,
                     updated_at=excluded.updated_at
                 """,
@@ -625,6 +717,12 @@ class EpisodeLedger:
                     record.critic_version,
                     record.reward_version,
                     record.leakage_risk,
+                    record.system_version,
+                    record.git_commit,
+                    record.dirty_diff_hash,
+                    record.run_policy,
+                    record.data_snapshot_id,
+                    run_started_at,
                     _json_dump(record.metadata_json),
                     now,
                     now,
@@ -861,10 +959,11 @@ class EpisodeLedger:
                         run_id, artifact_ref, tool_name, agent_type, source_id,
                         provider, dataset_type, status, freshness, accuracy,
                         completeness, criticality, flags_json, observed_at,
-                        source_age_days, fallback_from, timestamp, inputs_json,
-                        output_preview, created_at, updated_at
+                        source_age_days, fallback_from, timestamp,
+                        requested_trade_date, source_timestamp, max_allowed_timestamp,
+                        leakage_status, inputs_json, output_preview, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(run_id, artifact_ref) DO UPDATE SET
                         tool_name=excluded.tool_name,
                         agent_type=excluded.agent_type,
@@ -881,6 +980,10 @@ class EpisodeLedger:
                         source_age_days=excluded.source_age_days,
                         fallback_from=excluded.fallback_from,
                         timestamp=excluded.timestamp,
+                        requested_trade_date=excluded.requested_trade_date,
+                        source_timestamp=excluded.source_timestamp,
+                        max_allowed_timestamp=excluded.max_allowed_timestamp,
+                        leakage_status=excluded.leakage_status,
                         inputs_json=excluded.inputs_json,
                         output_preview=excluded.output_preview,
                         updated_at=excluded.updated_at
@@ -903,6 +1006,10 @@ class EpisodeLedger:
                         record.source_age_days,
                         record.fallback_from,
                         record.timestamp,
+                        record.requested_trade_date,
+                        record.source_timestamp,
+                        record.max_allowed_timestamp,
+                        record.leakage_status,
                         _json_dump(record.inputs),
                         record.output_preview,
                         now,

@@ -556,6 +556,7 @@ class GraphSetup:
             tool_nodes["macro"] = self.tool_nodes["macro"]
 
         # Create researcher and manager nodes
+        research_only_mode = bool(self.config.get("v2_research_only", False))
         bull_researcher_node = self._wrap_node_with_run_logging(
             "Bull Researcher",
             create_bull_researcher(
@@ -574,30 +575,32 @@ class GraphSetup:
                 self.deep_thinking_llm, self.invest_judge_memory, self.config
             ),
         )
-        trader_node = self._wrap_node_with_run_logging(
-            "Trader",
-            create_trader(self.deep_thinking_llm, self.trader_memory, self.config),
-        )
+        trader_node = risky_analyst = neutral_analyst = safe_analyst = risk_manager_node = None
+        if not research_only_mode:
+            trader_node = self._wrap_node_with_run_logging(
+                "Trader",
+                create_trader(self.deep_thinking_llm, self.trader_memory, self.config),
+            )
 
-        # Create risk analysis nodes
-        risky_analyst = self._wrap_node_with_run_logging(
-            "Risky Analyst",
-            create_risky_debator(self.quick_thinking_llm, self.config),
-        )
-        neutral_analyst = self._wrap_node_with_run_logging(
-            "Neutral Analyst",
-            create_neutral_debator(self.quick_thinking_llm, self.config),
-        )
-        safe_analyst = self._wrap_node_with_run_logging(
-            "Safe Analyst",
-            create_safe_debator(self.quick_thinking_llm, self.config),
-        )
-        risk_manager_node = self._wrap_node_with_run_logging(
-            "Risk Judge",
-            create_risk_manager(
-                self.deep_thinking_llm, self.risk_manager_memory, self.config
-            ),
-        )
+            # Create risk analysis nodes
+            risky_analyst = self._wrap_node_with_run_logging(
+                "Risky Analyst",
+                create_risky_debator(self.quick_thinking_llm, self.config),
+            )
+            neutral_analyst = self._wrap_node_with_run_logging(
+                "Neutral Analyst",
+                create_neutral_debator(self.quick_thinking_llm, self.config),
+            )
+            safe_analyst = self._wrap_node_with_run_logging(
+                "Safe Analyst",
+                create_safe_debator(self.quick_thinking_llm, self.config),
+            )
+            risk_manager_node = self._wrap_node_with_run_logging(
+                "Risk Judge",
+                create_risk_manager(
+                    self.deep_thinking_llm, self.risk_manager_memory, self.config
+                ),
+            )
         parallel_risk_round_one_mode = self.config.get("parallel_risk_first_round", True)
 
         # Create workflow
@@ -665,12 +668,13 @@ class GraphSetup:
         workflow.add_node("Bull Researcher", bull_researcher_node)
         workflow.add_node("Bear Researcher", bear_researcher_node)
         workflow.add_node("Research Manager", research_manager_node)
-        workflow.add_node("Trader", trader_node)
-        workflow.add_node("Risky Analyst", risky_analyst)
-        workflow.add_node("Neutral Analyst", neutral_analyst)
-        workflow.add_node("Safe Analyst", safe_analyst)
-        workflow.add_node("Risk Judge", risk_manager_node)
-        if parallel_risk_round_one_mode:
+        if not research_only_mode:
+            workflow.add_node("Trader", trader_node)
+            workflow.add_node("Risky Analyst", risky_analyst)
+            workflow.add_node("Neutral Analyst", neutral_analyst)
+            workflow.add_node("Safe Analyst", safe_analyst)
+            workflow.add_node("Risk Judge", risk_manager_node)
+        if parallel_risk_round_one_mode and not research_only_mode:
             parallel_risk_round_one_node = self._wrap_node_with_run_logging(
                 "Parallel Risk Round 1",
                 self._create_parallel_risk_round_one_coordinator(
@@ -700,6 +704,10 @@ class GraphSetup:
                 "Research Manager": "Research Manager",
             },
         )
+        if research_only_mode:
+            workflow.add_edge("Research Manager", END)
+            return workflow
+
         workflow.add_edge("Research Manager", "Trader")
         if parallel_risk_round_one_mode:
             workflow.add_edge("Trader", "Parallel Risk Round 1")

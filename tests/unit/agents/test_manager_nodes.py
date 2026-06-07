@@ -223,7 +223,7 @@ def test_risk_manager_validator_appends_research_only_note(isolated_config):
     assert "research-only horizon: no live Alpaca order should be placed" in result["final_trade_decision"]
 
 
-def test_risk_manager_decision_policy_downgrades_buy_when_gate_fails(isolated_config):
+def test_risk_manager_decision_policy_preserves_human_buy_when_gate_fails(isolated_config):
     isolated_config["trading_horizon"] = "swing"
     llm = PlainLLM(
         "Technical bearish, valuation cheap. No invalidation supplied.\n"
@@ -239,9 +239,10 @@ def test_risk_manager_decision_policy_downgrades_buy_when_gate_fails(isolated_co
     ):
         result = node(_base_state())
 
-    assert result["recommended_action"] == "HOLD"
+    assert result["recommended_action"] == "BUY"
     assert "decision policy gate failed" in result["final_trade_decision"]
-    assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["final_trade_decision"]
+    assert "human action preserved" in result["final_trade_decision"]
+    assert "FINAL TRANSACTION PROPOSAL: **BUY**" in result["final_trade_decision"]
 
 
 def test_risk_manager_structured_output_uses_configured_language(isolated_config):
@@ -264,9 +265,10 @@ def test_risk_manager_structured_output_uses_configured_language(isolated_config
     ), patch("tradingagents.agents.managers.risk_manager.AlpacaUtils.get_account_info", return_value={"buying_power": 1000, "cash": 500}):
         result = node(_base_state())
 
-    assert "**操作**: HOLD" in result["final_trade_decision"]
+    assert "**人类投资动作**: HOLD" in result["final_trade_decision"]
+    assert "**Alpaca 意图**: NO_ORDER" in result["final_trade_decision"]
     assert "**给用户的操作建议**: 保留观察名单，等待突破确认。" in result["final_trade_decision"]
-    assert "**给 Alpaca 的直接动作**: HOLD：当前不发送订单。" in result["final_trade_decision"]
+    assert "**Alpaca 执行计划**: HOLD：当前不发送订单。" in result["final_trade_decision"]
     assert "**风险理由**: 没有现仓，等待确认更优。" in result["final_trade_decision"]
     assert "**必要风控**: 突破确认后再分批建仓。" in result["final_trade_decision"]
     assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["final_trade_decision"]

@@ -40,9 +40,11 @@ class EvaluationTargetRepository:
                 INSERT INTO evaluation_targets (
                     target_id, target_type, run_id, plan_id, candidate_id, symbol, action,
                     horizon, anchor_date, holding_days, source, trigger_status,
-                    execution_status, metadata_json, created_at, updated_at
+                    execution_status, metadata_json, system_version, prompt_version,
+                    config_hash, run_policy, leakage_risk, data_cutoff,
+                    source_time_range_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(target_id) DO UPDATE SET
                     target_type=excluded.target_type,
                     run_id=excluded.run_id,
@@ -57,6 +59,13 @@ class EvaluationTargetRepository:
                     trigger_status=excluded.trigger_status,
                     execution_status=excluded.execution_status,
                     metadata_json=excluded.metadata_json,
+                    system_version=excluded.system_version,
+                    prompt_version=excluded.prompt_version,
+                    config_hash=excluded.config_hash,
+                    run_policy=excluded.run_policy,
+                    leakage_risk=excluded.leakage_risk,
+                    data_cutoff=excluded.data_cutoff,
+                    source_time_range_json=excluded.source_time_range_json,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -74,6 +83,13 @@ class EvaluationTargetRepository:
                     target.trigger_status,
                     target.execution_status,
                     _json_dump(target.metadata_json),
+                    target.system_version,
+                    target.prompt_version,
+                    target.config_hash,
+                    target.run_policy,
+                    target.leakage_risk,
+                    target.data_cutoff,
+                    _json_dump(target.source_time_range),
                     created_at,
                     updated_at,
                 ),
@@ -128,9 +144,11 @@ class EvaluationTargetRepository:
                     target_id, reward_version, evaluation_status, holding_days,
                     raw_return, benchmark_return, alpha_return, oracle_label,
                     classification_reward, pnl_reward, reward_scalar, mfe, mae,
-                    components_json, resolved_at, data_source
+                    components_json, system_version, prompt_version, config_hash,
+                    run_policy, leakage_risk, data_cutoff, source_time_range_json,
+                    resolved_at, data_source
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(target_id, reward_version) DO UPDATE SET
                     evaluation_status=excluded.evaluation_status,
                     holding_days=excluded.holding_days,
@@ -144,6 +162,13 @@ class EvaluationTargetRepository:
                     mfe=excluded.mfe,
                     mae=excluded.mae,
                     components_json=excluded.components_json,
+                    system_version=excluded.system_version,
+                    prompt_version=excluded.prompt_version,
+                    config_hash=excluded.config_hash,
+                    run_policy=excluded.run_policy,
+                    leakage_risk=excluded.leakage_risk,
+                    data_cutoff=excluded.data_cutoff,
+                    source_time_range_json=excluded.source_time_range_json,
                     resolved_at=excluded.resolved_at,
                     data_source=excluded.data_source
                 """,
@@ -162,6 +187,13 @@ class EvaluationTargetRepository:
                     outcome.mfe,
                     outcome.mae,
                     _json_dump(outcome.components_json),
+                    outcome.system_version,
+                    outcome.prompt_version,
+                    outcome.config_hash,
+                    outcome.run_policy,
+                    outcome.leakage_risk,
+                    outcome.data_cutoff,
+                    _json_dump(outcome.source_time_range),
                     outcome.resolved_at or utc_now_iso(),
                     outcome.data_source,
                 ),
@@ -187,7 +219,14 @@ class EvaluationTargetRepository:
         query = """
             SELECT o.*, t.target_type, t.run_id, t.plan_id, t.candidate_id,
                    t.symbol, t.action, t.horizon, t.anchor_date, t.source,
-                   t.trigger_status, t.execution_status, t.metadata_json AS target_metadata_json
+                   t.trigger_status, t.execution_status, t.metadata_json AS target_metadata_json,
+                   t.system_version AS target_system_version,
+                   t.prompt_version AS target_prompt_version,
+                   t.config_hash AS target_config_hash,
+                   t.run_policy AS target_run_policy,
+                   t.leakage_risk AS target_leakage_risk,
+                   t.data_cutoff AS target_data_cutoff,
+                   t.source_time_range_json AS target_source_time_range_json
             FROM evaluation_outcomes o
             JOIN evaluation_targets t ON t.target_id=o.target_id
         """
@@ -250,6 +289,7 @@ class EvaluationTargetBuilder:
                     "confidence": (final or {}).get("confidence"),
                     "advisory_rating": (final or {}).get("advisory_rating"),
                 },
+                **_target_provenance_from_episode(episode),
             )
             self.repository.upsert_target(target)
             created.append(target)
@@ -279,6 +319,7 @@ class EvaluationTargetBuilder:
                     "trading_mode": plan.trading_mode,
                     "source_run_id": plan.source_run_id,
                 },
+                **_target_provenance_from_run_id(self.ledger, plan.source_run_id),
             )
             self.repository.upsert_target(plan_target)
             created.append(plan_target)
@@ -306,6 +347,7 @@ class EvaluationTargetBuilder:
                         "plan_status": plan.status.value,
                         "valid_until": plan.valid_until,
                     },
+                    **_target_provenance_from_run_id(self.ledger, plan.source_run_id),
                 )
                 self.repository.upsert_target(target)
                 created.append(target)
@@ -338,6 +380,7 @@ class EvaluationTargetBuilder:
                     "action_mapping_reason": action_reason,
                     "status": candidate.get("status"),
                 },
+                **_target_provenance_from_candidate(candidate, self.config),
             )
             self.repository.upsert_target(target)
             created.append(target)
@@ -385,6 +428,7 @@ class TargetAwareRewardResolver:
                     "trigger_status": target.get("trigger_status"),
                     "execution_status": target.get("execution_status"),
                 },
+                **_outcome_provenance_from_target(target),
                 resolved_at=utc_now_iso(),
                 data_source=type(self.price_provider).__name__,
             )
@@ -401,6 +445,7 @@ class TargetAwareRewardResolver:
                     "trigger_status": target.get("trigger_status"),
                     "execution_status": target.get("execution_status"),
                 },
+                **_outcome_provenance_from_target(target),
                 resolved_at=utc_now_iso(),
                 data_source=type(self.price_provider).__name__,
             )
@@ -420,6 +465,7 @@ class TargetAwareRewardResolver:
                     "trigger_status": target.get("trigger_status"),
                     "execution_status": target.get("execution_status"),
                 },
+                **_outcome_provenance_from_target(target),
                 resolved_at=utc_now_iso(),
                 data_source=type(self.price_provider).__name__,
             )
@@ -462,20 +508,35 @@ class TargetAwareRewardResolver:
                 "target_type": target.get("target_type"),
                 "source": target.get("source"),
             },
+            **_outcome_provenance_from_target(target),
             resolved_at=utc_now_iso(),
             data_source=type(self.price_provider).__name__,
         )
 
 
-def build_target_report(ledger, *, group_by: list[str] | None = None) -> list[dict[str, Any]]:
-    group_by = group_by or ["target_type", "horizon", "symbol"]
+def build_target_report(
+    ledger,
+    *,
+    group_by: list[str] | None = None,
+    include_high_leakage: bool = False,
+) -> list[dict[str, Any]]:
+    group_by = group_by or ["trust_tier", "system_version", "prompt_version", "config_hash", "target_type", "horizon", "symbol"]
     repo = EvaluationTargetRepository(ledger)
     targets = repo.list_targets()
     outcomes = repo.list_outcomes()
     outcome_by_target = {row["target_id"]: row for row in outcomes}
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for target in targets:
-        row = {**target, **(outcome_by_target.get(target["target_id"]) or {})}
+        outcome = outcome_by_target.get(target["target_id"]) or {}
+        row = {**target, **outcome}
+        row["leakage_risk"] = _merged_provenance_value(outcome, target, "leakage_risk", "unknown")
+        row["system_version"] = _merged_provenance_value(outcome, target, "system_version", None)
+        row["prompt_version"] = _merged_provenance_value(outcome, target, "prompt_version", None)
+        row["config_hash"] = _merged_provenance_value(outcome, target, "config_hash", None)
+        row["run_policy"] = _merged_provenance_value(outcome, target, "run_policy", None)
+        if not include_high_leakage and _is_explicit_high_leakage(row):
+            continue
+        row["trust_tier"] = _trust_tier(row)
         key = tuple(row.get(field) or "unknown" for field in group_by)
         groups[key].append(row)
     summaries = []
@@ -499,6 +560,8 @@ def build_target_report(ledger, *, group_by: list[str] | None = None) -> list[di
                 "missed_opportunity_rate": len(missed) / len(resolved) if resolved else None,
                 "false_positive_buy_count": len(false_buy),
                 "false_positive_buy_rate": len(false_buy) / len(resolved) if resolved else None,
+                "leakage_distribution": dict(Counter(row.get("leakage_risk") or "unknown" for row in rows)),
+                "trust_tier_distribution": dict(Counter(row.get("trust_tier") or "unknown" for row in rows)),
                 "trigger_status_distribution": dict(Counter(row.get("trigger_status") or "unknown" for row in rows)),
                 "execution_status_distribution": dict(Counter(row.get("execution_status") or "unknown" for row in rows)),
             }
@@ -509,15 +572,99 @@ def build_target_report(ledger, *, group_by: list[str] | None = None) -> list[di
 def _target_from_row(row) -> dict[str, Any]:
     item = dict(row)
     item["metadata_json"] = _json_load(item.get("metadata_json"), {})
+    item["source_time_range"] = _json_load(item.pop("source_time_range_json", None), {})
     return item
 
 
 def _outcome_from_row(row) -> dict[str, Any]:
     item = dict(row)
     item["components_json"] = _json_load(item.get("components_json"), {})
+    item["source_time_range"] = _json_load(item.pop("source_time_range_json", None), {})
     if "target_metadata_json" in item:
         item["target_metadata"] = _json_load(item.pop("target_metadata_json"), {})
+    if "target_source_time_range_json" in item:
+        item["target_source_time_range"] = _json_load(item.pop("target_source_time_range_json"), {})
     return item
+
+
+def _merged_provenance_value(outcome: dict[str, Any], target: dict[str, Any], key: str, fallback: Any) -> Any:
+    value = outcome.get(key)
+    if value not in (None, "", "unknown"):
+        return value
+    value = outcome.get(f"target_{key}")
+    if value not in (None, "", "unknown"):
+        return value
+    value = target.get(key)
+    if value not in (None, ""):
+        return value
+    return fallback
+
+
+def _target_provenance_from_run_id(ledger, run_id: str | None) -> dict[str, Any]:
+    if not run_id:
+        return {"run_policy": "legacy_observed", "leakage_risk": "unknown"}
+    episode = ledger.load_episode(run_id) or {}
+    return _target_provenance_from_episode(episode)
+
+
+def _target_provenance_from_episode(episode: dict[str, Any]) -> dict[str, Any]:
+    experiment = episode.get("experiment") or {}
+    metadata = episode.get("metadata") or {}
+    config = episode.get("config") or {}
+    run_policy = experiment.get("run_policy") or metadata.get("run_policy") or config.get("run_policy") or "legacy_observed"
+    leakage_risk = experiment.get("leakage_risk") or metadata.get("data_leakage_risk") or metadata.get("leakage_risk") or "unknown"
+    return {
+        "system_version": experiment.get("system_version") or metadata.get("system_version"),
+        "prompt_version": experiment.get("prompt_version") or config.get("prompt_version") or "default",
+        "config_hash": experiment.get("config_hash"),
+        "run_policy": run_policy,
+        "leakage_risk": leakage_risk,
+        "data_cutoff": metadata.get("data_cutoff") or config.get("data_cutoff") or episode.get("trade_date"),
+        "source_time_range": metadata.get("source_time_range") or {},
+    }
+
+
+def _target_provenance_from_candidate(candidate: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    system_version = config.get("system_version")
+    return {
+        "system_version": str(system_version) if system_version else None,
+        "prompt_version": str(config.get("prompt_version") or "default"),
+        "config_hash": None,
+        "run_policy": str(config.get("run_policy") or "legacy_observed"),
+        "leakage_risk": str(config.get("leakage_risk") or "unknown"),
+        "data_cutoff": _date_part(candidate.get("discovered_at") or candidate.get("updated_at")),
+        "source_time_range": {},
+    }
+
+
+def _outcome_provenance_from_target(target: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "system_version": target.get("system_version") or target.get("target_system_version"),
+        "prompt_version": target.get("prompt_version") or target.get("target_prompt_version"),
+        "config_hash": target.get("config_hash") or target.get("target_config_hash"),
+        "run_policy": target.get("run_policy") or target.get("target_run_policy"),
+        "leakage_risk": target.get("leakage_risk") or target.get("target_leakage_risk") or "unknown",
+        "data_cutoff": target.get("data_cutoff") or target.get("target_data_cutoff"),
+        "source_time_range": target.get("source_time_range") or target.get("target_source_time_range") or {},
+    }
+
+
+def _trust_tier(row: dict[str, Any]) -> str:
+    leakage = str(row.get("leakage_risk") or "unknown").lower()
+    if leakage == "high":
+        return "legacy_observed"
+    policy = str(row.get("run_policy") or "").lower()
+    if policy in {"pit_strict", "historical_strict", "current_pit_rerun"}:
+        return "current_pit_rerun"
+    if policy == "live_forward":
+        return "live_forward"
+    return "legacy_observed"
+
+
+def _is_explicit_high_leakage(row: dict[str, Any]) -> bool:
+    if str(row.get("run_policy") or "").lower() in {"live_forward", "legacy_observed"}:
+        return False
+    return str(row.get("leakage_risk") or "").lower() == "high"
 
 
 def _json_dump(value: Any) -> str:

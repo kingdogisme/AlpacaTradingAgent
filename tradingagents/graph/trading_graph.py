@@ -476,7 +476,13 @@ class TradingAgentsGraph:
 
         # Return decision and processed signal
         try:
-            final_signal = self.process_signal(final_state["final_trade_decision"])
+            if self.config.get("v2_research_only", False) and not final_state.get("final_trade_decision"):
+                final_state["final_trade_decision"] = str(final_state.get("investment_plan") or "")
+            final_signal = (
+                self._research_only_signal(final_state)
+                if self.config.get("v2_research_only", False)
+                else self.process_signal(final_state["final_trade_decision"])
+            )
             try:
                 from webui.utils.state import app_state
 
@@ -502,6 +508,8 @@ class TradingAgentsGraph:
 
             audit_path = get_run_audit_logger().get_run_file_path(run_id=run_id, symbol=company_name)
             self._persist_conditional_trade_plan(final_state, run_id, audit_path)
+            if self.config.get("v2_research_only", False):
+                final_state.setdefault("final_trade_decision", str(final_state.get("investment_plan") or ""))
 
             # Store current state for reflection and log it after trade-plan enrichment.
             self.curr_state = final_state
@@ -546,6 +554,8 @@ class TradingAgentsGraph:
         run_id: str | None,
         audit_path: str | None,
     ) -> None:
+        if not self.config.get("persist_conditional_trade_plan", True):
+            return
         try:
             plan = persist_approved_plan(
                 final_state,
@@ -557,6 +567,15 @@ class TradingAgentsGraph:
                 final_state["conditional_trade_plan"] = plan.model_dump(mode="json")
         except Exception as exc:
             print(f"[TRADE_PLAN] Warning: failed to persist conditional trade plan: {exc}")
+
+    def _research_only_signal(self, final_state: dict[str, Any]) -> str:
+        text = str(final_state.get("investment_plan") or "")
+        confidence_match = "high confidence" in text.lower()
+        if "already priced" in text.lower() or "priced in" in text.lower():
+            return "HOLD"
+        if "unsupported" in text.lower() or "weak" in text.lower():
+            return "SELL"
+        return "BUY" if confidence_match else "HOLD"
 
     def _ledger_start_episode(
         self,
@@ -570,6 +589,10 @@ class TradingAgentsGraph:
         try:
             episode_metadata = {
                 "data_leakage_risk": "high" if self.config.get("online_tools", True) else "low",
+                "run_policy": self.config.get("run_policy")
+                or ("pit_strict" if self.config.get("historical_mode") == "strict" else "live_forward"),
+                "data_cutoff": self.config.get("data_cutoff") or str(trade_date),
+                "data_snapshot_id": self.config.get("data_snapshot_id"),
                 **(metadata or {}),
                 **(self.config.get("episode_ledger_metadata") or {}),
             }
@@ -613,40 +636,39 @@ class TradingAgentsGraph:
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""
+        investment_debate_state = final_state.get("investment_debate_state") or {}
+        risk_debate_state = final_state.get("risk_debate_state") or {}
         self.log_states_dict[str(trade_date)] = {
-            "company_of_interest": final_state["company_of_interest"],
-            "trade_date": final_state["trade_date"],
+            "company_of_interest": final_state.get("company_of_interest", self.ticker),
+            "trade_date": final_state.get("trade_date", str(trade_date)),
             "trading_horizon": final_state.get(
                 "trading_horizon",
                 self.config.get("trading_horizon", "swing"),
             ),
-            "market_report": final_state["market_report"],
-            "sentiment_report": final_state["sentiment_report"],
-            "news_report": final_state["news_report"],
-            "fundamentals_report": final_state["fundamentals_report"],
-            "macro_report": final_state["macro_report"],
+            "market_report": final_state.get("market_report", ""),
+            "sentiment_report": final_state.get("sentiment_report", ""),
+            "news_report": final_state.get("news_report", ""),
+            "fundamentals_report": final_state.get("fundamentals_report", ""),
+            "macro_report": final_state.get("macro_report", ""),
             "report_context_stats": final_state.get("report_context", {}).get("stats", {}),
             "investment_debate_state": {
-                "bull_history": final_state["investment_debate_state"]["bull_history"],
-                "bear_history": final_state["investment_debate_state"]["bear_history"],
-                "history": final_state["investment_debate_state"]["history"],
-                "current_response": final_state["investment_debate_state"][
-                    "current_response"
-                ],
-                "judge_decision": final_state["investment_debate_state"][
-                    "judge_decision"
-                ],
+                "bull_history": investment_debate_state.get("bull_history", ""),
+                "bear_history": investment_debate_state.get("bear_history", ""),
+                "history": investment_debate_state.get("history", ""),
+                "current_response": investment_debate_state.get("current_response", ""),
+                "judge_decision": investment_debate_state.get("judge_decision", ""),
             },
-            "trader_investment_decision": final_state["trader_investment_plan"],
+            "trader_investment_decision": final_state.get("trader_investment_plan")
+            or final_state.get("investment_plan", ""),
             "risk_debate_state": {
-                "risky_history": final_state["risk_debate_state"]["risky_history"],
-                "safe_history": final_state["risk_debate_state"]["safe_history"],
-                "neutral_history": final_state["risk_debate_state"]["neutral_history"],
-                "history": final_state["risk_debate_state"]["history"],
-                "judge_decision": final_state["risk_debate_state"]["judge_decision"],
+                "risky_history": risk_debate_state.get("risky_history", ""),
+                "safe_history": risk_debate_state.get("safe_history", ""),
+                "neutral_history": risk_debate_state.get("neutral_history", ""),
+                "history": risk_debate_state.get("history", ""),
+                "judge_decision": risk_debate_state.get("judge_decision", ""),
             },
-            "investment_plan": final_state["investment_plan"],
-            "final_trade_decision": final_state["final_trade_decision"],
+            "investment_plan": final_state.get("investment_plan", ""),
+            "final_trade_decision": final_state.get("final_trade_decision", ""),
             "conditional_trade_plan": final_state.get("conditional_trade_plan", {}),
             "active_plan_review": final_state.get("active_plan_review", {}),
         }

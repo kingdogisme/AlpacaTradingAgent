@@ -13,6 +13,7 @@ from webui.components.chart_panel import create_chart_panel
 from webui.components.decision_panel import create_decision_panel
 from webui.components.reports_panel import create_reports_panel
 from webui.components.alpaca_account import render_alpaca_account_section
+from webui.components.v2_workspace import create_v2_layer_workspace
 from webui.components.api_config_modal import create_api_config_modal
 from webui.config.constants import COLORS, REFRESH_INTERVALS
 from webui.i18n import t
@@ -93,6 +94,12 @@ def create_main_content(lang="en"):
         ]),
         className="mb-4"
     )
+    layer_workspace = create_v2_layer_workspace(
+        research_view=reports_card,
+        decision_view=decision_card,
+        execution_view=alpaca_account_card,
+        lang=lang,
+    )
 
     return [
         header,
@@ -108,18 +115,15 @@ def create_main_content(lang="en"):
                 width="auto",
             )
         ),
-        alpaca_account_card,
         dbc.Row([
             dbc.Col(config_card, md=6),
             dbc.Col([
                 chart_card,
                 html.Div(className="mb-3"),
                 status_card,
-                html.Div(className="mb-3"),
-                decision_card,
             ], md=6)
         ]),
-        reports_card,
+        layer_workspace,
         html.Div(className="mt-4"),
         create_footer(lang=lang),
     ]

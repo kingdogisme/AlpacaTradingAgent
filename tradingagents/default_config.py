@@ -53,6 +53,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "TRADINGAGENTS_TRADE_LIFECYCLE_DB_PATH",
         os.path.join(_TRADINGAGENTS_HOME, "trade_lifecycle", "trade_lifecycle.sqlite"),
     ),
+    "persist_conditional_trade_plan": os.getenv(
+        "TRADINGAGENTS_PERSIST_CONDITIONAL_TRADE_PLAN",
+        "true",
+    ).lower()
+    in ("1", "true", "yes", "on"),
     "eval_reward_version": "v1_directional_alpha",
     "eval_transaction_cost_bps": 10,
     "eval_neutral_band_bps": {"swing": 100, "position": 300, "trend": 500},
@@ -329,7 +334,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "alpha_discovery_live_news_confirmation_enabled": False,
     "alpha_discovery_policy_social_confirmation_enabled": False,
     "alpha_discovery_news_confirmation_max_age_days": int(
-        os.getenv("TRADINGAGENTS_ALPHA_DISCOVERY_NEWS_CONFIRMATION_MAX_AGE_DAYS", "14")
+        os.getenv("TRADINGAGENTS_ALPHA_DISCOVERY_NEWS_CONFIRMATION_MAX_AGE_DAYS", "30")
     ),
     "alpha_discovery_require_news_confirmation_date": os.getenv(
         "TRADINGAGENTS_ALPHA_DISCOVERY_REQUIRE_NEWS_CONFIRMATION_DATE",

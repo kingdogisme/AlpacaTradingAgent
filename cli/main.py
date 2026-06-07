@@ -16,12 +16,15 @@ from cli.legacy_main import (
     DEFAULT_CONFIG,
     _ad_print,
     _record_ad_handoff_for_ticker,
+    _AtaV2Runner,
     _TradingAgentsGraphRunner,
     analyze,
     cron_discover,
     cron_confirm,
     cron_run,
     ata_run,
+    ata_report,
+    ata_decide,
     trade_monitor,
     trade_plan_list,
     trade_plan_show,
@@ -39,6 +42,9 @@ from cli.legacy_main import (
     eval_target_list,
     eval_target_resolve,
     eval_target_report,
+    pit_run,
+    pit_audit,
+    pit_benchmark,
     ad_events,
     ad_health,
     ad_ingest,
@@ -91,9 +97,14 @@ def cron_run(
     max_symbols: int = typer.Option(6, help="Maximum symbols to inspect or execute."),
     execute: bool = typer.Option(
         False,
-        help="Actually call ATA. Default is dry-run; A-list executes automatically when enabled in config.",
+        help="Actually call ATA V2 report+decision. A-list executes automatically when enabled in config.",
     ),
     dry_run: bool = typer.Option(False, help="Force dry-run even when A-list auto-run is enabled."),
+    legacy_graph: bool = typer.Option(
+        False,
+        "--legacy-graph",
+        help="Use the pre-V2 monolithic TradingAgentsGraph for ATA handoff.",
+    ),
     trade_date: str = typer.Option(
         datetime.date.today().isoformat(),
         help="ATA trade date in YYYY-MM-DD format.",
@@ -106,7 +117,8 @@ def cron_run(
         and tier.upper() == "A"
         and bool(DEFAULT_CONFIG.get("alpha_discovery_auto_run_a_list", True))
     )
-    runner = _TradingAgentsGraphRunner(DEFAULT_CONFIG.copy()) if should_execute else None
+    runner_cls = _TradingAgentsGraphRunner if legacy_graph else _AtaV2Runner
+    runner = runner_cls(DEFAULT_CONFIG.copy()) if should_execute else None
     results = service.run_candidates(
         tier=tier,
         max_symbols=max_symbols,
@@ -122,6 +134,7 @@ def cron_run(
             "execute": should_execute,
             "auto_run_a_list": bool(DEFAULT_CONFIG.get("alpha_discovery_auto_run_a_list", True)),
             "dry_run": dry_run,
+            "runner": "legacy_graph" if legacy_graph else "ata_v2",
             "result_count": len(results),
             "run_status_counts": count_values(results, "run_status"),
             "candidates": [compact_candidate(row) for row in results],
@@ -170,11 +183,29 @@ def _agent_map_payload() -> dict:
                 "public_import": "tradingagents.agents.utils.agent_utils",
                 "quality_helpers": "tradingagents.agents.utils.tool_quality",
             },
+            "v2_contracts": {
+                "public_import": "tradingagents.contracts",
+                "groups": {
+                    "research": "tradingagents.contracts.research",
+                    "decision": "tradingagents.contracts.decision",
+                    "execution": "tradingagents.contracts.execution",
+                    "eval": "tradingagents.contracts.eval",
+                },
+            },
+            "v2_layers": {
+                "research": "tradingagents.research.service.ResearchService",
+                "portfolio_decision": "tradingagents.portfolio.service.PortfolioDecisionService",
+                "execution": "tradingagents.execution.service.ExecutionService",
+            },
         },
         "core_commands": [
+            "python -m cli.main ata-report --ticker <ticker> --trade-date <date> --horizon <horizon>",
+            "python -m cli.main ata-decide --report-id <report_id>",
             "python -m cli.main run-index --run-id <run_id> --format json",
             "python -m cli.main quality-index --run-id <run_id> --format json",
+            "python -m cli.main pit-audit --run-id <run_id> --format json",
             "python -m cli.main retrieval-pack --type risk_review --run-id <run_id> --format json",
+            "python -m cli.main retrieval-pack --type layer_eval --layer decision --artifact-id <decision_id> --format json",
             "python -m cli.main quality-open --run-id <run_id> --artifact-ref <ref> --no-include-output",
         ],
         "test_commands": [
@@ -221,6 +252,8 @@ for command_name, callback in [
     ("cron-confirm", cron_confirm),
     ("cron-run", cron_run),
     ("ata-run", ata_run),
+    ("ata-report", ata_report),
+    ("ata-decide", ata_decide),
     ("trade-monitor", trade_monitor),
     ("trade-plan-list", trade_plan_list),
     ("trade-plan-show", trade_plan_show),
@@ -238,6 +271,9 @@ for command_name, callback in [
     ("eval-target-list", eval_target_list),
     ("eval-target-resolve", eval_target_resolve),
     ("eval-target-report", eval_target_report),
+    ("pit-run", pit_run),
+    ("pit-audit", pit_audit),
+    ("pit-benchmark", pit_benchmark),
     ("ad-events", ad_events),
     ("ad-health", ad_health),
     ("ad-ingest", ad_ingest),

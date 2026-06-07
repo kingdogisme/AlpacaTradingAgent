@@ -53,6 +53,73 @@ def test_trend_brief_generated_at_counts_as_observed_date():
     assert "missing_observed_timestamp" not in result["flags"]
 
 
+def test_social_quality_uses_report_as_of_not_future_dates():
+    result = evaluate_tool_output(
+        "get_sellthenews_social_sentiment",
+        {"ticker": "MSFT", "curr_date": "2026-06-04"},
+        (
+            "=== WSB Analysis: Daily Discussion Thread for June 04, 2026 ===\n"
+            "Updated: 2026-06-04 09:21:23 ET\n"
+            "Mentions include an unrelated historical date 2028-01-21."
+        ),
+        artifact_ref="tool_call:4",
+    )
+
+    assert result["status"] == "pass"
+    assert result["observed_at"] == "2026-06-04"
+    assert "future_observed_timestamp" not in result["flags"]
+
+
+def test_fundamentals_quality_uses_as_of_not_future_metric_periods():
+    result = evaluate_tool_output(
+        "get_finnhub_company_fundamentals",
+        {"ticker": "CRM", "curr_date": "2026-06-04"},
+        (
+            "## Finnhub Fundamentals for CRM as of 2026-06-04\n"
+            "Annual salesPerShare: 2026-06-30: 43.4"
+        ),
+        artifact_ref="tool_call:5",
+    )
+
+    assert result["observed_at"] == "2026-06-04"
+    assert "future_observed_timestamp" not in result["flags"]
+
+
+def test_sec_quality_does_not_mark_stale_metric_note_unavailable():
+    result = evaluate_tool_output(
+        "get_sec_edgar_fundamentals",
+        {"ticker": "RCAT", "curr_date": "2026-06-04"},
+        (
+            "## SEC EDGAR Official Fundamentals for RCAT as of 2026-06-04\n"
+            "### Filing quality flags\n"
+            "- preferred tag Revenues skipped because latest fact was stale; "
+            "latest SEC cash fact 2021-07-31"
+        ),
+        artifact_ref="tool_call:6",
+    )
+
+    assert result["status"] == "pass"
+    assert "source_unavailable" not in result["flags"]
+
+
+def test_options_quality_warns_when_required_levels_missing():
+    result = evaluate_tool_output(
+        "get_sellthenews_options_data",
+        {"ticker": "AVGO", "curr_date": "2026-05-20"},
+        (
+            "Spot Price: $1200\n"
+            "Selected Expiration: 2026-05-22\n"
+            "Gamma Flip: $1190\n"
+            "Net GEX: 1000000\n"
+        ),
+        artifact_ref="tool_call:4",
+    )
+
+    assert result["status"] == "warn"
+    assert result["completeness"] == "warn"
+    assert "missing_required_options_levels" in result["flags"]
+
+
 def test_all_toolkit_tools_have_source_spec():
     module = ast.parse(Path("tradingagents/agents/utils/agent_utils.py").read_text(encoding="utf-8"))
     toolkit = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Toolkit")

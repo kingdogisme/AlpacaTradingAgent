@@ -32,6 +32,13 @@ class EvaluationTargetRecord:
     trigger_status: str = "not_applicable"
     execution_status: str = "not_ordered"
     metadata_json: dict[str, Any] = field(default_factory=dict)
+    system_version: str | None = None
+    prompt_version: str | None = None
+    config_hash: str | None = None
+    run_policy: str | None = None
+    leakage_risk: str = "unknown"
+    data_cutoff: str | None = None
+    source_time_range: dict[str, Any] = field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -52,8 +59,52 @@ class EvaluationOutcomeRecord:
     mfe: float | None = None
     mae: float | None = None
     components_json: dict[str, Any] = field(default_factory=dict)
+    system_version: str | None = None
+    prompt_version: str | None = None
+    config_hash: str | None = None
+    run_policy: str | None = None
+    leakage_risk: str = "unknown"
+    data_cutoff: str | None = None
+    source_time_range: dict[str, Any] = field(default_factory=dict)
     resolved_at: str | None = None
     data_source: str = "TargetAwareRewardResolver"
+
+
+@dataclass(frozen=True)
+class LayerEvaluationTargetRecord:
+    target_id: str
+    layer: str
+    target_type: str
+    symbol: str
+    anchor_date: str
+    schema_version: str = "v2"
+    run_id: str | None = None
+    report_id: str | None = None
+    decision_id: str | None = None
+    plan_id: str | None = None
+    execution_id: str | None = None
+    horizon: str | None = None
+    audit_refs: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class LayerEvaluationResultRecord:
+    evaluation_id: str
+    target_id: str
+    layer: str
+    evaluator_name: str
+    status: str
+    schema_version: str = "v2"
+    score: float | None = None
+    metrics: dict[str, Any] = field(default_factory=dict)
+    failure_tags: list[str] = field(default_factory=list)
+    reason: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +198,12 @@ class ExperimentRecordV1:
     critic_version: str | None = None
     reward_version: str | None = None
     leakage_risk: str = "unknown"
+    system_version: str | None = None
+    git_commit: str | None = None
+    dirty_diff_hash: str | None = None
+    run_policy: str | None = None
+    data_snapshot_id: str | None = None
+    run_started_at: str | None = None
     metadata_json: dict[str, Any] = field(default_factory=dict)
 
 
@@ -257,6 +314,10 @@ class QualityIndexRecordV1:
     source_age_days: int | None = None
     fallback_from: str | None = None
     timestamp: str | None = None
+    requested_trade_date: str | None = None
+    source_timestamp: str | None = None
+    max_allowed_timestamp: str | None = None
+    leakage_status: str = "unknown"
     inputs: dict[str, Any] = field(default_factory=dict)
     output_preview: str = ""
 

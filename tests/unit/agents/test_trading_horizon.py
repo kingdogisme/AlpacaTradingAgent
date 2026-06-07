@@ -92,6 +92,8 @@ class TradingHorizonTests(unittest.TestCase):
         self.assertIn("relative_strength", payload)
         self.assertIn("invalidation", payload)
         self.assertIn("regime_alignment", payload)
+        self.assertEqual(payload["evidence_completeness"]["status"], "complete")
+        self.assertEqual(payload["relative_strength"]["evidence_completeness"]["status"], "complete")
         self.assertIn("risk_overlays", payload)
         self.assertIn("benchmark_63d_return", payload["risk_overlays"])
 

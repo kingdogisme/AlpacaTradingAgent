@@ -99,6 +99,8 @@ class PromptTemplateTests(unittest.TestCase):
 
         self.assertIn("gamma flip", market_prompt)
         self.assertIn("GEX", market_prompt)
+        self.assertIn("evidence_completeness.status", market_prompt)
+        self.assertIn("Gamma Flip, Call Wall, Put Wall, and Max Pain", market_prompt)
         self.assertIn("OPTIONS POSITIONING", trader_prompt)
         self.assertIn("gamma flip", trader_prompt)
         self.assertIn("negative gamma", conservative_prompt)
@@ -117,8 +119,8 @@ class PromptTemplateTests(unittest.TestCase):
         trader_prompt = load_prompt("trader/trader_context")
         risk_manager_prompt = load_prompt("managers/risk_manager")
 
-        self.assertIn("BUY is the only Alpaca action that can open a new long position", investment_prompt)
-        self.assertIn("HOLD sends no order to Alpaca", investment_prompt)
+        self.assertIn("BUY/HOLD/SELL in the final transaction proposal is the human investment action", investment_prompt)
+        self.assertIn("Alpaca execution is controlled separately by Alpaca Intent", investment_prompt)
         self.assertIn("do not use SELL to express bearishness when there is no position", investment_prompt)
         self.assertIn("Treat no open position as the normal paper-trading starting point", investment_prompt)
         self.assertIn('use HOLD for "do not enter / wait / no trade"', investment_prompt)
@@ -149,7 +151,7 @@ class PromptTemplateTests(unittest.TestCase):
         risk_horizon_prompt = load_prompt("horizons/agent_context_risk_mgmt")
 
         self.assertIn("BUY actionability gate", investment_prompt)
-        self.assertIn("Strong thesis but poor immediate entry quality is not a BUY", investment_prompt)
+        self.assertIn("Strong thesis but poor immediate entry quality can be human BUY", investment_prompt)
         self.assertIn("Separate thesis quality from current actionability", research_manager_prompt)
         self.assertIn("Actionability Gate", trader_prompt)
         self.assertIn("Now-vs-Trigger Discipline", trader_prompt)
@@ -158,7 +160,7 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn('do not treat "daily/weekly trend is not broken" as enough for BUY', position_prompt)
         self.assertIn('do not treat "quarterly thesis is intact" as enough for BUY', trend_prompt)
         self.assertIn("Do not call a future conditional entry a current BUY", trader_horizon_prompt)
-        self.assertIn("current executable action is HOLD", risk_horizon_prompt)
+        self.assertIn("conditional/no-order", risk_horizon_prompt)
 
     def test_advisory_rating_prompt_contract_is_metadata_only(self):
         research_manager_prompt = load_prompt("managers/research_manager")
@@ -194,13 +196,13 @@ class PromptTemplateTests(unittest.TestCase):
         risk_manager_prompt = load_prompt("managers/risk_manager")
 
         self.assertIn("User Recommendation", trader_prompt)
-        self.assertIn("Alpaca Action Plan", trader_prompt)
+        self.assertIn("Alpaca Intent / Action Plan", trader_prompt)
         self.assertIn("Keep the user-facing recommendation separate", trader_prompt)
         self.assertIn("User Recommendation: actionable portfolio guidance", risk_manager_prompt)
-        self.assertIn("Alpaca Execution Action: exact executable action token", risk_manager_prompt)
-        self.assertIn("SELL/STRONG SELL advisory views map to executable HOLD", risk_manager_prompt)
+        self.assertIn("Alpaca Intent: exactly one of NO_ORDER, CONDITIONAL_ORDER, or IMMEDIATE_ORDER", risk_manager_prompt)
+        self.assertIn("SELL/STRONG SELL advisory views map to human HOLD", risk_manager_prompt)
         self.assertIn("research-only/no live order", trader_prompt)
-        self.assertIn("research-only/no live order", risk_manager_prompt)
+        self.assertIn("do not imply a live Alpaca order will be placed", risk_manager_prompt)
 
     def test_position_sizing_policy_supports_trend_concentrated_portfolios(self):
         investment_prompt = load_prompt("trading_modes/investment")

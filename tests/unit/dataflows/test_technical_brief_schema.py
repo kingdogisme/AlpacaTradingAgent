@@ -36,9 +36,30 @@ def test_technical_brief_schema_validates_mocked_ohlcv(monkeypatch):
     assert payload["symbol"] == "AAPL"
     assert {item["timeframe"] for item in payload["timeframes"]} == {"1h", "4h", "1d"}
     assert payload["signal_summary"]["confidence"] in {"high", "medium", "low"}
+    assert payload["evidence_completeness"]["status"] == "complete"
+    assert payload["evidence_completeness"]["missing_fields"] == []
     assert "last_close" in payload["raw_prices"]
     assert "risk_overlays" in payload
     assert "price_vs_50d" in payload["risk_overlays"]
+
+
+def test_technical_brief_caps_confidence_when_core_indicators_missing(monkeypatch):
+    def _mock_short_daily(**kwargs):
+        if kwargs.get("timeframe") == "1Day":
+            return _mock_ohlcv(80)
+        return _mock_ohlcv(260)
+
+    monkeypatch.setattr(
+        "tradingagents.dataflows.technical_brief.AlpacaUtils.get_stock_data",
+        _mock_short_daily,
+    )
+
+    brief = build_technical_brief("AAPL", "2026-01-02")
+    payload = json.loads(brief.model_dump_json())
+
+    assert payload["evidence_completeness"]["status"] == "partial"
+    assert "1d.trend.sma_200" in payload["evidence_completeness"]["missing_fields"]
+    assert payload["signal_summary"]["confidence"] != "high"
 
 
 def test_schema_rejects_invalid_direction_contract():

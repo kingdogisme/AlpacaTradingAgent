@@ -1,7 +1,7 @@
 """Structured output schemas for decision agents.
 
-Executable Alpaca actions remain BUY/HOLD/SELL or LONG/NEUTRAL/SHORT.
-The upstream 5-tier rating is advisory metadata only.
+The final BUY/HOLD/SELL report action is an investment recommendation for
+humans. Alpaca execution intent is represented separately.
 """
 
 from __future__ import annotations
@@ -28,6 +28,12 @@ class ExecutableAction(str, Enum):
     LONG = "LONG"
     NEUTRAL = "NEUTRAL"
     SHORT = "SHORT"
+
+
+class AlpacaIntent(str, Enum):
+    NO_ORDER = "NO_ORDER"
+    CONDITIONAL_ORDER = "CONDITIONAL_ORDER"
+    IMMEDIATE_ORDER = "IMMEDIATE_ORDER"
 
 
 class ResearchPlan(BaseModel):
@@ -80,7 +86,20 @@ class TraderProposal(BaseModel):
 
 
 class RiskDecision(BaseModel):
-    action: ExecutableAction = Field(description="Final executable action for Alpaca.")
+    action: ExecutableAction = Field(
+        description=(
+            "Backward-compatible human investment action for the final report. "
+            "This is not by itself an Alpaca order instruction."
+        )
+    )
+    human_action: Optional[ExecutableAction] = Field(
+        default=None,
+        description="Human-facing investment action: BUY, HOLD, or SELL.",
+    )
+    alpaca_intent: AlpacaIntent = Field(
+        default=AlpacaIntent.NO_ORDER,
+        description="Alpaca execution intent: NO_ORDER, CONDITIONAL_ORDER, or IMMEDIATE_ORDER.",
+    )
     confidence: str = Field(description="Confidence level: high, medium, or low.")
     risk_rationale: str = Field(description="Risk-adjusted justification.")
     required_controls: str = Field(description="Stops, invalidation, sizing, and risk controls.")
@@ -126,6 +145,8 @@ class RiskDecision(BaseModel):
 ZH_CN_LABELS = {
     "recommendation": "建议",
     "action": "操作",
+    "human_action": "人类投资动作",
+    "alpaca_intent": "Alpaca 意图",
     "confidence": "信心",
     "advisory_rating": "顾问评级",
     "rationale": "理由",
@@ -138,7 +159,7 @@ ZH_CN_LABELS = {
     "risk_rationale": "风险理由",
     "required_controls": "必要风控",
     "user_recommendation": "给用户的操作建议",
-    "alpaca_action_plan": "给 Alpaca 的直接动作",
+    "alpaca_action_plan": "Alpaca 执行计划",
     "time_horizon": "时间周期",
     "thesis": "交易论点",
     "invalidation": "失效条件",
@@ -154,6 +175,8 @@ ZH_CN_LABELS = {
 EN_LABELS = {
     "recommendation": "Recommendation",
     "action": "Action",
+    "human_action": "Human Investment Action",
+    "alpaca_intent": "Alpaca Intent",
     "confidence": "Confidence",
     "advisory_rating": "Advisory Rating",
     "rationale": "Rationale",
@@ -230,8 +253,10 @@ def render_trader_proposal(proposal: TraderProposal, output_language: str | None
 
 def render_risk_decision(decision: RiskDecision, output_language: str | None = None) -> str:
     labels = _labels(output_language)
+    human_action = (decision.human_action or decision.action).value
     parts = [
-        _field_line("action", decision.action.value, labels),
+        _field_line("human_action", human_action, labels),
+        _field_line("alpaca_intent", decision.alpaca_intent.value, labels),
         _field_line("confidence", decision.confidence, labels),
         *_rating_line(decision.advisory_rating, labels),
     ]
@@ -250,7 +275,7 @@ def render_risk_decision(decision: RiskDecision, output_language: str | None = N
         ]
     )
     _append_horizon_fields(parts, decision, labels)
-    parts.extend(["", f"FINAL TRANSACTION PROPOSAL: **{decision.action.value}**"])
+    parts.extend(["", f"FINAL TRANSACTION PROPOSAL: **{human_action}**"])
     return "\n".join(parts)
 
 

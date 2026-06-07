@@ -34,7 +34,7 @@ def test_swing_technical_bearish_blocks_buy(isolated_config):
     assert any(gate.name == "technical" and not gate.passed for gate in result.gate_results)
 
 
-def test_hard_actionability_gate_still_blocks_buy(isolated_config):
+def test_hard_actionability_gate_blocks_execution_but_preserves_human_buy(isolated_config):
     result = evaluate_decision_policy(
         config=isolated_config,
         horizon="swing",
@@ -51,7 +51,10 @@ def test_hard_actionability_gate_still_blocks_buy(isolated_config):
         invalidation_price=95,
     )
 
-    assert result.recommended_action == "HOLD"
+    assert result.recommended_action == "BUY"
+    assert result.alpaca_intent == "NO_ORDER"
+    assert result.allowed_risk_pct == 0
+    assert "human action preserved" in result.validator_note
     assert not result.hard_gate_passed
     assert any(gate.name == "actionability" and not gate.passed for gate in result.gate_results)
 
@@ -179,7 +182,8 @@ def test_momentum_crash_blocks_high_momentum_buy_when_not_confirmed_leader(isola
         invalidation_price=90,
     )
 
-    assert result.recommended_action == "HOLD"
+    assert result.recommended_action == "BUY"
+    assert result.alpaca_intent == "NO_ORDER"
     assert "momentum_crash_gate=blocked" in result.risk_overlay.blocked_reason
 
 
@@ -210,7 +214,8 @@ def test_crowding_extreme_downgrades_buy_to_hold(isolated_config):
     )
 
     assert result.risk_overlay.crowding.level == "extreme"
-    assert result.recommended_action == "HOLD"
+    assert result.recommended_action == "BUY"
+    assert result.alpaca_intent == "NO_ORDER"
     assert "crowding_gate=extreme" in result.risk_overlay.blocked_reason
 
 

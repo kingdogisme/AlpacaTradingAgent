@@ -106,3 +106,20 @@ def test_sequential_graph_setup_routes_selected_analysts_in_order():
     assert ("Msg Clear Market", "News Analyst") in workflow.edges
     assert ("Msg Clear News", "Build Report Context") in workflow.edges
     assert ("Trader", "Risky Analyst") in workflow.edges
+
+
+def test_research_only_graph_setup_ends_after_research_manager():
+    config = {"parallel_analysts": True, "parallel_risk_first_round": True, "v2_research_only": True}
+    patches = _patch_agent_factories()
+    for item in patches:
+        item.start()
+    try:
+        workflow = _setup(config).setup_graph(["market", "news"])
+    finally:
+        for item in reversed(patches):
+            item.stop()
+
+    assert "Research Manager" in workflow.nodes
+    assert "Trader" not in workflow.nodes
+    assert "Risk Judge" not in workflow.nodes
+    assert ("Research Manager", "__end__") in workflow.edges

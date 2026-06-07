@@ -231,7 +231,7 @@ def _add_text_confirmation(
     if not match:
         return None
     freshest_source_date = freshest_date_in_text(text)
-    as_of = datetime.now(timezone.utc).date().isoformat()
+    as_of = _confirmation_as_of(candidate, freshest_source_date=freshest_source_date)
     if config.require_news_date and freshest_source_date is None:
         return None
     if freshest_source_date is not None and not is_fresh_date(
@@ -260,6 +260,25 @@ def _add_text_confirmation(
         )
     )
     return ConfirmationHit(confirmation_source, strength)
+
+
+def _confirmation_as_of(candidate: OpportunityCandidate, *, freshest_source_date=None) -> str:
+    for raw in (getattr(candidate, "discovered_at", None), getattr(candidate, "created_at", None)):
+        if not raw:
+            continue
+        text = str(raw).strip()
+        try:
+            candidate_date = datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        except ValueError:
+            match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text)
+            if match:
+                candidate_date = datetime.fromisoformat(match.group(0)).date()
+            else:
+                continue
+        if freshest_source_date is None or date_age_days(freshest_source_date, as_of=candidate_date) >= -1:
+            return candidate_date.isoformat()
+        break
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _add_options_confirmation(candidate: OpportunityCandidate, client: SellTheNewsClient) -> bool:

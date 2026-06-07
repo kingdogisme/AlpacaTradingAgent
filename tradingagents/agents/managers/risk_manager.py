@@ -71,7 +71,6 @@ def validate_risk_decision_text(
             evidence_text=response_content,
         )
         if policy_result.validator_note:
-            parsed_action = policy_result.recommended_action
             notes.append(policy_result.validator_note)
             response_content = (
                 f"{response_content.rstrip()}\n\n"

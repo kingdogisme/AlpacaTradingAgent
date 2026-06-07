@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,10 @@ def build_quality_index(ledger: EpisodeLedger, run_id: str) -> list[dict[str, An
             source_age_days=event.get("source_age_days"),
             fallback_from=event.get("fallback_from"),
             timestamp=event.get("timestamp"),
+            requested_trade_date=episode.get("trade_date"),
+            source_timestamp=event.get("observed_at") or event.get("timestamp"),
+            max_allowed_timestamp=episode.get("trade_date"),
+            leakage_status=_leakage_status(event, episode.get("trade_date")),
             inputs=event.get("inputs") or {},
             output_preview=str(event.get("output_preview") or "")[:240],
         )
@@ -72,6 +76,7 @@ def build_run_index(ledger: EpisodeLedger, run_id: str) -> dict[str, Any] | None
     audit = _load_episode_audit(episode)
     if audit:
         quality_events = quality_events_from_audit(audit)
+        leakage_events = [_leakage_status(event, episode.get("trade_date")) for event in quality_events]
         summary = summarize_quality_events(
             quality_events,
             run_id=episode.get("run_id"),
@@ -81,6 +86,7 @@ def build_run_index(ledger: EpisodeLedger, run_id: str) -> dict[str, Any] | None
         build_quality_index(ledger, run_id)
     else:
         quality_events = []
+        leakage_events = ["unknown"]
         flags.append("audit_missing")
         summary = summarize_quality_events(
             [],
@@ -94,6 +100,8 @@ def build_run_index(ledger: EpisodeLedger, run_id: str) -> dict[str, Any] | None
     config = episode.get("config") or {}
     counts = summary.get("summary") or {}
     quality_status = _worst_status([event.get("status") for event in quality_events])
+    if "leak" in leakage_events:
+        flags.append("high_leakage")
 
     record = RunIndexRecordV1(
         index_id=f"run_index:{run_id}",
@@ -164,6 +172,8 @@ def build_retrieval_pack(
     run_id: str | None = None,
     symbol: str | None = None,
     horizon: str | None = None,
+    layer: str | None = None,
+    artifact_id: str | None = None,
     prompt_version: str | None = None,
     config_hash: str | None = None,
     limit: int = 5,
@@ -189,6 +199,17 @@ def build_retrieval_pack(
             limit=limit,
             token_budget=token_budget,
             include_high_leakage=include_high_leakage,
+        )
+    elif pack_type == "layer_eval":
+        record = _layer_eval_pack(
+            ledger,
+            layer=layer,
+            run_id=run_id,
+            symbol=symbol,
+            horizon=horizon,
+            artifact_id=artifact_id,
+            limit=limit,
+            token_budget=token_budget,
         )
     else:
         raise ValueError(f"Unsupported retrieval pack type: {pack_type}")
@@ -365,6 +386,64 @@ def _prompt_audit_pack(
     )
 
 
+def _layer_eval_pack(
+    ledger: EpisodeLedger,
+    *,
+    layer: str | None,
+    run_id: str | None,
+    symbol: str | None,
+    horizon: str | None,
+    artifact_id: str | None,
+    limit: int,
+    token_budget: int,
+) -> RetrievalPackRecordV1:
+    filters: dict[str, Any] = {"limit": limit}
+    if layer:
+        filters["layer"] = layer
+    if run_id:
+        filters["run_id"] = run_id
+    if symbol:
+        filters["symbol"] = symbol
+    if horizon:
+        filters["horizon"] = horizon
+    if artifact_id:
+        filters["artifact_id"] = artifact_id
+    rows = ledger.list_layer_evaluation_records(filters)
+    items = [
+        _pack_item(
+            rank=idx,
+            item_type="layer_evaluation_record",
+            reason="Layer-aware ATA V2 evaluation finding for targeted debugging.",
+            source_ref=str(row.get("evaluation_id") or row.get("target_id")),
+            payload=row,
+        )
+        for idx, row in enumerate(rows, start=1)
+    ]
+    target_layers = dict(Counter(row.get("layer") or "unknown" for row in rows))
+    target_types = dict(Counter(row.get("target_type") or "unknown" for row in rows))
+    statuses = dict(Counter(row.get("status") or "unknown" for row in rows))
+    pack_suffix = artifact_id or run_id or symbol or layer or "all"
+    return RetrievalPackRecordV1(
+        pack_id=f"retrieval_pack:layer_eval:{pack_suffix}:v1",
+        pack_type="layer_eval",
+        policy_version=RETRIEVAL_POLICY_VERSION,
+        run_id=run_id,
+        symbol=symbol,
+        horizon=horizon,
+        token_budget=token_budget,
+        source_refs=[str(row.get("evaluation_id")) for row in rows if row.get("evaluation_id")],
+        summary={
+            "layer": layer,
+            "artifact_id": artifact_id,
+            "records": len(rows),
+            "layer_distribution": target_layers,
+            "target_type_distribution": target_types,
+            "status_distribution": statuses,
+        },
+        items=items,
+    )
+
+
 def retrieval_pack_envelope(pack: dict[str, Any]) -> dict[str, Any]:
     return {
         "generated_at": utc_now_iso(),
@@ -438,6 +517,37 @@ def _latest_reward(ledger: EpisodeLedger, run_id: str | None) -> dict[str, Any] 
     episode = ledger.load_episode(str(run_id))
     rewards = (episode or {}).get("rewards") or []
     return rewards[-1] if rewards else None
+
+
+def _leakage_status(event: dict[str, Any], trade_date: str | None) -> str:
+    trade = _parse_date(trade_date)
+    if trade is None:
+        return "unknown"
+    source = _parse_date(event.get("observed_at"))
+    if source is None:
+        dataset = str(event.get("dataset_type") or "")
+        if dataset in {"news", "social", "macro_news", "price_bars", "technical_indicators", "filings"}:
+            return "unverifiable"
+        return "unknown"
+    return "leak" if source > trade else "ok"
+
+
+def _parse_date(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt, length in (("%Y-%m-%d", 10), ("%Y/%m/%d", 10), ("%Y-%m", 7), ("%Y/%m", 7)):
+        try:
+            return datetime.strptime(text[:length], fmt).date()
+        except ValueError:
+            pass
+    return None
 
 
 def _avg(values: list[Any]) -> float | None:

@@ -5,6 +5,7 @@ from io import StringIO
 from types import SimpleNamespace
 
 from tradingagents.agents.schemas import (
+    AlpacaIntent,
     AdvisoryRating,
     ExecutableAction,
     ResearchPlan,
@@ -96,6 +97,8 @@ class StructuredDecisionTests(unittest.TestCase):
         risk = render_risk_decision(
             RiskDecision(
                 action=ExecutableAction.SELL,
+                human_action=ExecutableAction.SELL,
+                alpaca_intent=AlpacaIntent.IMMEDIATE_ORDER,
                 confidence="low",
                 risk_rationale="Downside exceeds reward.",
                 required_controls="Do not re-enter without reversal.",
@@ -113,6 +116,8 @@ class StructuredDecisionTests(unittest.TestCase):
         self.assertIn("**Advisory Rating**: STRONG BUY", research)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **BUY**", research)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **LONG**", trader)
+        self.assertIn("**Human Investment Action**: SELL", risk)
+        self.assertIn("**Alpaca Intent**: IMMEDIATE_ORDER", risk)
         self.assertIn("**User Recommendation**: Exit the current long and keep it off the buy list.", risk)
         self.assertIn("**Alpaca Execution Action**: SELL: close the existing long position.", risk)
         self.assertIn("**Invalidation**: Reclaim weekly trend support.", risk)
@@ -158,7 +163,9 @@ class StructuredDecisionTests(unittest.TestCase):
         self.assertIn("**操作**: HOLD", trader)
         self.assertIn("**判断依据**: 趋势未坏，但入场赔率不足。", trader)
         self.assertIn("**给用户的操作建议**: 观察名单，等待突破确认。", risk)
-        self.assertIn("**给 Alpaca 的直接动作**: HOLD：当前不发送订单。", risk)
+        self.assertIn("**人类投资动作**: HOLD", risk)
+        self.assertIn("**Alpaca 意图**: NO_ORDER", risk)
+        self.assertIn("**Alpaca 执行计划**: HOLD：当前不发送订单。", risk)
         self.assertIn("**风险理由**: 无现仓，等待确认更优。", risk)
         self.assertIn("**必要风控**: 突破确认后再分批。", risk)
         self.assertIn("FINAL TRANSACTION PROPOSAL: **HOLD**", risk)

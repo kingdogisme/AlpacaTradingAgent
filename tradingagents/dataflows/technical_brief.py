@@ -19,6 +19,7 @@ import pandas as pd
 from .alpaca_utils import AlpacaUtils
 from .ta_schema import (
     Direction,
+    EvidenceCompleteness,
     KeyLevel,
     MarketStructure,
     MomentumState,
@@ -46,8 +47,113 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 TIMEFRAMES: Dict[str, Tuple[str, int]] = {
     "1h": ("1Hour", 30),      # ~30 days of hourly bars ≈ 200 bars
     "4h": ("4Hour", 90),      # ~90 days of 4h bars ≈ 540 bars
-    "1d": ("1Day", 200),      # 200 calendar days ≈ 140 trading days
+    "1d": ("1Day", 320),      # enough trading bars for SMA-200 plus buffer
 }
+
+TECHNICAL_REQUIRED_FIELDS = (
+    "1d.trend.adx",
+    "1d.momentum.rsi_value",
+    "1d.momentum.macd_cross",
+    "1d.trend.ema_slope",
+    "1d.trend.sma_200",
+)
+
+def _series_has_latest_number(df: pd.DataFrame, column: str) -> bool:
+    if df is None or df.empty or column not in df.columns:
+        return False
+    value = df[column].iloc[-1]
+    return not pd.isna(value)
+
+
+def _indicator_completeness(
+    dfs_by_tf: Dict[str, pd.DataFrame],
+    tf_briefs: List[TimeframeBrief],
+) -> EvidenceCompleteness:
+    required = list(TECHNICAL_REQUIRED_FIELDS)
+    present: list[str] = []
+    daily_df = dfs_by_tf.get("1d")
+    daily_brief = next((brief for brief in tf_briefs if brief.timeframe == "1d"), None)
+
+    if daily_df is not None:
+        if _series_has_latest_number(daily_df, "adx_14"):
+            present.append("1d.trend.adx")
+        if _series_has_latest_number(daily_df, "rsi_14"):
+            present.append("1d.momentum.rsi_value")
+        if _series_has_latest_number(daily_df, "macd") and _series_has_latest_number(daily_df, "macds"):
+            present.append("1d.momentum.macd_cross")
+        if _series_has_latest_number(daily_df, "ema_8") and len(daily_df["ema_8"].dropna()) >= 6:
+            present.append("1d.trend.ema_slope")
+        if _series_has_latest_number(daily_df, "sma_200"):
+            present.append("1d.trend.sma_200")
+
+    missing = [field for field in required if field not in present]
+    if daily_brief is None:
+        missing = sorted(set(missing + required))
+    status = "complete" if not missing else "partial"
+    confidence_cap = "high" if not missing else "medium" if len(present) >= 3 else "low"
+    note = (
+        "Required daily ADX/RSI/MACD/EMA slope/SMA200 evidence is complete."
+        if not missing
+        else "Technical indicator evidence is incomplete; cap market-report technical confidence at "
+        f"{confidence_cap} and do not treat missing fields as confirmation."
+    )
+    return EvidenceCompleteness(
+        status=status,
+        required_fields=required,
+        present_fields=present,
+        missing_fields=missing,
+        confidence_cap=confidence_cap,
+        note=note,
+    )
+
+
+def _trend_completeness(
+    tf_briefs: List[TrendTimeframeBrief],
+    relative_strength: RelativeStrengthState,
+    expected_timeframes: List[str],
+) -> EvidenceCompleteness:
+    required = (
+        ["timeframes"]
+        + [f"{timeframe}.ma_slopes" for timeframe in expected_timeframes]
+        + [
+            "relative_strength.relative_3m",
+            "relative_strength.relative_6m",
+            "relative_strength.relative_12m",
+        ]
+    )
+    present: list[str] = []
+    if tf_briefs:
+        present.append("timeframes")
+    for timeframe in expected_timeframes:
+        brief = next((item for item in tf_briefs if item.timeframe == timeframe), None)
+        if brief and brief.ma_slopes and any(float(value or 0.0) > 0 for value in brief.ma_values.values()):
+            present.append(f"{timeframe}.ma_slopes")
+    if relative_strength.evidence_completeness.status == "complete":
+        present.extend(
+            [
+                "relative_strength.relative_3m",
+                "relative_strength.relative_6m",
+                "relative_strength.relative_12m",
+            ]
+        )
+
+    missing = [field for field in required if field not in present]
+    status = "complete" if not missing else "partial"
+    confidence_cap = "high" if not missing else "medium" if len(present) >= 3 else "low"
+    note = (
+        "Trend, moving-average slope, and benchmark-relative evidence is complete."
+        if not missing
+        else "Trend evidence is incomplete; cap trend conclusion confidence at "
+        f"{confidence_cap} and state which MA slope or relative-strength fields are missing."
+    )
+    return EvidenceCompleteness(
+        status=status,
+        required_fields=required,
+        present_fields=present,
+        missing_fields=missing,
+        confidence_cap=confidence_cap,
+        note=note,
+    )
 
 TREND_TIMEFRAMES: Dict[str, Dict[str, Tuple[str, int]]] = {
     "position": {
@@ -83,7 +189,11 @@ def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    no_loss = (avg_loss == 0) & (avg_gain > 0)
+    no_gain = (avg_gain == 0) & (avg_loss > 0)
+    flat = (avg_gain == 0) & (avg_loss == 0)
+    return rsi.mask(no_loss, 100.0).mask(no_gain, 0.0).mask(flat, 50.0)
 
 
 def _stoch_rsi(close: pd.Series, period: int = 14, k: int = 3, d: int = 3) -> Tuple[pd.Series, pd.Series]:
@@ -365,9 +475,24 @@ def _fetch_daily(symbol: str, curr_date: str, lookback_days: int) -> pd.DataFram
 def _relative_strength(symbol: str, daily_df: pd.DataFrame, curr_date: str) -> RelativeStrengthState:
     benchmark = _benchmark_for(symbol)
     close = daily_df["close"] if not daily_df.empty else pd.Series(dtype=float)
+    required = [
+        "return_3m",
+        "return_6m",
+        "return_12m",
+        "benchmark_return_3m",
+        "benchmark_return_6m",
+        "benchmark_return_12m",
+    ]
+    present = []
     ret_3m = _pct_return(close, 63)
     ret_6m = _pct_return(close, 126)
     ret_12m = _pct_return(close, 252)
+    if len(close.dropna()) > 63:
+        present.append("return_3m")
+    if len(close.dropna()) > 126:
+        present.append("return_6m")
+    if len(close.dropna()) > 252:
+        present.append("return_12m")
 
     bench_3m = bench_6m = bench_12m = 0.0
     if benchmark:
@@ -376,12 +501,33 @@ def _relative_strength(symbol: str, daily_df: pd.DataFrame, curr_date: str) -> R
         bench_3m = _pct_return(bench_close, 63)
         bench_6m = _pct_return(bench_close, 126)
         bench_12m = _pct_return(bench_close, 252)
+        if len(bench_close.dropna()) > 63:
+            present.append("benchmark_return_3m")
+        if len(bench_close.dropna()) > 126:
+            present.append("benchmark_return_6m")
+        if len(bench_close.dropna()) > 252:
+            present.append("benchmark_return_12m")
+    else:
+        present.extend(["benchmark_return_3m", "benchmark_return_6m", "benchmark_return_12m"])
 
     rel_3m = round(ret_3m - bench_3m, 2)
     rel_6m = round(ret_6m - bench_6m, 2)
     rel_12m = round(ret_12m - bench_12m, 2)
     avg_rel = np.mean([rel_3m, rel_6m, rel_12m])
     rating = "outperforming" if avg_rel > 3 else "underperforming" if avg_rel < -3 else "neutral"
+    missing = [field for field in required if field not in present]
+    completeness = EvidenceCompleteness(
+        status="complete" if not missing else "partial",
+        required_fields=required,
+        present_fields=present,
+        missing_fields=missing,
+        confidence_cap="high" if not missing else "medium" if len(present) >= 4 else "low",
+        note=(
+            "Relative strength has full 3M/6M/12M asset and benchmark returns."
+            if not missing
+            else "Relative strength is incomplete; do not treat zero missing returns as neutral evidence."
+        ),
+    )
     return RelativeStrengthState(
         benchmark=benchmark or "self",
         return_3m=ret_3m,
@@ -394,6 +540,7 @@ def _relative_strength(symbol: str, daily_df: pd.DataFrame, curr_date: str) -> R
         relative_6m=rel_6m,
         relative_12m=rel_12m,
         rating=rating,
+        evidence_completeness=completeness,
     )
 
 
@@ -1057,6 +1204,19 @@ def build_technical_brief(symbol: str, curr_date: str) -> TechnicalBrief:
 
     # Signal summary
     signal = generate_signal_summary(tf_briefs, levels)
+    evidence_completeness = _indicator_completeness(dfs_by_tf, tf_briefs)
+    if (
+        evidence_completeness.confidence_cap == "medium"
+        and signal.confidence == "high"
+    ) or (
+        evidence_completeness.confidence_cap == "low"
+        and signal.confidence in {"high", "medium"}
+    ):
+        signal = SignalSummary(
+            setup=signal.setup,
+            confidence=evidence_completeness.confidence_cap,
+            description=f"{signal.description} Evidence completeness cap: {evidence_completeness.note}",
+        )
     print(f"[TA-BRIEF] Signal: {signal.setup} ({signal.confidence}) -- {signal.description}")
 
     # Raw prices snapshot
@@ -1082,6 +1242,7 @@ def build_technical_brief(symbol: str, curr_date: str) -> TechnicalBrief:
         timeframes=tf_briefs,
         key_levels=levels,
         signal_summary=signal,
+        evidence_completeness=evidence_completeness,
         raw_prices=raw_prices,
         risk_overlays=_risk_overlay_proxies(symbol, daily_df, curr_date) if daily_df is not None else {},
     )
@@ -1182,6 +1343,19 @@ def build_trend_brief(symbol: str, curr_date: str, horizon: str = "position") ->
     }
     holding_period = "1-3 months" if horizon_key == "position" else "3-6 months"
     relative_strength = _relative_strength(symbol, daily_df, curr_date)
+    evidence_completeness = _trend_completeness(
+        tf_briefs,
+        relative_strength,
+        list(TREND_TIMEFRAMES[horizon_key]),
+    )
+    if (
+        evidence_completeness.confidence_cap == "medium"
+        and confidence == "high"
+    ) or (
+        evidence_completeness.confidence_cap == "low"
+        and confidence in {"high", "medium"}
+    ):
+        confidence = evidence_completeness.confidence_cap
     risk_overlays = _risk_overlay_proxies(symbol, daily_df, curr_date)
     risk_overlays.update(
         {
@@ -1216,8 +1390,14 @@ def build_trend_brief(symbol: str, curr_date: str, horizon: str = "position") ->
             notes=(
                 f"{bull_count} bullish, {bear_count} bearish, "
                 f"{len(tf_briefs) - bull_count - bear_count} neutral timeframe(s)."
+                + (
+                    f" Evidence completeness cap: {evidence_completeness.note}"
+                    if evidence_completeness.status != "complete"
+                    else ""
+                )
             ),
         ),
+        evidence_completeness=evidence_completeness,
         raw_prices=raw_prices,
         risk_overlays=risk_overlays,
     )

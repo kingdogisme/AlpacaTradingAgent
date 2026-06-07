@@ -390,6 +390,9 @@ def test_sellthenews_options_data_success(monkeypatch):
                     "Spot Price: $120.00\n"
                     "Selected Expiration: 2026-05-15\n"
                     "Gamma Flip: $118\n\n"
+                    "Call Wall: $125\n"
+                    "Put Wall: $115\n"
+                    "Max Pain: $121\n\n"
                     "--- GAMMA Exposure ---\n"
                     "$positive: 121, 125\n"
                     "$negative: 115, 118\n"
@@ -407,7 +410,7 @@ def test_sellthenews_options_data_success(monkeypatch):
     assert "## SellTheNews Options Positioning" in result
     assert "Selected Expiration: 2026-05-15" in result
     assert "Gamma Flip: $118" in result
-    assert "Data quality: spot, selected expiration, and exposure fields were present." in result
+    assert "Data quality: spot, selected expiration, required levels, and exposure fields were present." in result
     assert client.calls == [
         ("get_options_data", {"ticker": "NVDA", "greeks": "gamma"})
     ]
@@ -478,6 +481,10 @@ def test_sellthenews_options_chain_api_success(monkeypatch):
     assert "Source: SellTheNews options chain API" in result
     assert "Selected Expiration: 2026-05-15" in result
     assert "Gamma Flip: $217.5" in result
+    assert "Required Positioning Levels:" in result
+    assert "- Call Wall: $220" in result
+    assert "- Put Wall: $180" in result
+    assert "- Max Pain: $212.5" in result
     assert "Net GEX: 168.7M" in result
     assert "Positive GEX strikes: $220 (73.3M)" in result
     assert "positive: $220 (150.2K)" in result
@@ -565,4 +572,43 @@ def test_sellthenews_options_sparse_output_is_fallback_labeled(monkeypatch):
     assert "## SellTheNews fallback" in result
     assert "options exposure data was sparse" in result
     assert "SellTheNews Options Positioning" in result
+    assert "required options levels are incomplete" in result
     assert "exposure rows are sparse or empty" in result
+
+
+def test_sellthenews_options_chain_missing_required_levels_is_fallback_labeled(monkeypatch):
+    original_config = config_module.get_config()
+    try:
+        _set_sellthenews_config(
+            original_config,
+            sellthenews_options_enabled=True,
+            sellthenews_options_chain_api_enabled=True,
+        )
+        client = FakeSellTheNewsClient(
+            {
+                "get_options_chain": {
+                    "ok": True,
+                    "ticker": "AVGO",
+                    "expiration_dates": ["2026-05-15"],
+                    "selected_exp": "2026-05-15",
+                    "expiration": {
+                        "spot": 1200,
+                        "gamma_flip": 1190,
+                        "gex_by_strike": {"1200": 1000000},
+                    },
+                }
+            }
+        )
+        monkeypatch.setattr(interface, "_sellthenews_client", lambda _config: client)
+        monkeypatch.setattr(interface, "_alpaca_mid_quote", lambda ticker: 1200.0)
+
+        result = interface.get_sellthenews_options_data("AVGO", "2026-05-12")
+    finally:
+        config_module.set_config(original_config)
+
+    assert "## SellTheNews fallback" in result
+    assert "required options levels are incomplete" in result
+    assert "- Gamma Flip: $1190" in result
+    assert "- Call Wall: unknown" in result
+    assert "- Put Wall: unknown" in result
+    assert "- Max Pain: unknown" in result

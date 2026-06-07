@@ -114,7 +114,7 @@ def test_cron_run_a_list_auto_executes_unless_dry_run(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_ALPHA_DISCOVERY_DB_PATH", str(db_path))
     monkeypatch.setitem(cli_main.DEFAULT_CONFIG, "alpha_discovery_db_path", str(db_path))
 
-    class FakeGraphRunner:
+    class FakeV2Runner:
         def __init__(self, config):
             self.config = config
 
@@ -126,7 +126,7 @@ def test_cron_run_a_list_auto_executes_unless_dry_run(tmp_path, monkeypatch):
             assert config_overrides["episode_ledger_metadata"]["source"] == "alpha_discovery"
             return "run-1", "BUY", "high"
 
-    monkeypatch.setattr(cli_main, "_TradingAgentsGraphRunner", FakeGraphRunner)
+    monkeypatch.setattr(cli_main, "_AtaV2Runner", FakeV2Runner)
 
     ingest = runner.invoke(app, ["ad-ingest", "--file", str(payload_path), "--source", "n8n_watchlist"])
     cron_run = runner.invoke(app, ["cron-run", "--tier", "A", "--max-symbols", "1"])
@@ -140,8 +140,63 @@ def test_cron_run_a_list_auto_executes_unless_dry_run(tmp_path, monkeypatch):
     dry_payload = json.loads(dry_run.stdout)["payload"]
 
     assert cron_payload["execute"] is True
+    assert cron_payload["runner"] == "ata_v2"
     assert cron_payload["run_status_counts"] == {"executed": 1}
     assert dry_payload["execute"] is False
+    assert dry_payload["runner"] == "ata_v2"
+
+
+def test_cron_run_legacy_graph_flag_uses_legacy_runner(tmp_path, monkeypatch):
+    db_path = tmp_path / "ad.sqlite"
+    payload_path = tmp_path / "candidates.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "ticker": "AMD",
+                        "headline": "Inference server demand rising",
+                        "alpha_score": 0.9,
+                        "tier": "A",
+                        "article_url": "https://example.com/amd",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TRADINGAGENTS_ALPHA_DISCOVERY_DB_PATH", str(db_path))
+    monkeypatch.setitem(cli_main.DEFAULT_CONFIG, "alpha_discovery_db_path", str(db_path))
+
+    used = {"legacy": False}
+
+    class FakeGraphRunner:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, ticker, trade_date, analysts, config_overrides=None):
+            used["legacy"] = True
+            return "run-legacy", "BUY", "medium", "plan-legacy"
+
+    class FailV2Runner:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, *args, **kwargs):
+            raise AssertionError("cron-run --legacy-graph must not use V2 runner")
+
+    monkeypatch.setattr(cli_main, "_TradingAgentsGraphRunner", FakeGraphRunner)
+    monkeypatch.setattr(cli_main, "_AtaV2Runner", FailV2Runner)
+
+    ingest = runner.invoke(app, ["ad-ingest", "--file", str(payload_path), "--source", "n8n_watchlist"])
+    cron_run = runner.invoke(app, ["cron-run", "--tier", "A", "--max-symbols", "1", "--legacy-graph"])
+
+    assert ingest.exit_code == 0
+    assert cron_run.exit_code == 0
+    assert used["legacy"] is True
+    cron_payload = json.loads(cron_run.stdout)["payload"]
+    assert cron_payload["runner"] == "legacy_graph"
+    assert cron_payload["run_status_counts"] == {"executed": 1}
 
 
 def _future(days=1):
